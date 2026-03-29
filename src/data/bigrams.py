@@ -1,23 +1,23 @@
 """
 Character + Bigram Vocabulary System.
 
-Each script adapter uses a vocabulary of individual characters plus the
-~150 most common character pairs (bigrams) for that script. This gives
-~30% fewer decode steps than pure character-level, with zero added complexity.
+Vocabulary structure:
+  Base (always present, every adapter inherits this):
+    [0]: blank (RNN-T)
+    [1..95]: all printable ASCII (keyboard characters)
 
-Why bigrams, not BPE:
-  - 2-char tokens max — error granularity is at most 2 characters
-  - No tokenizer training library needed — just count character pair frequencies
-  - No ambiguity — greedy left-to-right matching always gives the same result
-  - Adding a new script takes minutes — count bigrams from any word list
-  - ~400 total tokens — barely larger than pure character-level (~250)
-  - RNN-T GRU handles longer patterns dynamically
+  Per-adapter extension:
+    [96..N]: script-specific characters (Devanagari, Tamil, etc.)
+    [N+1..end]: bigrams (75 Latin base + script-specific)
 
-Vocabulary layout:
-  [0]: blank (RNN-T)
-  [1..N_chars]: individual characters (Latin + regional script)
-  [N_chars+1..N_chars+N_bigrams]: top bigrams for this script
-  Total: ~400 tokens
+The base English/Latin vocabulary is NOT an adapter — it's the foundation.
+Adapters add script-specific characters and bigrams on top.
+
+Bigrams are curated from linguistic frequency data (Gutenberg corpus,
+560K words), not derived from training data. This avoids baking
+training distribution bias into the vocabulary.
+
+No digit-digit bigrams — numbers stay character-level.
 """
 
 import json
@@ -27,11 +27,28 @@ from pathlib import Path
 
 BLANK_TOKEN = "\u2205"  # ∅ blank for RNN-T
 
-# Latin character set: always present in every vocabulary
-LATIN_CHARS = list("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
-PUNCTUATION = list(".,;:!?'\"()-/&@#$%+= ")
+# Base character set: all printable ASCII (32-126).
+# This is the foundation every adapter inherits.
+# 95 characters: 26 lower + 26 upper + 10 digits + 1 space + 32 symbols
+BASE_CHARS = [chr(i) for i in range(32, 127)]
 
-# Script character ranges
+# Top 75 Latin-script bigrams by frequency.
+# Source: case-sensitive bigram counts from 560K words of English literature
+# (Gutenberg: Pride & Prejudice, Alice in Wonderland, Frankenstein,
+# Sherlock Holmes, Moby Dick). No digit-digit pairs.
+# These cover 51% compression on English text (half the decode steps).
+LATIN_BIGRAMS = [
+    "th", "he", "in", "er", "an", "re", "nd", "ha", "at", "ou",
+    "ed", "on", "en", "ng", "hi", "is", "to", "it", "es", "as",
+    "or", "ar", "te", "st", "of", "le", "ve", "se", "ea", "me",
+    "al", "ne", "nt", "ll", "ti", "de", "be", "li", "wh", "wa",
+    "no", "ho", "ro", "ur", "co", "el", "ce", "sh", "ch", "ee",
+    "ri", "om", "ut", "wi", "ow", "ly", "ma", "ad", "ot", "fo",
+    "et", "so", "il", "ai", "us", "ra", "la", "pe", "si", "ic",
+    "we", "lo", "ta", "un", "io",
+]
+
+# Script-specific character ranges (added on top of BASE_CHARS per adapter)
 DEVANAGARI_CHARS = [chr(c) for c in range(0x0900, 0x0980) if chr(c).strip()]
 TAMIL_CHARS = [chr(c) for c in range(0x0B80, 0x0C00) if chr(c).strip()]
 TELUGU_CHARS = [chr(c) for c in range(0x0C00, 0x0C80) if chr(c).strip()]
@@ -44,31 +61,8 @@ MALAYALAM_CHARS = [chr(c) for c in range(0x0D00, 0x0D80) if chr(c).strip()]
 URDU_CHARS = [chr(c) for c in range(0x0600, 0x0700) if chr(c).strip()]
 URDU_CHARS += [chr(c) for c in range(0xFB50, 0xFE00) if chr(c).strip()]
 
-# Pre-curated bigram lists per script family.
-# Latin bigrams: weighted blend of English (60%), Spanish (15%), French (8%),
-# German (5%), Portuguese (5%), Italian (3%) character pair frequencies.
-# Source: practicalcryptography.com Wortschatz corpus + sttmedia.com.
-# No digit-digit bigrams. All lowercase (case-insensitive matching in tokenizer).
-CURATED_BIGRAMS: dict[str, list[str]] = {
-    "latin": [
-        "er", "th", "in", "es", "en", "he", "an", "re", "on", "nt",
-        "de", "st", "te", "ar", "al", "to", "or", "nd", "ti", "ra",
-        "as", "el", "se", "le", "at", "la", "co", "ed", "ta", "ne",
-        "ri", "it", "is", "sa", "ea", "ng", "ro", "me", "et", "ha",
-        "ec", "si", "na", "ou", "ve", "of", "hi", "li", "ll", "so",
-        "os", "ue", "ad", "un", "qu", "io", "do", "pa", "da", "ma",
-        "ca", "ci", "ch", "ia", "ac", "em", "ic", "no", "ie", "lo",
-        "ns", "od", "ei", "au", "di", "il", "tr", "ss", "ur", "ge",
-        "ai", "be", "ce", "eu", "po", "am", "om", "sc", "rd", "tt",
-        "pe", "rs", "rt", "ol", "ni",
-    ],
-    # Hindi/Devanagari bigrams will be added when we have frequency data
-    # Tamil, Telugu, etc. — same approach, from linguistic frequency tables
-}
-
-
 SCRIPT_CHARSETS: dict[str, list[str]] = {
-    "en": [],
+    "en": [],  # English uses BASE_CHARS only
     "hi": DEVANAGARI_CHARS,
     "ta": TAMIL_CHARS,
     "te": TELUGU_CHARS,
@@ -81,13 +75,22 @@ SCRIPT_CHARSETS: dict[str, list[str]] = {
     "ur": URDU_CHARS,
 }
 
+# Curated bigrams per script family.
+# Latin: from Gutenberg English corpus (top 75).
+# Indic scripts: to be added from linguistic frequency data.
+CURATED_BIGRAMS: dict[str, list[str]] = {
+    "latin": LATIN_BIGRAMS,
+}
+
 
 def build_bigram_vocab(
     word_lists: list[str | Path],
     script_chars: set[str],
-    max_bigrams: int = 150,
+    max_bigrams: int = 75,
 ) -> list[str]:
     """Count character bigrams across word lists, keep top N.
+
+    No digit-digit bigrams — numbers stay character-level.
 
     Args:
         word_lists: Paths to text files, one word per line.
@@ -109,8 +112,6 @@ def build_bigram_vocab(
                 word = line.strip()
                 for i in range(len(word) - 1):
                     bigram = word[i : i + 2]
-                    # Skip digit-digit bigrams — numbers should stay
-                    # character-level (each digit is its own token)
                     if bigram[0] in digits and bigram[1] in digits:
                         continue
                     if bigram[0] in script_chars and bigram[1] in script_chars:
@@ -123,7 +124,6 @@ def tokenize(word: str, bigram_set: set[str]) -> list[str]:
     """Greedy left-to-right tokenization.
 
     Try to match bigram first, fall back to single character.
-    No ambiguity, no merge rules, no edge cases.
     """
     tokens: list[str] = []
     i = 0
@@ -145,23 +145,16 @@ def detokenize(tokens: list[str]) -> str:
 class LipiTokenizer:
     """Character + bigram tokenizer for Lipi OCR.
 
-    Vocabulary:
+    Base vocabulary (always present):
       [0]: blank (RNN-T)
-      [1..N]: individual characters (Latin + punctuation + script-specific)
-      [N+1..N+M]: top bigrams for this script
+      [1..95]: printable ASCII
 
-    Zero OOV by construction — every character is an atomic token.
-    Bigrams are an acceleration layer; fallback is always char-by-char.
+    Adapters extend with:
+      [96..N]: script-specific characters
+      [N+1..end]: curated bigrams
     """
 
     def __init__(self, vocab: list[str], bigrams: set[str] | None = None):
-        """
-        Args:
-            vocab: Ordered list of token strings. Index = token ID.
-                   vocab[0] must be the blank token.
-            bigrams: Set of bigram strings for greedy tokenization.
-                     If None, extracted from vocab (tokens of length 2).
-        """
         self._vocab = vocab
         self._token_to_id = {t: i for i, t in enumerate(vocab)}
 
@@ -183,34 +176,16 @@ class LipiTokenizer:
         return 0
 
     def encode(self, text: str) -> list[int]:
-        """Encode text to token IDs.
-
-        Uses greedy left-to-right bigram matching.
-        Falls back to character-level for unmatched chars.
-
-        Args:
-            text: Input string.
-
-        Returns:
-            List of token IDs (no blank tokens).
-        """
+        """Encode text to token IDs using greedy bigram matching."""
         tokens = tokenize(text, self._bigrams)
         ids = []
         for t in tokens:
             if t in self._token_to_id:
                 ids.append(self._token_to_id[t])
-            # else: skip unknown chars (shouldn't happen if vocab covers the script)
         return ids
 
     def decode(self, ids: list[int]) -> str:
-        """Decode token IDs to text.
-
-        Args:
-            ids: List of token IDs. Blank tokens (ID 0) are skipped.
-
-        Returns:
-            Decoded string.
-        """
+        """Decode token IDs to text. Blank tokens (ID 0) are skipped."""
         return "".join(
             self._vocab[i]
             for i in ids
@@ -236,23 +211,16 @@ class LipiTokenizer:
         cls,
         script_id: str,
         word_lists: list[str | Path] | None = None,
-        max_bigrams: int = 150,
+        max_bigrams: int = 75,
     ) -> "LipiTokenizer":
-        """Build a character + bigram vocabulary for a script.
+        """Build vocabulary from base + script chars + counted bigrams.
 
-        Args:
-            script_id: Script identifier (e.g., 'en', 'hi', 'ta').
-            word_lists: Paths to word list files for bigram counting.
-                        If None, builds character-level only (no bigrams).
-            max_bigrams: Maximum number of bigrams to include.
-
-        Returns:
-            LipiTokenizer instance.
+        For building bigrams from custom word lists (e.g., training data).
+        For production, prefer build_with_curated_bigrams().
         """
         script_chars = SCRIPT_CHARSETS.get(script_id, [])
-        all_chars = LATIN_CHARS + PUNCTUATION + script_chars
+        all_chars = BASE_CHARS + script_chars
 
-        # Deduplicate while preserving order
         seen: set[str] = set()
         unique_chars: list[str] = []
         for c in all_chars:
@@ -260,21 +228,18 @@ class LipiTokenizer:
                 seen.add(c)
                 unique_chars.append(c)
 
-        # Build bigrams from word lists
         bigram_list: list[str] = []
         if word_lists:
             valid_chars = set(unique_chars)
             bigram_list = build_bigram_vocab(word_lists, valid_chars, max_bigrams)
 
-        # Assemble vocab: blank + chars + bigrams
         vocab = [BLANK_TOKEN] + unique_chars + bigram_list
-
         bigram_set = set(bigram_list)
         return cls(vocab=vocab, bigrams=bigram_set)
 
     @classmethod
     def build_character_level(cls, script_id: str) -> "LipiTokenizer":
-        """Build a character-level vocabulary (no bigrams).
+        """Build character-level vocabulary (no bigrams).
 
         Useful for Phase 1 CTC training and as a baseline.
         """
@@ -285,20 +250,13 @@ class LipiTokenizer:
         """Build vocabulary using pre-curated bigram lists.
 
         Uses linguistically-derived bigram frequency data rather than
-        counting from a training corpus. This avoids baking training
-        data bias into the vocabulary.
+        counting from a training corpus.
 
-        For Latin-script languages (en), uses a weighted blend of
-        English/Spanish/French/German/Portuguese/Italian frequencies.
-
-        Args:
-            script_id: Script identifier.
-
-        Returns:
-            LipiTokenizer with curated bigrams.
+        Latin adapter: 95 ASCII chars + 75 curated bigrams = 171 tokens.
+        Other adapters: 95 ASCII + script chars + curated bigrams.
         """
         script_chars = SCRIPT_CHARSETS.get(script_id, [])
-        all_chars = LATIN_CHARS + PUNCTUATION + script_chars
+        all_chars = BASE_CHARS + script_chars
 
         seen: set[str] = set()
         unique_chars: list[str] = []
@@ -307,14 +265,13 @@ class LipiTokenizer:
                 seen.add(c)
                 unique_chars.append(c)
 
-        # Select curated bigrams for this script
+        # Select curated bigrams
         if script_id in ("en",) or not script_chars:
-            # Latin-script language → use Latin curated bigrams
             bigram_list = list(CURATED_BIGRAMS.get("latin", []))
         else:
-            # Non-Latin script → use script-specific curated bigrams if available,
-            # otherwise fall back to empty (character-level only for now)
-            bigram_list = list(CURATED_BIGRAMS.get(script_id, []))
+            # Non-Latin: use Latin bigrams as base + script-specific if available
+            bigram_list = list(CURATED_BIGRAMS.get("latin", []))
+            bigram_list += list(CURATED_BIGRAMS.get(script_id, []))
 
         vocab = [BLANK_TOKEN] + unique_chars + bigram_list
         bigram_set = set(bigram_list)

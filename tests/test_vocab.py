@@ -7,8 +7,8 @@ import tempfile
 from pathlib import Path
 
 from src.data.bigrams import (
-    LipiTokenizer, LATIN_CHARS, PUNCTUATION, BLANK_TOKEN,
-    DEVANAGARI_CHARS, SCRIPT_CHARSETS,
+    LipiTokenizer, BASE_CHARS, BLANK_TOKEN,
+    DEVANAGARI_CHARS, SCRIPT_CHARSETS, LATIN_BIGRAMS,
     build_bigram_vocab, tokenize, detokenize,
 )
 
@@ -29,20 +29,16 @@ class TestCharacterLevel:
         assert eng_tok.blank_id == 0
         assert eng_tok.vocab[0] == BLANK_TOKEN
 
-    def test_vocab_contains_all_latin(self, eng_tok):
-        for char in LATIN_CHARS:
-            assert char in eng_tok.vocab, f"Missing Latin char: {char}"
-
-    def test_vocab_contains_punctuation(self, eng_tok):
-        for char in PUNCTUATION:
-            assert char in eng_tok.vocab, f"Missing punctuation: {char}"
+    def test_vocab_contains_all_base_chars(self, eng_tok):
+        for char in BASE_CHARS:
+            assert char in eng_tok.vocab, f"Missing base char: {repr(char)}"
 
     def test_hindi_contains_devanagari(self, hindi_tok):
         for char in DEVANAGARI_CHARS[:20]:
             assert char in hindi_tok.vocab, f"Missing Devanagari char: {char}"
 
-    def test_hindi_contains_latin(self, hindi_tok):
-        for char in LATIN_CHARS[:10]:
+    def test_hindi_contains_base_chars(self, hindi_tok):
+        for char in BASE_CHARS[:10]:
             assert char in hindi_tok.vocab
 
     def test_no_bigrams_in_char_level(self, eng_tok):
@@ -123,7 +119,7 @@ class TestBigramTokenizer:
 
         try:
             bigrams = build_bigram_vocab(
-                [path], set(LATIN_CHARS + PUNCTUATION), max_bigrams=10
+                [path], set(BASE_CHARS), max_bigrams=10
             )
             assert "th" in bigrams  # should be top bigram
             assert len(bigrams) <= 10
@@ -161,8 +157,10 @@ class TestCuratedBigrams:
 
     def test_curated_builds(self):
         tok = LipiTokenizer.build_with_curated_bigrams("en")
-        assert tok.vocab_size > 83  # more than just chars
+        assert tok.vocab_size > 95  # more than just base chars
         assert tok.vocab_size < 250  # reasonable upper bound
+        # Should be 1 blank + 95 ASCII + 75 bigrams = 171
+        assert tok.vocab_size == 171
 
     def test_curated_roundtrips(self):
         tok = LipiTokenizer.build_with_curated_bigrams("en")

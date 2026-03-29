@@ -241,24 +241,11 @@ def main():
         train_dataset = train_full
     print(f"  Training data: {len(train_dataset)} samples")
 
-    # Build word list from training data for bigram counting
-    print("  Scanning labels for bigram vocabulary...")
-    import tempfile
-    word_list_path = tempfile.mktemp(suffix=".txt")
-    sample_size = min(100000, len(train_dataset))
-    with open(word_list_path, "w") as f:
-        sample_indices = random.sample(range(len(train_dataset)), sample_size)
-        for idx in sample_indices:
-            _, label = train_dataset[idx]
-            if label:
-                f.write(label + "\n")
-
     # Build tokenizers
+    # Character: 95 ASCII + blank = 96 tokens
+    # Bigram: 95 ASCII + 75 curated bigrams + blank = 171 tokens
     char_tokenizer = LipiTokenizer.build_character_level("en")
-    bigram_tokenizer = LipiTokenizer.build_for_script(
-        "en", word_lists=[word_list_path], max_bigrams=150,
-    )
-    Path(word_list_path).unlink()
+    bigram_tokenizer = LipiTokenizer.build_with_curated_bigrams("en")
 
     print(f"  Character vocab: {char_tokenizer.vocab_size} tokens")
     print(f"  Bigram vocab: {bigram_tokenizer.vocab_size} tokens")
