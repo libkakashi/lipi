@@ -115,11 +115,13 @@ class PARSeqLMDB(Dataset):
     def __len__(self) -> int:
         return len(self._valid_indices)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, str]:
-        # Fast path: raw bytes in RAM, return undecoded tensor for GPU decode
+    def __getitem__(self, idx: int) -> tuple[np.ndarray, str]:
+        # Fast path: raw bytes in RAM, decode with PIL per-worker
         if self._raw_cache is not None:
             img_bytes, label = self._raw_cache[self._valid_indices[idx]]
-            return torch.frombuffer(bytearray(img_bytes), dtype=torch.uint8), label
+            img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+            crop = preprocess_crop(img, self.target_height, self.max_width)
+            return crop, label
 
         # Slow path: read from LMDB on the fly
         real_idx = self._valid_indices[idx]
@@ -136,12 +138,14 @@ class PARSeqLMDB(Dataset):
 
             if img_bytes is None:
                 blank = np.zeros((3, self.target_height, 32), dtype=np.float32)
-                return torch.from_numpy(blank), ""
+                return blank, ""
 
             label_bytes = txn.get(lbl_key)
             label = label_bytes.decode("utf-8") if label_bytes else ""
 
-        return torch.frombuffer(bytearray(img_bytes), dtype=torch.uint8), label
+        img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+        crop = preprocess_crop(img, self.target_height, self.max_width)
+        return crop, label
 
     def close(self):
         self.env.close()

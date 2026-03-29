@@ -219,8 +219,8 @@ def main():
     optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=0.01)
 
     train_loader = DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collate_raw,
-        drop_last=True, num_workers=8, persistent_workers=True,
+        train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collate_ocr,
+        drop_last=True, num_workers=16, pin_memory=True, persistent_workers=True,
     )
 
     # LR scheduler
@@ -252,13 +252,8 @@ def main():
         n_batches = 0
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}")
-        for raw_bytes, raw_labels in pbar:
-            # GPU decode
-            batch_imgs, batch_labels, widths = gpu_decode_batch(
-                raw_bytes, raw_labels, device=device
-            )
-            if batch_imgs is None:
-                continue
+        for batch_imgs, batch_labels, widths in pbar:
+            batch_imgs = batch_imgs.to(device, non_blocking=True)
 
             target_ids = [tokenizer.encode(l) for l in batch_labels]
             target_lengths = torch.tensor(
