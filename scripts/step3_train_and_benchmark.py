@@ -176,12 +176,6 @@ def main():
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
     amp_dtype = torch.bfloat16 if use_amp and torch.cuda.is_bf16_supported() else torch.float16
 
-    # Pre-training eval
-    print(f"\n{'='*60}")
-    print("PRE-TRAINING EVALUATION (random weights)")
-    print(f"{'='*60}")
-    evaluate(encoder, ctc_head, tokenizer, args.test_dir, device)
-
     # Training
     print(f"\n{'='*60}")
     print(f"TRAINING: {args.epochs} epochs, lr={args.lr}, batch={args.batch_size}")
