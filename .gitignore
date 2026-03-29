@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Training artifacts
+checkpoints/
+wandb/
+runs/
+*.pt
+*.pth
+*.ckpt
+
+# Data (generated, not committed)
+training_data/datasets/
+training_data/vocabs/
+training_data/pdfs/
+training_data/word_lists/*.txt
+!training_data/word_lists/.gitkeep
+
+# ONNX models (exported, not committed)
+models/
+
+# LMDB databases
+*.mdb
+lock.mdb
+
+# Logs
+*.log
+
+# Temp
+tmp/
+*.tmp
+
+# Claude
+.claude/

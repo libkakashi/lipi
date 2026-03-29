@@ -1,0 +1,23 @@
+# Micro-LID Script Classifier Configuration
+# ~4.5K parameters
+
+architecture: micro_cnn
+num_scripts: 11
+
+scripts:
+  0: {id: en, name: "Latin (English)"}
+  1: {id: hi, name: "Devanagari (Hindi, Marathi, Sanskrit, Nepali)"}
+  2: {id: ta, name: "Tamil"}
+  3: {id: te, name: "Telugu"}
+  4: {id: kn, name: "Kannada"}
+  5: {id: bn_as, name: "Eastern Nagari (Bengali, Assamese)"}
+  6: {id: or, name: "Odia"}
+  7: {id: gu, name: "Gujarati"}
+  8: {id: pa, name: "Gurmukhi (Punjabi)"}
+  9: {id: ml, name: "Malayalam"}
+  10: {id: ur, name: "Urdu (Nastaliq Perso-Arabic)"}
+
+input:
+  height: 32
+  channels: 3
+  # Width is variable — AdaptiveAvgPool handles it

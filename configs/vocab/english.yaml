@@ -1,0 +1,12 @@
+# English Character + Bigram Vocabulary Configuration
+script_id: en
+max_bigrams: 150
+# Total tokens: ~83 chars + 150 bigrams + blank ≈ 234
+
+# Vocabulary structure:
+#   [0]: blank (RNN-T)
+#   [1-83]: Latin chars (a-z, A-Z, 0-9, punctuation, space)
+#   [84-233]: Top 150 English bigrams (th, he, in, er, an, ...)
+
+word_list: training_data/word_lists/english_100k.txt
+output: training_data/vocabs/en.json

@@ -1,0 +1,39 @@
+[project]
+name = "lipi-ocr"
+version = "1.0.0"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.2.0",
+    "torchvision>=0.17.0",
+    "torchaudio>=2.2.0",
+    "lightning>=2.2.0",
+    "lmdb>=1.4.0",
+    "pillow>=10.0.0",
+    "numpy>=1.24.0",
+    "pyyaml>=6.0",
+    "tqdm>=4.65.0",
+    "onnx>=1.15.0",
+    "onnxruntime>=1.17.0",
+    "peft>=0.10.0",
+]
+
+[project.optional-dependencies]
+train = ["wandb>=0.16.0", "timm>=0.9.0"]
+synth = ["trdg>=1.8.0"]
+distill = ["transformers>=4.40.0", "accelerate>=0.27.0"]
+pdf = ["pymupdf>=1.24.0"]
+export = ["olive-ai>=0.8.0"]
+tensorrt = ["nvidia-modelopt>=0.20.0"]
+dev = ["pytest>=8.0.0", "pytest-timeout>=2.2.0"]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"

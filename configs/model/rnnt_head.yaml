@@ -1,0 +1,24 @@
+# RNN-T Head Configuration (per-language template)
+# Total per language: ~1.0M params
+
+prediction_network:
+  vocab_size: 401       # ~250 chars + ~150 bigrams + blank
+  embed_dim: 128
+  hidden_dim: 128
+  num_layers: 1
+  cell_type: gru
+  # Quantization: FP8 (E4M3), NOT NVFP4
+  # GRU gating mechanisms too coarse at 4-bit
+
+joint_network:
+  enc_dim: 384          # Must match backbone output_dim
+  pred_dim: 128         # Must match prediction_network.hidden_dim
+  joint_dim: 256
+  vocab_size: 401       # Must match prediction_network.vocab_size
+  activation: gelu
+
+decoding:
+  blank_id: 0
+  max_tokens_per_word: 25
+  greedy: true
+  # beam_width: 5      # Enable for beam search (future)

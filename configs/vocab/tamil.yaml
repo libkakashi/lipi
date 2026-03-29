@@ -1,0 +1,9 @@
+# Tamil Character + Bigram Vocabulary Configuration
+script_id: ta
+max_bigrams: 150
+# Total tokens: ~83 Latin + ~72 Tamil + 150 bigrams + blank ≈ 306
+
+word_lists:
+  - training_data/word_lists/english_100k.txt
+  - training_data/word_lists/tamil_legal.txt
+output: training_data/vocabs/ta.json

@@ -1,0 +1,10 @@
+# Template for new language character + bigram vocabulary
+# Copy this file and modify for each new language
+
+script_id: CHANGEME       # e.g., te, kn, bn_as, gu, or, pa, ml, ur
+max_bigrams: 150           # Top 150 character pairs from word lists
+
+word_lists:
+  - training_data/word_lists/english_100k.txt
+  - training_data/word_lists/CHANGEME_legal.txt
+output: training_data/vocabs/CHANGEME.json
