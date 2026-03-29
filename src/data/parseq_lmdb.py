@@ -59,16 +59,21 @@ class PARSeqLMDB(Dataset):
         self._valid_indices = list(range(self.num_samples))
         self._cache: list[tuple[np.ndarray, str]] | None = None
 
-    def preload(self, max_samples: int | None = None):
-        """Preload all images into RAM. Call once before training.
+    def preload(self, max_samples: int | None = None, num_workers: int = 16):
+        """Preload all images into RAM using parallel decoding.
 
-        Decodes all images upfront so training has zero I/O overhead.
-        3M images at ~5KB each ≈ 15GB RAM.
+        Reads raw bytes from LMDB (fast, sequential), then decodes
+        images in parallel across multiple processes.
         """
-        n = min(max_samples or len(self), len(self))
-        print(f"Preloading {n} images into RAM...")
-        self._cache = []
+        import multiprocessing as mp
+        from functools import partial
 
+        n = min(max_samples or len(self), len(self))
+        print(f"Preloading {n} images into RAM ({num_workers} workers)...")
+
+        # Step 1: Read raw bytes from LMDB (sequential, fast)
+        print("  Reading raw bytes from LMDB...")
+        raw_data: list[tuple[bytes, str]] = []
         with self.env.begin(write=False) as txn:
             for i in range(n):
                 real_idx = self._valid_indices[i]
@@ -87,16 +92,28 @@ class PARSeqLMDB(Dataset):
 
                 label_bytes = txn.get(lbl_key)
                 label = label_bytes.decode("utf-8") if label_bytes else ""
+                raw_data.append((bytes(img_bytes), label))
 
-                img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-                crop = preprocess_crop(img, self.target_height, self.max_width)
-                self._cache.append((crop, label))
+                if (i + 1) % 500000 == 0:
+                    print(f"    {i+1}/{n} read...")
 
-                if (i + 1) % 100000 == 0:
-                    print(f"  {i+1}/{n} loaded...")
+        print(f"  Read {len(raw_data)} samples. Decoding images...")
+
+        # Step 2: Decode images in parallel
+        target_h = self.target_height
+        max_w = self.max_width
+
+        def _decode_one(item: tuple[bytes, str]) -> tuple[np.ndarray, str]:
+            img_bytes, label = item
+            img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+            crop = preprocess_crop(img, target_h, max_w)
+            return (crop, label)
+
+        with mp.Pool(num_workers) as pool:
+            self._cache = pool.map(_decode_one, raw_data, chunksize=1000)
 
         self._valid_indices = list(range(len(self._cache)))
-        print(f"Preloaded {len(self._cache)} images into RAM")
+        print(f"  Preloaded {len(self._cache)} images into RAM")
 
     def __len__(self) -> int:
         return len(self._valid_indices)
