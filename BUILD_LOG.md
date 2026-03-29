@@ -394,11 +394,89 @@ tests/
   test_encoder.py, test_rnnt.py, test_lora.py, test_lid.py, test_onnx.py, test_vocab.py
 ```
 
-### Next: Real Data Validation Sequence
-1. [IN PROGRESS] Download PARSeq LMDB data (MJSynth + eval benchmarks)
-2. Step 2: Overfit test with 100 real IIIT5K crops (~$0.50)
-3. Step 3: Train 12.5M backbone on 1M MJSynth, eval on benchmarks (~$3-4)
-4. Step 4: Bigram vs character comparison (~$2-3)
+---
+
+## Real Data Validation (RTX 5080 Blackwell, 2026-03-29)
+
+### Step 2: Overfit on 100 Real IIIT5K Crops — PASS
+- 100 real word crops from IIIT5K benchmark
+- 1500 steps, SGD lr=0.01, batch_size=32, bf16 AMP
+- **100/100 accuracy (100.0%) in 191 seconds**
+- Loss: 41.6 → 0.0007
+- By step 500: 32/32 batch accuracy, loss < 0.01
+- **Conclusion: full training pipeline works end-to-end on GPU with real data**
+
+### Step 3: Train Backbone on 1M MJSynth — IN PROGRESS
+- 12.5M param backbone, 1M MJSynth crops, 3 epochs, AdamW lr=7e-4, batch=256, bf16
+- Training speed: 4.34 it/s (~15 min/epoch)
+- Epoch 1 (15 min): avg_loss=0.897
+
+Epoch 1 benchmark results:
+| Benchmark | Accuracy | Target (min) |
+|-----------|----------|-------------|
+| IIIT5k | 56.2% | >82% |
+| IC13_1015 | 63.4% | >88% |
+| IC15_2077 | 29.0% | >65% |
+| SVT | 56.3% | — |
+| SVTP | 32.2% | — |
+| CUTE80 | 30.6% | — |
+
+Awaiting epoch 2 and 3 results.
+
+### Bigram Vocabulary Analysis
+
+**Initial approach (weighted multilingual blend):** Blended character pair frequencies
+from 6 Latin-script languages (EN 60%, ES 15%, FR 8%, DE 5%, PT 5%, IT 3%) using
+practicalcryptography.com Wortschatz corpus. Produced 95 bigrams.
+
+**Problem found:** The blend only used top-50 bigrams per language from the source data.
+High-frequency English-specific bigrams like "wh" (rank 37 in English, 11K occurrences
+in Gutenberg) were pushed below the cutoff because they don't exist in other languages.
+Meanwhile, mediocre cross-language bigrams ranked higher.
+
+**Solution:** Switched to direct frequency counting from 560K real English words
+(5 Gutenberg books: Pride & Prejudice, Alice in Wonderland, Frankenstein,
+Sherlock Holmes, Moby Dick). Case-sensitive counting, no digit-digit pairs.
+
+**Key findings:**
+
+1. **Diminishing returns analysis:**
+   | Bigrams | Compression | Last bigram adds |
+   |---------|------------|-----------------|
+   | Top 25 | 29.2% | 0.74% |
+   | Top 50 | 42.3% | 0.41% |
+   | Top 75 | 51.0% | 0.30% |
+   | Top 100 | 57.5% | 0.23% |
+   | Top 150 | 65.9% | 0.12% |
+
+   **Decision: 75 bigrams.** 51% compression (half the decode steps) with
+   each additional bigram still adding ≥0.3%. After 75, marginal value drops sharply.
+
+2. **Capitalized bigrams:** Only "Th" (rank 128, 3879 occurrences) makes the
+   case-sensitive top 200. Not worth the vocab slot — "The" tokenizes as "T"+"he".
+
+3. **No digit-digit bigrams:** Numbers stay character-level. "12345" = 5 tokens always.
+
+4. **Non-English coverage:** The English top-150 naturally includes bigrams common
+   in other Latin-script languages: "qu" (#145), "os" (#113), "ei" (#136).
+   7 non-English bigrams missing (ue, ia, ci, au, sc, eu, ao) — rare enough
+   to skip for now. Can add to adapter-specific extensions later.
+
+**Final Latin base vocabulary: 171 tokens**
+- blank (1) + printable ASCII (95) + 75 curated bigrams
+
+**Base character set:** All printable ASCII (32-126) = 95 characters.
+This replaces the old hand-picked 82-char set (62 alphanumeric + 20 punctuation).
+Every keyboard character is now covered: `[`, `\`, `{`, `|`, `~`, `^`, `_`, `*`, etc.
+
+The base is NOT an adapter — it's the foundation all adapters inherit.
+Per-script adapters add their Unicode characters + script-specific bigrams on top.
+
+### Validation Sequence Status
+1. [DONE] Download PARSeq LMDB data (MJSynth + eval benchmarks)
+2. [DONE] Step 2: Overfit 100 real crops — **100% PASS**
+3. [RUNNING] Step 3: Train backbone on 1M MJSynth (~$3-4)
+4. [READY] Step 4: Bigram vs character comparison
 5. Step 5: Full backbone training (~$40-60)
 6. Step 6: First Hindi adapter (~$16-24)
 
