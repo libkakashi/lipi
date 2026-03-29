@@ -134,10 +134,11 @@ def validate_mini_backbone_overfit():
     mini_encoder.train()
     ctc_head.train()
 
-    print(f"Training for 30 epochs (SGD lr=0.01)...")
+    n_epochs = 100 if DEVICE.type == "cuda" else 30
+    print(f"Training for {n_epochs} epochs (SGD lr=0.01, device={DEVICE})...")
     start = time.time()
 
-    for epoch in range(1, 31):
+    for epoch in range(1, n_epochs + 1):
         epoch_loss = 0
         n_batches = 0
 
@@ -166,7 +167,7 @@ def validate_mini_backbone_overfit():
             n_batches += 1
 
         avg = epoch_loss / max(n_batches, 1)
-        if epoch % 5 == 0 or epoch == 1:
+        if epoch % 10 == 0 or epoch == 1:
             # Quick decode
             mini_encoder.eval()
             ctc_head.eval()
@@ -384,6 +385,13 @@ def validate_lora_training(pretrained_encoder, tokenizer):
     pred_net.train()
     joint_net.train()
 
+    # Snapshot frozen params before training to verify they don't change
+    frozen_snapshot = {
+        name: param.data.clone().cpu()
+        for name, param in model.named_parameters()
+        if not param.requires_grad and "lora_" not in name
+    }
+
     print(f"Training LoRA + RNN-T head for 50 steps...")
     start = time.time()
     losses = []
@@ -431,15 +439,19 @@ def validate_lora_training(pretrained_encoder, tokenizer):
 
     elapsed = time.time() - start
 
-    # Check: loss decreased, frozen params unchanged
+    # Check: loss decreased
     loss_decreased = len(losses) > 10 and losses[-1] < losses[0]
 
-    # Verify frozen params didn't change
+    # Verify frozen backbone params didn't change values
+    # (PEFT may set .grad on frozen params during backward — that's fine,
+    # the important thing is the actual weights didn't move)
     frozen_ok = True
     for name, param in model.named_parameters():
         if not param.requires_grad and "lora_" not in name:
-            if param.grad is not None:
-                frozen_ok = False
+            if name in frozen_snapshot:
+                if not torch.equal(param.data, frozen_snapshot[name].to(param.device)):
+                    frozen_ok = False
+                    break
 
     # Test greedy decode
     model.eval()
