@@ -44,6 +44,29 @@ MALAYALAM_CHARS = [chr(c) for c in range(0x0D00, 0x0D80) if chr(c).strip()]
 URDU_CHARS = [chr(c) for c in range(0x0600, 0x0700) if chr(c).strip()]
 URDU_CHARS += [chr(c) for c in range(0xFB50, 0xFE00) if chr(c).strip()]
 
+# Pre-curated bigram lists per script family.
+# Latin bigrams: weighted blend of English (60%), Spanish (15%), French (8%),
+# German (5%), Portuguese (5%), Italian (3%) character pair frequencies.
+# Source: practicalcryptography.com Wortschatz corpus + sttmedia.com.
+# No digit-digit bigrams. All lowercase (case-insensitive matching in tokenizer).
+CURATED_BIGRAMS: dict[str, list[str]] = {
+    "latin": [
+        "er", "th", "in", "es", "en", "he", "an", "re", "on", "nt",
+        "de", "st", "te", "ar", "al", "to", "or", "nd", "ti", "ra",
+        "as", "el", "se", "le", "at", "la", "co", "ed", "ta", "ne",
+        "ri", "it", "is", "sa", "ea", "ng", "ro", "me", "et", "ha",
+        "ec", "si", "na", "ou", "ve", "of", "hi", "li", "ll", "so",
+        "os", "ue", "ad", "un", "qu", "io", "do", "pa", "da", "ma",
+        "ca", "ci", "ch", "ia", "ac", "em", "ic", "no", "ie", "lo",
+        "ns", "od", "ei", "au", "di", "il", "tr", "ss", "ur", "ge",
+        "ai", "be", "ce", "eu", "po", "am", "om", "sc", "rd", "tt",
+        "pe", "rs", "rt", "ol", "ni",
+    ],
+    # Hindi/Devanagari bigrams will be added when we have frequency data
+    # Tamil, Telugu, etc. — same approach, from linguistic frequency tables
+}
+
+
 SCRIPT_CHARSETS: dict[str, list[str]] = {
     "en": [],
     "hi": DEVANAGARI_CHARS,
@@ -75,6 +98,7 @@ def build_bigram_vocab(
         List of bigram strings, ordered by frequency.
     """
     bigram_counts: Counter[str] = Counter()
+    digits = set("0123456789")
 
     for path in word_lists:
         path = Path(path)
@@ -85,6 +109,10 @@ def build_bigram_vocab(
                 word = line.strip()
                 for i in range(len(word) - 1):
                     bigram = word[i : i + 2]
+                    # Skip digit-digit bigrams — numbers should stay
+                    # character-level (each digit is its own token)
+                    if bigram[0] in digits and bigram[1] in digits:
+                        continue
                     if bigram[0] in script_chars and bigram[1] in script_chars:
                         bigram_counts[bigram] += 1
 
@@ -251,3 +279,43 @@ class LipiTokenizer:
         Useful for Phase 1 CTC training and as a baseline.
         """
         return cls.build_for_script(script_id, word_lists=None, max_bigrams=0)
+
+    @classmethod
+    def build_with_curated_bigrams(cls, script_id: str) -> "LipiTokenizer":
+        """Build vocabulary using pre-curated bigram lists.
+
+        Uses linguistically-derived bigram frequency data rather than
+        counting from a training corpus. This avoids baking training
+        data bias into the vocabulary.
+
+        For Latin-script languages (en), uses a weighted blend of
+        English/Spanish/French/German/Portuguese/Italian frequencies.
+
+        Args:
+            script_id: Script identifier.
+
+        Returns:
+            LipiTokenizer with curated bigrams.
+        """
+        script_chars = SCRIPT_CHARSETS.get(script_id, [])
+        all_chars = LATIN_CHARS + PUNCTUATION + script_chars
+
+        seen: set[str] = set()
+        unique_chars: list[str] = []
+        for c in all_chars:
+            if c not in seen:
+                seen.add(c)
+                unique_chars.append(c)
+
+        # Select curated bigrams for this script
+        if script_id in ("en",) or not script_chars:
+            # Latin-script language → use Latin curated bigrams
+            bigram_list = list(CURATED_BIGRAMS.get("latin", []))
+        else:
+            # Non-Latin script → use script-specific curated bigrams if available,
+            # otherwise fall back to empty (character-level only for now)
+            bigram_list = list(CURATED_BIGRAMS.get(script_id, []))
+
+        vocab = [BLANK_TOKEN] + unique_chars + bigram_list
+        bigram_set = set(bigram_list)
+        return cls(vocab=vocab, bigrams=bigram_set)

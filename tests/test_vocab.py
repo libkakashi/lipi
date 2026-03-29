@@ -157,6 +157,38 @@ class TestBigramTokenizer:
             assert len(token) <= 2 or token == BLANK_TOKEN
 
 
+class TestCuratedBigrams:
+
+    def test_curated_builds(self):
+        tok = LipiTokenizer.build_with_curated_bigrams("en")
+        assert tok.vocab_size > 83  # more than just chars
+        assert tok.vocab_size < 250  # reasonable upper bound
+
+    def test_curated_roundtrips(self):
+        tok = LipiTokenizer.build_with_curated_bigrams("en")
+        for word in ["Hello", "World", "Section", "12345", "WP(C)", "information"]:
+            assert tok.decode(tok.encode(word)) == word
+
+    def test_curated_no_digit_bigrams(self):
+        tok = LipiTokenizer.build_with_curated_bigrams("en")
+        digits = set("0123456789")
+        for token in tok.vocab:
+            if len(token) == 2:
+                assert not (token[0] in digits and token[1] in digits), \
+                    f"Digit bigram found: {token}"
+
+    def test_curated_compresses(self):
+        tok = LipiTokenizer.build_with_curated_bigrams("en")
+        char_tok = LipiTokenizer.build_character_level("en")
+        # "the" should compress: 3 chars -> 2 tokens (th + e)
+        assert len(tok.encode("the")) < len(char_tok.encode("the"))
+
+    def test_numbers_stay_character_level(self):
+        tok = LipiTokenizer.build_with_curated_bigrams("en")
+        ids = tok.encode("12345")
+        assert len(ids) == 5  # one token per digit
+
+
 class TestSaveLoad:
 
     def test_save_load_roundtrip(self, eng_tok):
