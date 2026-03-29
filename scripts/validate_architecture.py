@@ -46,6 +46,17 @@ from src.data.dataset import InMemoryDataset, collate_ocr, preprocess_crop, crea
 from src.quantization.polar import apply_polar_rotation, measure_outlier_reduction
 
 
+def get_device():
+    """Pick best available device."""
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+DEVICE = get_device()
+
+
 def section(title):
     print(f"\n{'='*70}")
     print(f"  {title}")
@@ -109,14 +120,16 @@ def validate_mini_backbone_overfit():
     labels = [p[1] for p in paired]
 
     tokenizer = LipiTokenizer.build_character_level("en")
-    ctc_head = CTCHead(mini_encoder.output_dim, tokenizer.vocab_size)
+    mini_encoder = mini_encoder.to(DEVICE)
+    ctc_head = CTCHead(mini_encoder.output_dim, tokenizer.vocab_size).to(DEVICE)
 
     all_params = list(mini_encoder.parameters()) + list(ctc_head.parameters())
-    # Use SGD with high LR for aggressive overfit
     optimizer = torch.optim.SGD(all_params, lr=0.01, momentum=0.9)
 
     dataset = InMemoryDataset(images, labels)
-    loader = DataLoader(dataset, batch_size=32, shuffle=True, collate_fn=collate_ocr, drop_last=True)
+    batch_size = 128 if DEVICE.type == "cuda" else 32
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_ocr,
+                        drop_last=True, num_workers=2, pin_memory=(DEVICE.type == "cuda"))
 
     mini_encoder.train()
     ctc_head.train()
@@ -129,16 +142,17 @@ def validate_mini_backbone_overfit():
         n_batches = 0
 
         for batch_imgs, batch_labels, widths in loader:
+            batch_imgs = batch_imgs.to(DEVICE, non_blocking=True)
             target_ids = [tokenizer.encode(l) for l in batch_labels]
-            target_lengths = torch.tensor([len(ids) for ids in target_ids])
+            target_lengths = torch.tensor([len(ids) for ids in target_ids], device=DEVICE)
             max_tgt = max(len(ids) for ids in target_ids)
-            targets = torch.zeros(len(batch_labels), max_tgt, dtype=torch.long)
+            targets = torch.zeros(len(batch_labels), max_tgt, dtype=torch.long, device=DEVICE)
             for i, ids in enumerate(target_ids):
                 targets[i, :len(ids)] = torch.tensor(ids)
 
             features, enc_lengths = mini_encoder(batch_imgs)
             logits = ctc_head(features)
-            loss = ctc_loss(logits, targets, enc_lengths, target_lengths)
+            loss = ctc_loss(logits, targets, enc_lengths.to(DEVICE), target_lengths)
 
             if torch.isinf(loss) or torch.isnan(loss):
                 continue
@@ -158,6 +172,7 @@ def validate_mini_backbone_overfit():
             ctc_head.eval()
             with torch.no_grad():
                 test_imgs, test_labels, _ = next(iter(loader))
+                test_imgs = test_imgs.to(DEVICE, non_blocking=True)
                 lgt = ctc_head(mini_encoder(test_imgs)[0])
                 preds = lgt.argmax(dim=-1)
                 correct = 0
@@ -187,9 +202,10 @@ def validate_mini_backbone_overfit():
     total = 0
     per_word = {w: [0, 0] for w in words}
 
-    eval_loader = DataLoader(dataset, batch_size=50, shuffle=False, collate_fn=collate_ocr)
+    eval_loader = DataLoader(dataset, batch_size=128, shuffle=False, collate_fn=collate_ocr)
     with torch.no_grad():
         for batch_imgs, batch_labels, widths in eval_loader:
+            batch_imgs = batch_imgs.to(DEVICE, non_blocking=True)
             lgt = ctc_head(mini_encoder(batch_imgs)[0])
             preds = lgt.argmax(dim=-1)
             for i, label in enumerate(batch_labels):
@@ -262,12 +278,13 @@ def validate_lid_training():
     perm = torch.randperm(len(images))
     X, Y = X[perm], Y[perm]
 
-    # Train/test split
+    # Move to device and split
+    X, Y = X.to(DEVICE), Y.to(DEVICE)
     split = int(0.8 * len(images))
     X_train, X_test = X[:split], X[split:]
     Y_train, Y_test = Y[:split], Y[split:]
 
-    lid = MicroLID(num_scripts=len(script_samples))
+    lid = MicroLID(num_scripts=len(script_samples)).to(DEVICE)
     optimizer = torch.optim.Adam(lid.parameters(), lr=1e-3)
     criterion = nn.CrossEntropyLoss()
 
@@ -316,8 +333,10 @@ def validate_lora_training(pretrained_encoder, tokenizer):
     """Validate Phase 2: freeze backbone, train LoRA + RNN-T head."""
     section("3. LoRA ADAPTER + RNN-T TRAINING")
 
-    # Inject LoRA
+    # Inject LoRA and move to device
+    pretrained_encoder = pretrained_encoder.to("cpu")  # PEFT needs CPU for injection
     model = inject_lora(pretrained_encoder, rank=8, alpha=16)
+    model = model.to(DEVICE)
 
     lora_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total_params = sum(p.numel() for p in model.parameters())
@@ -325,12 +344,12 @@ def validate_lora_training(pretrained_encoder, tokenizer):
 
     # Build RNN-T head (match mini encoder's output_dim)
     enc_dim = pretrained_encoder.output_dim
-    pred_net = PredictionNetwork(vocab_size=tokenizer.vocab_size, embed_dim=64, hidden_dim=64)
+    pred_net = PredictionNetwork(vocab_size=tokenizer.vocab_size, embed_dim=64, hidden_dim=64).to(DEVICE)
     joint_net = JointNetwork(
         enc_dim=enc_dim,
         pred_dim=64, joint_dim=128,
         vocab_size=tokenizer.vocab_size,
-    )
+    ).to(DEVICE)
 
     # Optimizer: only LoRA + head
     trainable = (
@@ -378,21 +397,20 @@ def validate_lora_training(pretrained_encoder, tokenizer):
             loader_iter = iter(loader)
             batch_imgs, batch_labels, widths = next(loader_iter)
 
+        batch_imgs = batch_imgs.to(DEVICE, non_blocking=True)
         target_ids = [tokenizer.encode(l) for l in batch_labels]
-        target_lengths = torch.tensor([len(ids) for ids in target_ids])
+        target_lengths = torch.tensor([len(ids) for ids in target_ids], device=DEVICE)
         max_tgt = max(len(ids) for ids in target_ids)
-        targets = torch.zeros(len(batch_labels), max_tgt, dtype=torch.long)
+        targets = torch.zeros(len(batch_labels), max_tgt, dtype=torch.long, device=DEVICE)
         for i, ids in enumerate(target_ids):
             targets[i, :len(ids)] = torch.tensor(ids)
 
         features, _ = model(batch_imgs)
         B = targets.shape[0]
         T = features.shape[1]
-        # Use actual padded T for all samples — torchaudio rnnt_loss
-        # requires enc_lengths to exactly match logits dim 1
-        enc_lengths = torch.full((B,), T, dtype=torch.long)
+        enc_lengths = torch.full((B,), T, dtype=torch.long, device=DEVICE)
 
-        blank = torch.zeros(B, 1, dtype=torch.long)
+        blank = torch.zeros(B, 1, dtype=torch.long, device=DEVICE)
         pred_input = torch.cat([blank, targets], dim=1)
         pred_out, _ = pred_net(pred_input)
 
@@ -429,6 +447,7 @@ def validate_lora_training(pretrained_encoder, tokenizer):
     joint_net.eval()
     with torch.no_grad():
         test_imgs, test_labels, _ = next(iter(loader))
+        test_imgs = test_imgs.to(DEVICE)
         feats, _ = model(test_imgs[:4])
         decoded = greedy_decode(feats, pred_net, joint_net, max_tokens=15)
         decoded_text = [tokenizer.decode(d) for d in decoded]
@@ -708,29 +727,64 @@ def validate_inference_latency():
     total_ms = np.mean(times)
     print(f"    Full decode: {total_ms:.1f}ms (encoder + greedy, 10 tokens max)")
 
-    # Test on MPS if available
-    if torch.backends.mps.is_available():
+    # Test on GPU if available
+    if torch.cuda.is_available():
+        print("\n  CUDA Inference:")
+        encoder_gpu = encoder.to("cuda")
+        test_gpu = test_input.to("cuda")
+
+        # Warmup
+        with torch.no_grad():
+            for _ in range(10):
+                encoder_gpu(test_gpu)
+            torch.cuda.synchronize()
+
+        times = []
+        with torch.no_grad():
+            for _ in range(50):
+                torch.cuda.synchronize()
+                start = time.time()
+                features, _ = encoder_gpu(test_gpu)
+                torch.cuda.synchronize()
+                times.append((time.time() - start) * 1000)
+        enc_gpu_ms = np.mean(times)
+        print(f"    Encoder: {enc_gpu_ms:.1f}ms (mean of 50 runs)")
+        print(f"    Speedup vs CPU: {enc_ms/enc_gpu_ms:.1f}x")
+
+        # Batched inference
+        for bs in [1, 8, 32, 64]:
+            test_batch = torch.randn(bs, 3, 32, 128, device="cuda")
+            with torch.no_grad():
+                for _ in range(5):
+                    encoder_gpu(test_batch)
+                torch.cuda.synchronize()
+                times_b = []
+                for _ in range(20):
+                    torch.cuda.synchronize()
+                    start = time.time()
+                    encoder_gpu(test_batch)
+                    torch.cuda.synchronize()
+                    times_b.append((time.time() - start) * 1000)
+            per_img = np.mean(times_b) / bs
+            print(f"    Batch {bs:2d}: {np.mean(times_b):.1f}ms total, {per_img:.2f}ms/image")
+
+    elif torch.backends.mps.is_available():
         print("\n  MPS Inference:")
         encoder_mps = encoder.to("mps")
         test_mps = test_input.to("mps")
-
-        # Warmup
         with torch.no_grad():
             for _ in range(5):
                 encoder_mps(test_mps)
             torch.mps.synchronize()
-
         times = []
         with torch.no_grad():
             for _ in range(10):
                 torch.mps.synchronize()
                 start = time.time()
-                features, _ = encoder_mps(test_mps)
+                encoder_mps(test_mps)
                 torch.mps.synchronize()
                 times.append((time.time() - start) * 1000)
-        enc_mps_ms = np.mean(times)
-        print(f"    Encoder: {enc_mps_ms:.1f}ms (mean of 10 runs)")
-        print(f"    Speedup vs CPU: {enc_ms/enc_mps_ms:.1f}x")
+        print(f"    Encoder: {np.mean(times):.1f}ms")
 
     print(f"\n  RESULT: PASS (latency measured)")
     return enc_ms
