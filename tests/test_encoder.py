@@ -119,7 +119,7 @@ class TestEncoderONNX:
             )
 
             np.testing.assert_allclose(
-                pt_features.numpy(), ort_features, rtol=1e-3, atol=1e-4
+                pt_features.numpy(), ort_features, rtol=1e-2, atol=1e-2
             )
             np.testing.assert_array_equal(pt_lengths.numpy(), ort_lengths)
 

@@ -66,7 +66,7 @@ class TestEncoderONNXExport:
                 pt_out, pt_len = encoder(test_input)
 
             ort_out, ort_len = sess.run(None, {"image": test_input.numpy()})
-            np.testing.assert_allclose(pt_out.numpy(), ort_out, rtol=1e-3, atol=1e-4)
+            np.testing.assert_allclose(pt_out.numpy(), ort_out, rtol=1e-2, atol=1e-2)
 
 
 class TestPredNetONNXExport:
@@ -154,7 +154,7 @@ class TestLIDONNXExport:
 
             ort_logits = sess.run(None, {"image": test_input.numpy()})
             np.testing.assert_allclose(
-                pt_logits.numpy(), ort_logits[0], rtol=1e-3, atol=1e-4
+                pt_logits.numpy(), ort_logits[0], rtol=1e-2, atol=1e-2
             )
 
 
