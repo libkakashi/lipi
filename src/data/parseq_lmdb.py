@@ -56,13 +56,57 @@ class PARSeqLMDB(Dataset):
         with self.env.begin(write=False) as txn:
             self.num_samples = int(txn.get(b"num-samples").decode())
 
-        # Build index of valid samples (filter by label length etc.)
         self._valid_indices = list(range(self.num_samples))
+        self._cache: list[tuple[np.ndarray, str]] | None = None
+
+    def preload(self, max_samples: int | None = None):
+        """Preload all images into RAM. Call once before training.
+
+        Decodes all images upfront so training has zero I/O overhead.
+        3M images at ~5KB each ≈ 15GB RAM.
+        """
+        n = min(max_samples or len(self), len(self))
+        print(f"Preloading {n} images into RAM...")
+        self._cache = []
+
+        with self.env.begin(write=False) as txn:
+            for i in range(n):
+                real_idx = self._valid_indices[i]
+
+                img_key = f"image-{real_idx + 1:09d}".encode()
+                lbl_key = f"label-{real_idx + 1:09d}".encode()
+
+                img_bytes = txn.get(img_key)
+                if img_bytes is None:
+                    img_key = f"image-{real_idx:09d}".encode()
+                    lbl_key = f"label-{real_idx:09d}".encode()
+                    img_bytes = txn.get(img_key)
+
+                if img_bytes is None:
+                    continue
+
+                label_bytes = txn.get(lbl_key)
+                label = label_bytes.decode("utf-8") if label_bytes else ""
+
+                img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+                crop = preprocess_crop(img, self.target_height, self.max_width)
+                self._cache.append((crop, label))
+
+                if (i + 1) % 100000 == 0:
+                    print(f"  {i+1}/{n} loaded...")
+
+        self._valid_indices = list(range(len(self._cache)))
+        print(f"Preloaded {len(self._cache)} images into RAM")
 
     def __len__(self) -> int:
         return len(self._valid_indices)
 
     def __getitem__(self, idx: int) -> tuple[np.ndarray, str]:
+        # Fast path: serve from RAM cache
+        if self._cache is not None:
+            return self._cache[self._valid_indices[idx]]
+
+        # Slow path: read from LMDB on the fly
         real_idx = self._valid_indices[idx]
 
         with self.env.begin(write=False) as txn:
@@ -71,23 +115,18 @@ class PARSeqLMDB(Dataset):
 
             img_bytes = txn.get(img_key)
             if img_bytes is None:
-                # Try 0-indexed
                 img_key = f"image-{real_idx:09d}".encode()
                 lbl_key = f"label-{real_idx:09d}".encode()
                 img_bytes = txn.get(img_key)
 
             if img_bytes is None:
-                # Return a blank image if key not found
                 blank = np.zeros((3, self.target_height, 32), dtype=np.float32)
                 return blank, ""
 
             label_bytes = txn.get(lbl_key)
             label = label_bytes.decode("utf-8") if label_bytes else ""
 
-        # Decode image
         img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-
-        # Preprocess to fixed height
         crop = preprocess_crop(img, self.target_height, self.max_width)
 
         return crop, label
