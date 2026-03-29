@@ -184,9 +184,11 @@ class AdapterTrainer:
                     list(self.joint_net.parameters()),
                     max_norm=1.0,
                 )
+                old_scale = scaler.get_scale()
                 scaler.step(self.optimizer)
                 scaler.update()
-                self.scheduler.step()
+                if scaler.get_scale() >= old_scale:
+                    self.scheduler.step()
 
                 loss_val = loss.item()
                 history["loss"].append(loss_val)

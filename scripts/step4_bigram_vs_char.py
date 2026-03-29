@@ -183,9 +183,12 @@ def train_rnnt_head(
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(head_params, 1.0)
+            old_scale = scaler.get_scale()
             scaler.step(optimizer)
             scaler.update()
-            scheduler.step()
+            # Only step scheduler if optimizer actually stepped
+            if scaler.get_scale() >= old_scale:
+                scheduler.step()
 
             epoch_loss += loss.item()
             n_batches += 1
