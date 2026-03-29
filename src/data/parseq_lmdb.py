@@ -16,6 +16,9 @@ But the images may be different sizes and formats (not pre-normalized to 32px).
 import io
 import lmdb
 import numpy as np
+import torch
+import torchvision
+import torchvision.transforms.functional as TF
 from pathlib import Path
 from PIL import Image
 from torch.utils.data import Dataset
@@ -107,19 +110,42 @@ class PARSeqLMDB(Dataset):
 
         print(f"  Read {len(raw_data)} samples. Decoding images...")
 
-        # Step 2: Decode images with thread pool (PIL releases GIL)
-        from concurrent.futures import ThreadPoolExecutor
+        import time
+        self._cache = []
+        t0 = time.time()
+        fallback_count = 0
 
-        target_h = self.target_height
-        max_w = self.max_width
+        for i, (img_bytes, label) in enumerate(raw_data):
+            try:
+                buf = torch.frombuffer(bytearray(img_bytes), dtype=torch.uint8)
+                img_tensor = torchvision.io.decode_image(buf)
+                # img_tensor: (3, H, W) or (1, H, W) uint8
+                if img_tensor.shape[0] == 1:
+                    img_tensor = img_tensor.expand(3, -1, -1)
+                elif img_tensor.shape[0] == 4:
+                    img_tensor = img_tensor[:3]
 
-        def _decode(item):
-            img_bytes, label = item
-            img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-            return (preprocess_crop(img, target_h, max_w), label)
+                h, w = img_tensor.shape[1], img_tensor.shape[2]
+                new_w = int(w * self.target_height / h)
+                new_w = min(max(new_w, 1), self.max_width)
 
-        with ThreadPoolExecutor(max_workers=num_workers) as pool:
-            self._cache = list(pool.map(_decode, raw_data, chunksize=1000))
+                img_tensor = TF.resize(img_tensor, [self.target_height, new_w], antialias=True)
+                crop = img_tensor.float().div_(127.5).sub_(1.0).numpy()
+                self._cache.append((crop, label))
+            except Exception:
+                img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+                crop = preprocess_crop(img, self.target_height, self.max_width)
+                self._cache.append((crop, label))
+                fallback_count += 1
+
+            if (i + 1) % 100000 == 0:
+                elapsed = time.time() - t0
+                rate = (i + 1) / elapsed
+                eta = (len(raw_data) - i - 1) / rate
+                print(f"    {i+1}/{len(raw_data)} decoded ({rate:.0f}/s, ETA {eta:.0f}s)")
+
+        if fallback_count:
+            print(f"    ({fallback_count} images fell back to PIL)")
 
         self._valid_indices = list(range(len(self._cache)))
         print(f"  Preloaded {len(self._cache)} images into RAM")
