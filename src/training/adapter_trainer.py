@@ -116,6 +116,11 @@ class AdapterTrainer:
         self.pred_net.train()
         self.joint_net.train()
 
+        # Mixed precision for CUDA
+        use_amp = self.device.type == "cuda"
+        scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+        amp_dtype = torch.bfloat16 if use_amp and torch.cuda.is_bf16_supported() else torch.float16
+
         history = {"loss": [], "epoch_loss": []}
         global_step = 0
 
@@ -125,7 +130,7 @@ class AdapterTrainer:
 
             pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")
             for images, labels, widths in pbar:
-                images = images.to(self.device)
+                images = images.to(self.device, non_blocking=True)
 
                 # Encode targets
                 target_ids = []
@@ -135,40 +140,35 @@ class AdapterTrainer:
                     target_ids.append(ids)
                     target_lengths.append(len(ids))
 
-                # Pad targets
                 max_target_len = max(target_lengths) if target_lengths else 1
                 targets = torch.zeros(len(labels), max_target_len, dtype=torch.long)
                 for i, ids in enumerate(target_ids):
                     targets[i, :len(ids)] = torch.tensor(ids, dtype=torch.long)
-                targets = targets.to(self.device)
+                targets = targets.to(self.device, non_blocking=True)
                 target_lengths_t = torch.tensor(
                     target_lengths, dtype=torch.long, device=self.device
                 )
 
-                # Forward: encoder with LoRA
-                features, _ = self.model(images)
+                # Forward with mixed precision
+                with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
+                    features, _ = self.model(images)
+                    B = targets.shape[0]
+                    T = features.shape[1]
+                    enc_lengths = torch.full(
+                        (B,), T, dtype=torch.long, device=self.device
+                    )
+                    blank = torch.zeros(B, 1, dtype=torch.long, device=self.device)
+                    pred_input = torch.cat([blank, targets], dim=1)
 
-                # Use actual padded T for enc_lengths — torchaudio rnnt_loss
-                # requires enc_lengths to exactly match logits dim 1
-                B = targets.shape[0]
-                T = features.shape[1]
-                enc_lengths = torch.full(
-                    (B,), T, dtype=torch.long, device=self.device
-                )
-                blank = torch.zeros(B, 1, dtype=torch.long, device=self.device)
-                pred_input = torch.cat([blank, targets], dim=1)
+                    pred_out, _ = self.pred_net(pred_input)
 
-                # Prediction network
-                pred_out, _ = self.pred_net(pred_input)
+                    enc_expanded = features.unsqueeze(2)
+                    pred_expanded = pred_out.unsqueeze(1)
+                    logits = self.joint_net(enc_expanded, pred_expanded)
 
-                # Joint network (full lattice)
-                enc_expanded = features.unsqueeze(2)     # (B, T, 1, enc_dim)
-                pred_expanded = pred_out.unsqueeze(1)    # (B, 1, U+1, pred_dim)
-                logits = self.joint_net(enc_expanded, pred_expanded)
-
-                # RNN-T loss
+                # RNN-T loss (outside autocast — needs float32)
                 loss = rnnt_loss(
-                    logits, targets, enc_lengths, target_lengths_t,
+                    logits.float(), targets, enc_lengths, target_lengths_t,
                     blank=self.tokenizer.blank_id,
                 )
 
@@ -176,14 +176,16 @@ class AdapterTrainer:
                     continue
 
                 self.optimizer.zero_grad()
-                loss.backward()
+                scaler.scale(loss).backward()
+                scaler.unscale_(self.optimizer)
                 torch.nn.utils.clip_grad_norm_(
                     list(self.model.parameters()) +
                     list(self.pred_net.parameters()) +
                     list(self.joint_net.parameters()),
                     max_norm=1.0,
                 )
-                self.optimizer.step()
+                scaler.step(self.optimizer)
+                scaler.update()
                 self.scheduler.step()
 
                 loss_val = loss.item()

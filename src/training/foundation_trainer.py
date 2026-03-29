@@ -107,6 +107,11 @@ class FoundationTrainer:
         self.encoder.train()
         self.ctc_head.train()
 
+        # Mixed precision for CUDA
+        use_amp = self.device.type == "cuda"
+        scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+        amp_dtype = torch.bfloat16 if use_amp and torch.cuda.is_bf16_supported() else torch.float16
+
         history = {"loss": [], "epoch_loss": []}
         global_step = 0
 
@@ -116,7 +121,7 @@ class FoundationTrainer:
 
             pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")
             for images, labels, widths in pbar:
-                images = images.to(self.device)
+                images = images.to(self.device, non_blocking=True)
 
                 # Encode targets
                 target_ids = []
@@ -131,29 +136,31 @@ class FoundationTrainer:
                 targets = torch.zeros(len(labels), max_target_len, dtype=torch.long)
                 for i, ids in enumerate(target_ids):
                     targets[i, :len(ids)] = torch.tensor(ids, dtype=torch.long)
-                targets = targets.to(self.device)
+                targets = targets.to(self.device, non_blocking=True)
                 target_lengths_t = torch.tensor(target_lengths, dtype=torch.long)
 
-                # Forward pass
-                features, enc_lengths = self.encoder(images)
-                logits = self.ctc_head(features)  # (B, T, vocab_size)
+                # Forward pass with mixed precision
+                with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
+                    features, enc_lengths = self.encoder(images)
+                    logits = self.ctc_head(features)
 
-                # CTC loss
+                # CTC loss (outside autocast — needs float32)
                 loss = ctc_loss(
-                    logits, targets,
+                    logits.float(), targets,
                     enc_lengths, target_lengths_t,
                     blank=self.tokenizer.blank_id,
                 )
 
-                # Skip batch if loss is inf (CTC can produce inf for impossible alignments)
                 if torch.isinf(loss):
                     continue
 
-                # Backward + optimize
+                # Backward + optimize with scaler
                 self.optimizer.zero_grad()
-                loss.backward()
+                scaler.scale(loss).backward()
+                scaler.unscale_(self.optimizer)
                 torch.nn.utils.clip_grad_norm_(self.params, max_norm=1.0)
-                self.optimizer.step()
+                scaler.step(self.optimizer)
+                scaler.update()
                 self.scheduler.step()
 
                 loss_val = loss.item()
