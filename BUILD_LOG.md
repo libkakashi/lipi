@@ -486,11 +486,40 @@ Every keyboard character is now covered: `[`, `\`, `{`, `|`, `~`, `^`, `_`, `*`,
 The base is NOT an adapter — it's the foundation all adapters inherit.
 Per-script adapters add their Unicode characters + script-specific bigrams on top.
 
+### Step 4: Bigram vs Character — INCONCLUSIVE (backbone too weak)
+- Backbone: Step 3 epoch 3 checkpoint (67.5% IIIT5k CTC)
+- Training: 2 epochs RNN-T on 500K MJSynth, frozen backbone
+- Char head (96 tokens): 11.9% average, loss 6.48 → 0.81
+- Bigram head (171 tokens): 10.7% average, loss 8.97 → 1.45
+
+| Benchmark | Char | Bigram | Delta |
+|-----------|------|--------|-------|
+| IIIT5k | 12.2% | 11.2% | -1.1% |
+| SVT | 10.0% | 13.3% | +3.2% |
+| IC13_1015 | 18.8% | 15.5% | -3.3% |
+| IC15_2077 | 8.8% | 8.1% | -0.7% |
+| SVTP | 10.9% | 9.0% | -1.9% |
+| CUTE80 | 12.5% | 6.9% | -5.6% |
+| AVERAGE | 11.9% | 10.7% | -1.1% |
+
+**Result: INCONCLUSIVE — do not make vocabulary decision from this.**
+
+Both heads are at ~11% word accuracy — barely above random. The 1.1% gap is
+noise at this level. The bigram head loss (1.45) is still much higher than char
+(0.81) — it needs more epochs to converge with the larger vocab.
+
+Root cause: backbone features are too weak (67.5% CTC). RNN-T needs stronger
+encoder features to learn from. Must re-run after training a proper backbone.
+
+**Action: train stronger backbone first (10 epochs, full MJSynth), then re-run Step 4.**
+
 ### Validation Sequence Status
 1. [DONE] Download PARSeq LMDB data (MJSynth + eval benchmarks)
 2. [DONE] Step 2: Overfit 100 real crops — **100% PASS**
-3. [DONE] Step 3: Train backbone on 1M MJSynth — below target, needs more epochs/data
-4. [READY] Step 4: Bigram vs character comparison
-5. Step 5: Full backbone training (~$40-60)
-6. Step 6: First Hindi adapter (~$16-24)
+3. [DONE] Step 3: Train backbone 3ep/1M MJSynth — 67.5% IIIT5k (below target)
+4. [DONE] Step 4: Bigram vs char — INCONCLUSIVE (backbone too weak)
+5. [NEXT] Re-run Step 3: 10 epochs, full MJSynth (~8M crops)
+6. [NEXT] Re-run Step 4 on stronger backbone
+7. Step 5: Full backbone training (~$40-60)
+8. Step 6: First Hindi adapter (~$16-24)
 
