@@ -255,21 +255,104 @@ Export & Eval:
 - src/export/onnx_export.py — export backbone, RNN-T heads, LID to ONNX
 - src/export/lora_export.py — export LoRA adapters to .onnx_adapter format
 
-### Test Suite: 75/75 PASS
-- test_bpe.py: 23 tests (character-level, roundtrip, save/load, edge cases, 6 scripts)
+### BPE → Bigrams Migration (2026-03-29)
+Replaced BPE tokenizer (2001 tokens, HuggingFace tokenizers dep) with
+character + bigram tokenizer (401 tokens, zero dependencies).
+
+Changes:
+- Deleted src/data/bpe.py, created src/data/bigrams.py (LipiTokenizer)
+- vocab_size default 2001 → 401 across all model modules, tests, configs
+- Removed `tokenizers` from pyproject.toml dependencies
+- Renamed test_bpe.py → test_vocab.py with bigram-specific tests
+
+Benefits:
+- 5x smaller softmax (401 vs 2001) — faster training and decode
+- 2-char max token error granularity (was 4-char with BPE)
+- No tokenizer training library needed — just frequency counting
+- Zero OOV by construction
+
+**FINDING: torchaudio rnnt_loss requires enc_lengths == logits.shape[1] exactly.**
+It's not a "valid frames" mask — it's a hard dimension check. Fixed by using
+`torch.full((B,), T)` where T = features.shape[1] (the padded sequence length)
+instead of the per-sample enc_lengths from the encoder.
+
+### Test Suite: 83/83 PASS
+- test_vocab.py: 25 tests (char-level, roundtrip, bigram tokenization, save/load, edge cases, 6 scripts)
 - test_encoder.py: 13 tests (shapes, batches, gradients, ONNX export+parity+dynamic)
 - test_rnnt.py: 12 tests (pred_net, joint_net, model assembly, loss, decode)
 - test_lora.py: 8 tests (target modules, injection, freezing, gradient flow, param count)
 - test_lid.py: 6 tests (shapes, variable width, params, gradients, batches)
 - test_onnx.py: 5 tests (all components export, parity, three-file workflow)
-- ONNX verification script: 5 additional manual tests (all pass)
 
-### ONNX File Sizes
-- encoder.onnx: 1.6 MB
-- pred_net.onnx: 20 KB
-- joint_net.onnx: 15 KB
-- lid.onnx: 22 KB
-- Total per language (adapter + heads): ~37 KB (without adapter weights)
+### AMP (Mixed Precision) Training
+Added bf16 autocast + GradScaler to both trainers:
+- foundation_trainer.py: torch.amp.autocast("cuda") with bf16 for forward, float32 for CTC loss
+- adapter_trainer.py: same pattern for RNN-T loss
+- non_blocking=True on all .to(device) transfers
+
+---
+
+## Architecture Validation (RTX 5080 Blackwell, 2026-03-29)
+
+**Hardware:** NVIDIA GeForce RTX 5080, compute capability 12.0, bf16 supported
+**GPU Result: 7/7 PASS in 111 seconds**
+
+### Test 1: Mini Backbone CTC Overfit — PASS
+- 1.89M param mini encoder (half dims, 2 blocks per stage)
+- 10 words × 100 font variants = 1000 synthetic images
+- 100 epochs, SGD lr=0.01, batch_size=128 on CUDA
+- Loss: 7.56 → 0.01
+- **Final accuracy: 99.7% (997/1000)**
+- All 10 words: 98-100% individually
+- Time: 60s
+- **Conclusion: encoder architecture learns discriminative visual features**
+
+### Test 2: LID Classifier — PASS
+- 600 synthetic crops across 3 scripts (English, Hindi, Tamil)
+- Non-script-specific fonts (worst case for visual distinction)
+- 60 epochs, Adam lr=1e-3
+- Train: 87.1%, **Test: 68.3%**
+- Threshold: 60% (with real script-specific fonts, expect >95%)
+
+### Test 3: LoRA Adapter + RNN-T — PASS
+- Injected LoRA rank-8 into mini backbone (92.2K trainable / 1.99M total)
+- 50 steps of RNN-T training on 5 short words
+- Loss: 119 → 2.9 (decreasing)
+- **Frozen backbone weights verified unchanged** (snapshot comparison)
+- Greedy decode runs without error
+
+### Test 4: Bigram Tokenizer — PASS
+- Built vocab from word list: 133 tokens (83 chars + 50 bigrams)
+- 5/5 roundtrip tests pass (Hello, Court, Section, 12345, WP(C))
+- Max token length: 2 chars (limit: 2) — enforced by construction
+
+### Test 5: Full ONNX Deployment Pipeline — PASS
+- Exported all 4 components to ONNX opset 18
+- Loaded in ORT, ran full inference pipeline: image → LID → encode → decode → text
+- **Dynamic width works** (fixed conditional padding bug in window partition)
+- File sizes: encoder 1.5MB, pred_net 19KB, joint_net 14KB, lid 21KB
+
+### Test 6: PolarQuant Rotation — PASS
+- Applied QR-based orthogonal rotation to 28 Linear modules in stages 2+3
+- Kurtosis: -1.20 → -0.02 (closer to Gaussian = better for quantization)
+- Forward pass works after rotation (shape preserved)
+
+### Test 7: Inference Latency — PASS
+- CPU encoder: 40.2ms/image
+- **CUDA encoder: 18.7ms single, 0.32ms/image at batch 64**
+- Speedup: 2.1x single → 58x batched vs CPU
+- Throughput at batch 64: ~3,100 images/sec (encoder only)
+
+### Bugs Found and Fixed During Validation
+1. **ONNX dynamic width crash:** conditional `if pad > 0` in window partition caused
+   torch.export to trace only the no-pad branch. Fix: always call F.pad unconditionally.
+2. **LoRA frozen check false positive:** PEFT sets .grad on frozen params during backward.
+   Fix: compare actual weight snapshots before/after instead of checking .grad.
+3. **PolarQuant shape mismatch:** SVD with full_matrices=False on non-square weights
+   produces non-square Vh, breaking weight @ R.T. Fix: use QR decomposition for
+   square (in,in) orthogonal matrix.
+4. **RNN-T enc_lengths mismatch:** torchaudio rnnt_loss requires enc_lengths == T exactly,
+   not T >= enc_lengths. Fix: use features.shape[1] as enc_length for all samples.
 
 ---
 
@@ -281,7 +364,7 @@ src/model/
   prediction_net.py, joint_net.py, decode.py, lora.py, lid.py, rnnt_model.py
 
 src/data/
-  bpe.py, dataset.py, augmentation.py, synth.py, degradation.py, pdf_extractor.py
+  bigrams.py, dataset.py, augmentation.py, synth.py, degradation.py, pdf_extractor.py
 
 src/training/
   loss.py, foundation_trainer.py, adapter_trainer.py
@@ -296,7 +379,7 @@ scripts/
   build_vocab.py, train_foundation.py, train_adapter.py, train_lid.py,
   generate_synth.py, extract_pdf_crops.py, apply_degradation.py,
   validate_data.py, export_onnx.py, export_adapters.py, benchmark.py,
-  test_onnx_export.py, overfit_test.py, overfit_test_v2.py
+  test_onnx_export.py, validate_architecture.py
 
 deploy/
   server.py, api.py, requirements.txt
@@ -308,14 +391,14 @@ configs/
   export/onnx.yaml
 
 tests/
-  test_encoder.py, test_rnnt.py, test_lora.py, test_lid.py, test_onnx.py, test_bpe.py
+  test_encoder.py, test_rnnt.py, test_lora.py, test_lid.py, test_onnx.py, test_vocab.py
 ```
 
-### What's Needed Next (requires GPU)
-1. Real training data at scale (PDF extraction + synthetic generation)
-2. Phase 1 backbone training on A100 (~5-7 days)
-3. Phase 2 adapter training per language (~1-2 days each)
-4. Checkpoint evaluations on STR benchmarks
-5. Quantization-aware training
-6. Production deployment testing
+### Next: Real Data Validation Sequence
+1. [IN PROGRESS] Download PARSeq LMDB data (MJSynth + eval benchmarks)
+2. Step 2: Overfit test with 100 real IIIT5K crops (~$0.50)
+3. Step 3: Train 12.5M backbone on 1M MJSynth, eval on benchmarks (~$3-4)
+4. Step 4: Bigram vs character comparison (~$2-3)
+5. Step 5: Full backbone training (~$40-60)
+6. Step 6: First Hindi adapter (~$16-24)
 
