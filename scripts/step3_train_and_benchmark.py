@@ -162,7 +162,7 @@ def main():
 
     train_loader = DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collate_ocr,
-        drop_last=True, num_workers=8, pin_memory=True, persistent_workers=True,
+        drop_last=True, num_workers=32, pin_memory=True, persistent_workers=True, prefetch_factor=4,
     )
 
     # LR scheduler

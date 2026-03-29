@@ -46,10 +46,10 @@ class PARSeqLMDB(Dataset):
 
         self.env = lmdb.open(
             self.lmdb_path,
-            max_readers=8,
+            max_readers=128,
             readonly=True,
             lock=False,
-            readahead=False,
+            readahead=True,
             meminit=False,
         )
 
