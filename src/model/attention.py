@@ -64,11 +64,13 @@ class ShiftedWindowAttention(nn.Module):
         B, _, C = x.shape
         x = x.reshape(B, h, w, C)
 
-        # Pad if needed so h and w are divisible by window size
+        # Always pad so h and w are divisible by window size.
+        # Using unconditional pad (even when pad=0) ensures a single code path
+        # for torch.export/ONNX tracing — conditional padding creates trace-time
+        # constants that break on different input sizes at runtime.
         pad_h = (self.window_h - h % self.window_h) % self.window_h
         pad_w = (self.window_w - w % self.window_w) % self.window_w
-        if pad_h > 0 or pad_w > 0:
-            x = F.pad(x, (0, 0, 0, pad_w, 0, pad_h))
+        x = F.pad(x, (0, 0, 0, pad_w, 0, pad_h))
         hp, wp = h + pad_h, w + pad_w
 
         num_win_h = hp // self.window_h
