@@ -406,22 +406,36 @@ tests/
 - By step 500: 32/32 batch accuracy, loss < 0.01
 - **Conclusion: full training pipeline works end-to-end on GPU with real data**
 
-### Step 3: Train Backbone on 1M MJSynth — IN PROGRESS
+### Step 3: Train Backbone on 1M MJSynth — DONE (below target)
 - 12.5M param backbone, 1M MJSynth crops, 3 epochs, AdamW lr=7e-4, batch=256, bf16
-- Training speed: 4.34 it/s (~15 min/epoch)
-- Epoch 1 (15 min): avg_loss=0.897
+- Training speed: 4.34 it/s (~15 min/epoch), total 51 min
+- Loss: 0.897 → 0.255 → 0.167
 
-Epoch 1 benchmark results:
-| Benchmark | Accuracy | Target (min) |
-|-----------|----------|-------------|
-| IIIT5k | 56.2% | >82% |
-| IC13_1015 | 63.4% | >88% |
-| IC15_2077 | 29.0% | >65% |
-| SVT | 56.3% | — |
-| SVTP | 32.2% | — |
-| CUTE80 | 30.6% | — |
+| Benchmark | Epoch 1 | Epoch 2 | Epoch 3 | Target (min) |
+|-----------|---------|---------|---------|-------------|
+| IIIT5k | 56.2% | 66.1% | 67.5% | >82% |
+| SVT | 56.3% | 65.7% | 68.2% | — |
+| IC13_857 | 65.0% | 76.2% | 77.8% | — |
+| IC13_1015 | 63.4% | 74.8% | 76.2% | >88% |
+| IC15_1811 | 33.0% | 43.3% | 45.7% | — |
+| IC15_2077 | 29.0% | 38.1% | 40.1% | >65% |
+| SVTP | 32.2% | 42.0% | 44.0% | — |
+| CUTE80 | 30.6% | 41.7% | 44.1% | — |
+| ArT | 25.6% | 32.5% | 34.2% | — |
 
-Awaiting epoch 2 and 3 results.
+**Checkpoint 2 result: FAIL (below minimum thresholds)**
+- IIIT5k: 67.5% (need >82%)
+- IC13: 76.2% (need >88%)
+- IC15: 40.1% (need >65%)
+
+**Analysis:** The model is still learning (strong epoch-over-epoch gains) but
+3 epochs on 1M crops isn't enough for a 12.5M param model. The architecture
+spec Checkpoint 2 uses a half-dim mini backbone (~3M params) which would converge
+faster on this amount of data. Options:
+1. Train more epochs (5-10) on same data — loss still decreasing at 0.167
+2. Use full MJSynth (~8M crops) for more data per epoch
+3. Both — more data × more epochs
+The learning curve is healthy — this is a data/compute issue, not architecture.
 
 ### Bigram Vocabulary Analysis
 
@@ -475,7 +489,7 @@ Per-script adapters add their Unicode characters + script-specific bigrams on to
 ### Validation Sequence Status
 1. [DONE] Download PARSeq LMDB data (MJSynth + eval benchmarks)
 2. [DONE] Step 2: Overfit 100 real crops — **100% PASS**
-3. [RUNNING] Step 3: Train backbone on 1M MJSynth (~$3-4)
+3. [DONE] Step 3: Train backbone on 1M MJSynth — below target, needs more epochs/data
 4. [READY] Step 4: Bigram vs character comparison
 5. Step 5: Full backbone training (~$40-60)
 6. Step 6: First Hindi adapter (~$16-24)
