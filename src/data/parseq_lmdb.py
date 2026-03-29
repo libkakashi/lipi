@@ -23,6 +23,14 @@ from torch.utils.data import Dataset
 from src.data.dataset import preprocess_crop
 
 
+def _decode_image(args: tuple) -> tuple[np.ndarray, str]:
+    """Decode a single image from raw bytes. Module-level for pickling."""
+    img_bytes, label, target_h, max_w = args
+    img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+    crop = preprocess_crop(img, target_h, max_w)
+    return (crop, label)
+
+
 class PARSeqLMDB(Dataset):
     """Read a PARSeq-format LMDB dataset.
 
@@ -100,17 +108,13 @@ class PARSeqLMDB(Dataset):
         print(f"  Read {len(raw_data)} samples. Decoding images...")
 
         # Step 2: Decode images in parallel
-        target_h = self.target_height
-        max_w = self.max_width
-
-        def _decode_one(item: tuple[bytes, str]) -> tuple[np.ndarray, str]:
-            img_bytes, label = item
-            img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-            crop = preprocess_crop(img, target_h, max_w)
-            return (crop, label)
+        decode_args = [
+            (img_bytes, label, self.target_height, self.max_width)
+            for img_bytes, label in raw_data
+        ]
 
         with mp.Pool(num_workers) as pool:
-            self._cache = pool.map(_decode_one, raw_data, chunksize=1000)
+            self._cache = pool.map(_decode_image, decode_args, chunksize=1000)
 
         self._valid_indices = list(range(len(self._cache)))
         print(f"  Preloaded {len(self._cache)} images into RAM")
