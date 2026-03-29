@@ -19,7 +19,12 @@ from torch import Tensor
 def compute_rotation_matrix(weight: Tensor) -> Tensor:
     """Compute optimal rotation matrix for a weight tensor.
 
-    Uses SVD to find the rotation that minimizes outlier magnitude.
+    Computes a random orthogonal rotation of the input space that
+    spreads outlier weight values across dimensions, improving
+    quantization fidelity.
+
+    For PolarQuant, we use a Hadamard-like random orthogonal matrix
+    rather than SVD (which changes the weight shape for non-square matrices).
 
     Args:
         weight: (out_features, in_features) weight matrix.
@@ -27,11 +32,11 @@ def compute_rotation_matrix(weight: Tensor) -> Tensor:
     Returns:
         (in_features, in_features) orthogonal rotation matrix.
     """
-    U, S, Vh = torch.linalg.svd(weight, full_matrices=False)
-
-    # The rotation is Vh — it rotates the input space to align
-    # with the principal components of the weight matrix
-    return Vh
+    in_features = weight.shape[1]
+    # Random orthogonal matrix via QR decomposition of random Gaussian
+    random_matrix = torch.randn(in_features, in_features, device=weight.device, dtype=weight.dtype)
+    Q, _ = torch.linalg.qr(random_matrix)
+    return Q  # (in_features, in_features) orthogonal
 
 
 def apply_polar_rotation(
