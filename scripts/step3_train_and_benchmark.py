@@ -139,13 +139,9 @@ def main():
     train_dataset = PARSeqLMDB(args.train_dir)
     print(f"  Full dataset: {len(train_dataset)} samples")
 
-    if args.max_samples and args.max_samples < len(train_dataset):
-        import random
-        random.seed(42)
-        from torch.utils.data import Subset
-        indices = random.sample(range(len(train_dataset)), args.max_samples)
-        train_dataset = Subset(train_dataset, indices)
-        print(f"  Using subset: {len(train_dataset)} samples")
+    # Load raw bytes into RAM (fast, no decoding), decode per-batch during training
+    max_load = args.max_samples if args.max_samples and args.max_samples < len(train_dataset) else None
+    train_dataset.preload_raw(max_samples=max_load)
 
     # Build tokenizer
     tokenizer = LipiTokenizer.build_character_level("en")
@@ -163,7 +159,7 @@ def main():
 
     train_loader = DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collate_ocr,
-        drop_last=True, num_workers=4, pin_memory=True,
+        drop_last=True, num_workers=16, pin_memory=True, persistent_workers=True,
     )
 
     # LR scheduler

@@ -68,23 +68,21 @@ class PARSeqLMDB(Dataset):
             self.num_samples = int(txn.get(b"num-samples").decode())
 
         self._valid_indices = list(range(self.num_samples))
-        self._cache: list[tuple[np.ndarray, str]] | None = None
+        self._raw_cache: list[tuple[bytes, str]] | None = None
 
-    def preload(self, max_samples: int | None = None, num_workers: int = 16):
-        """Preload all images into RAM using parallel decoding.
+    def preload_raw(self, max_samples: int | None = None):
+        """Load raw image bytes + labels into RAM (no decoding).
 
-        Reads raw bytes from LMDB (fast, sequential), then decodes
-        images in parallel across multiple processes.
+        LMDB sequential read is fast (~1 min for 1.5M samples).
+        Images are decoded lazily in __getitem__ when the dataloader
+        requests them — but from RAM instead of disk.
         """
-        import multiprocessing as mp
-        from functools import partial
-
+        import time
         n = min(max_samples or len(self), len(self))
-        print(f"Preloading {n} images into RAM ({num_workers} workers)...")
+        print(f"Loading {n} raw samples into RAM...")
+        t0 = time.time()
 
-        # Step 1: Read raw bytes from LMDB (sequential, fast)
-        print("  Reading raw bytes from LMDB...")
-        raw_data: list[tuple[bytes, str]] = []
+        self._raw_cache: list[tuple[bytes, str]] = []
         with self.env.begin(write=False) as txn:
             for i in range(n):
                 real_idx = self._valid_indices[i]
@@ -103,60 +101,27 @@ class PARSeqLMDB(Dataset):
 
                 label_bytes = txn.get(lbl_key)
                 label = label_bytes.decode("utf-8") if label_bytes else ""
-                raw_data.append((bytes(img_bytes), label))
+                self._raw_cache.append((bytes(img_bytes), label))
 
                 if (i + 1) % 500000 == 0:
-                    print(f"    {i+1}/{n} read...")
+                    elapsed = time.time() - t0
+                    print(f"  {i+1}/{n} read ({elapsed:.0f}s)")
 
-        print(f"  Read {len(raw_data)} samples. Decoding images...")
-
-        import time
-        self._cache = []
-        t0 = time.time()
-        fallback_count = 0
-
-        for i, (img_bytes, label) in enumerate(raw_data):
-            try:
-                buf = torch.frombuffer(bytearray(img_bytes), dtype=torch.uint8)
-                img_tensor = torchvision.io.decode_image(buf)
-                # img_tensor: (3, H, W) or (1, H, W) uint8
-                if img_tensor.shape[0] == 1:
-                    img_tensor = img_tensor.expand(3, -1, -1)
-                elif img_tensor.shape[0] == 4:
-                    img_tensor = img_tensor[:3]
-
-                h, w = img_tensor.shape[1], img_tensor.shape[2]
-                new_w = int(w * self.target_height / h)
-                new_w = min(max(new_w, 1), self.max_width)
-
-                img_tensor = TF.resize(img_tensor, [self.target_height, new_w], antialias=True)
-                crop = img_tensor.float().div_(127.5).sub_(1.0).numpy()
-                self._cache.append((crop, label))
-            except Exception:
-                img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-                crop = preprocess_crop(img, self.target_height, self.max_width)
-                self._cache.append((crop, label))
-                fallback_count += 1
-
-            if (i + 1) % 100000 == 0:
-                elapsed = time.time() - t0
-                rate = (i + 1) / elapsed
-                eta = (len(raw_data) - i - 1) / rate
-                print(f"    {i+1}/{len(raw_data)} decoded ({rate:.0f}/s, ETA {eta:.0f}s)")
-
-        if fallback_count:
-            print(f"    ({fallback_count} images fell back to PIL)")
-
-        self._valid_indices = list(range(len(self._cache)))
-        print(f"  Preloaded {len(self._cache)} images into RAM")
+        self._valid_indices = list(range(len(self._raw_cache)))
+        elapsed = time.time() - t0
+        size_gb = sum(len(b) for b, _ in self._raw_cache) / 1e9
+        print(f"  Loaded {len(self._raw_cache)} samples ({size_gb:.1f} GB) in {elapsed:.0f}s")
 
     def __len__(self) -> int:
         return len(self._valid_indices)
 
     def __getitem__(self, idx: int) -> tuple[np.ndarray, str]:
-        # Fast path: serve from RAM cache
-        if self._cache is not None:
-            return self._cache[self._valid_indices[idx]]
+        # Fast path: raw bytes in RAM, decode per-access
+        if self._raw_cache is not None:
+            img_bytes, label = self._raw_cache[self._valid_indices[idx]]
+            img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+            crop = preprocess_crop(img, self.target_height, self.max_width)
+            return crop, label
 
         # Slow path: read from LMDB on the fly
         real_idx = self._valid_indices[idx]
