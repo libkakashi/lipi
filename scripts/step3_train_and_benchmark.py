@@ -139,9 +139,13 @@ def main():
     train_dataset = PARSeqLMDB(args.train_dir)
     print(f"  Full dataset: {len(train_dataset)} samples")
 
-    # Preload into RAM — eliminates I/O bottleneck during training
-    max_preload = args.max_samples if args.max_samples and args.max_samples < len(train_dataset) else None
-    train_dataset.preload(max_samples=max_preload)
+    if args.max_samples and args.max_samples < len(train_dataset):
+        import random
+        random.seed(42)
+        from torch.utils.data import Subset
+        indices = random.sample(range(len(train_dataset)), args.max_samples)
+        train_dataset = Subset(train_dataset, indices)
+        print(f"  Using subset: {len(train_dataset)} samples")
 
     # Build tokenizer
     tokenizer = LipiTokenizer.build_character_level("en")
