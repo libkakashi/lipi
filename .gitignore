@@ -35,8 +35,8 @@ runs/
 training_data/datasets/
 training_data/vocabs/
 training_data/pdfs/
-training_data/word_lists/*.txt
-!training_data/word_lists/.gitkeep
+# Keep curated word lists, ignore generated ones
+!training_data/word_lists/*.txt
 
 # ONNX models (exported, not committed)
 models/
