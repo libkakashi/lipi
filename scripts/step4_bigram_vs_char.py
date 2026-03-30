@@ -137,9 +137,14 @@ def train_rnnt_head(
     head_params = list(pred_net.parameters()) + list(joint_net.parameters())
     optimizer = torch.optim.AdamW(head_params, lr=lr, weight_decay=0.01)
 
+    # Width-bucketed batching for GPU efficiency
+    from src.data.width_sampler import WidthBucketSampler, get_image_widths
+    widths = get_image_widths(train_dataset, target_height=32)
+    sampler = WidthBucketSampler(widths, batch_size=batch_size)
+
     loader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_ocr,
-        drop_last=True, num_workers=16, pin_memory=True, persistent_workers=True,
+        train_dataset, batch_sampler=sampler, collate_fn=collate_ocr,
+        num_workers=8, pin_memory=True,
     )
 
     total_steps = len(loader) * epochs
@@ -228,9 +233,9 @@ def main():
     parser.add_argument("--backbone", type=str, required=True, help="Step 3 backbone checkpoint")
     parser.add_argument("--train_dir", type=str, required=True, help="MJSynth LMDB path")
     parser.add_argument("--test_dir", type=str, required=True, help="Test benchmarks directory")
-    parser.add_argument("--epochs", type=int, default=2)
-    parser.add_argument("--max_samples", type=int, default=500000)
-    parser.add_argument("--batch_size", type=int, default=128)
+    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--max_samples", type=int, default=1000000)
+    parser.add_argument("--batch_size", type=int, default=400)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--device", type=str, default="auto")
     args = parser.parse_args()
@@ -250,8 +255,11 @@ def main():
         p.requires_grad = False
     print(f"  Backbone: {sum(p.numel() for p in encoder.parameters())/1e6:.2f}M params (frozen)")
 
-    # Load training data with raw byte preload
+    # Load training data
     train_full = PARSeqLMDB(args.train_dir)
+    print(f"  Full dataset: {len(train_full)} samples")
+
+    # Preload raw bytes + get widths for bucketed batching
     max_load = args.max_samples if args.max_samples < len(train_full) else None
     train_full.preload_raw(max_samples=max_load)
     train_dataset = train_full
