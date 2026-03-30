@@ -293,17 +293,38 @@ def main():
             n_batches += 1
             pbar.set_postfix(loss=f"{loss.item():.4f}", lr=f"{scheduler.get_last_lr()[0]:.2e}")
 
+            # Save checkpoint every 10% of epoch
+            total_batches = len(train_loader)
+            save_every = max(total_batches // 10, 1)
+            if n_batches % save_every == 0:
+                pct = n_batches * 100 // total_batches
+                ckpt_path = save_dir / f"step3_e{epoch}_p{pct}.pt"
+                torch.save({
+                    "encoder": encoder.state_dict(),
+                    "ctc_head": ctc_head.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "scheduler": scheduler.state_dict(),
+                    "scaler": scaler.state_dict(),
+                    "epoch": epoch,
+                    "step": n_batches,
+                    "loss": loss.item(),
+                }, ckpt_path)
+                print(f"\n  Checkpoint saved: {ckpt_path}")
+
         avg_loss = epoch_loss / max(n_batches, 1)
         elapsed = time.time() - start
         print(f"\nEpoch {epoch}: avg_loss={avg_loss:.4f}, time={elapsed:.0f}s")
 
-        # Save checkpoint
+        # Save end-of-epoch checkpoint
         ckpt_path = save_dir / f"step3_epoch{epoch}.pt"
         torch.save({
             "encoder": encoder.state_dict(),
             "ctc_head": ctc_head.state_dict(),
             "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "scaler": scaler.state_dict(),
             "epoch": epoch,
+            "step": n_batches,
             "loss": avg_loss,
         }, ckpt_path)
         print(f"  Saved: {ckpt_path}")
