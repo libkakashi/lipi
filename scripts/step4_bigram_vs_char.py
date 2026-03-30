@@ -139,12 +139,12 @@ def train_rnnt_head(
 
     # Width-bucketed batching for GPU efficiency
     from src.data.width_sampler import WidthBucketSampler, get_image_widths
-    widths = get_image_widths(train_dataset, target_height=32)
+    widths = get_image_widths(train_dataset, target_height=32, max_width=192)
     sampler = WidthBucketSampler(widths, batch_size=batch_size)
 
     loader = DataLoader(
         train_dataset, batch_sampler=sampler, collate_fn=collate_ocr,
-        num_workers=8, pin_memory=True,
+        num_workers=4, pin_memory=True,
     )
 
     total_steps = len(loader) * epochs
@@ -256,7 +256,7 @@ def main():
     print(f"  Backbone: {sum(p.numel() for p in encoder.parameters())/1e6:.2f}M params (frozen)")
 
     # Load training data
-    train_full = PARSeqLMDB(args.train_dir)
+    train_full = PARSeqLMDB(args.train_dir, max_width=192)
     print(f"  Full dataset: {len(train_full)} samples")
 
     # Preload raw bytes + get widths for bucketed batching
