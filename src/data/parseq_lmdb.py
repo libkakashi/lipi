@@ -22,6 +22,25 @@ from torch.utils.data import Dataset
 
 from src.data.dataset import preprocess_crop
 
+# Try turbojpeg for 2-4x faster JPEG decode
+try:
+    from turbojpeg import TurboJPEG
+    _tjpeg = TurboJPEG()
+    _HAS_TURBOJPEG = True
+except ImportError:
+    _HAS_TURBOJPEG = False
+
+
+def _fast_decode(img_bytes: bytes) -> Image.Image:
+    """Decode image bytes. Uses turbojpeg if available, PIL otherwise."""
+    if _HAS_TURBOJPEG:
+        try:
+            arr = _tjpeg.decode(img_bytes)  # returns BGR numpy array
+            return Image.fromarray(arr[:, :, ::-1])  # BGR → RGB
+        except Exception:
+            pass  # fall through to PIL for non-JPEG
+    return Image.open(io.BytesIO(img_bytes)).convert("RGB")
+
 
 class PARSeqLMDB(Dataset):
     """Read a PARSeq-format LMDB dataset.
@@ -110,10 +129,10 @@ class PARSeqLMDB(Dataset):
         return len(self._valid_indices)
 
     def __getitem__(self, idx: int) -> tuple[np.ndarray, str]:
-        # Fast path: raw bytes in RAM, decode with PIL per-worker
+        # Fast path: raw bytes in RAM, decode per-worker
         if self._raw_cache is not None:
             img_bytes, label = self._raw_cache[self._valid_indices[idx]]
-            img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+            img = _fast_decode(img_bytes)
             if self.augmentor is not None:
                 img = self.augmentor(img)
             crop = preprocess_crop(img, self.target_height, self.max_width)
@@ -139,7 +158,7 @@ class PARSeqLMDB(Dataset):
             label_bytes = txn.get(lbl_key)
             label = label_bytes.decode("utf-8") if label_bytes else ""
 
-        img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+        img = _fast_decode(img_bytes)
         if self.augmentor is not None:
             img = self.augmentor(img)
         crop = preprocess_crop(img, self.target_height, self.max_width)
