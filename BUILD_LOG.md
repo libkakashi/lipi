@@ -513,13 +513,106 @@ encoder features to learn from. Must re-run after training a proper backbone.
 
 **Action: train stronger backbone first (10 epochs, full MJSynth), then re-run Step 4.**
 
+### Step 3 v2: 3M MJSynth × 2 epochs (RTX 5090, 2026-03-30)
+- Switched to RTX 5090 (32GB VRAM)
+- 3M crops, 2 epochs, AdamW lr=7e-4, batch=600, bf16
+
+| Benchmark | Epoch 1 | Epoch 2 |
+|-----------|---------|---------|
+| IIIT5k | 65.0% | 67.9% |
+| IC13 | 72.7% | 76.7% |
+| IC15 | 38.1% | 41.9% |
+| SVT | 64.6% | 68.3% |
+| CUTE80 | 41.0% | 48.3% |
+
+Marginal improvement over 1M×3ep. Plateauing at ~68% IIIT5k.
+
+### Step 4 v2: Bigram vs Char (68% backbone)
+- Backbone: step3_3m epoch 2 (67.9% IIIT5k)
+- 2 epochs RNN-T on 500K MJSynth, frozen backbone
+
+| Benchmark | Char | Bigram | Delta |
+|-----------|------|--------|-------|
+| IIIT5k | 42.6% | 19.3% | -23.3% |
+| SVT | 38.2% | 20.6% | -17.6% |
+| IC13_1015 | 50.4% | 25.3% | -25.1% |
+| IC15_2077 | 25.8% | 11.6% | -14.3% |
+| AVERAGE | 37.0% | 17.6% | -19.4% |
+
+**Bigram 19.4% behind character.** But bigram loss still converging (1.24 vs 0.71).
+Bigram head has 78% more output classes → needs more training to converge.
+Also: backbone trained without augmentation → noisy per-frame features may hurt
+bigrams more (2 noisy frames vs 1 for character).
+**Decision deferred** — re-test after augmented backbone training.
+
+### Step 3 v3: Augmented Training (2026-03-30)
+- Resumed from step3_3m epoch 2 with augmentation (9 transforms) + cosine LR
+- 3M crops, cosine scheduler lr=3e-4
+
+| Benchmark | Pre-aug (e2) | Aug epoch 5 | Aug epoch 6 |
+|-----------|-------------|-------------|-------------|
+| IIIT5k | 67.9% | 67.2% | 60.2% |
+| IC13 | 76.7% | 72.8% | 67.2% |
+| IC15 | 41.9% | 43.2% | 39.0% |
+| SVT | 68.3% | 68.9% | 65.4% |
+
+**Epoch 6 regressed badly.** Root cause: cosine scheduler loaded from checkpoint
+had LR near zero by epoch 6. Model trained on hard augmented images with
+essentially no learning rate → weights degraded.
+
+**Fix applied:** Resume now creates a FRESH scheduler for remaining epochs
+instead of loading the old one.
+
+### Training Optimizations (RTX 5090)
+
+**GPU memory diagnosis:**
+- B=600, W=320 → 24.7 GB peak (not 9.8 GB as estimated)
+- Root cause: collate pads all images to widest in batch (320px)
+- Fix: width-bucketed batching + optional max_width cap
+
+**Width-bucketed batch sampler:**
+- Reads JPEG headers (no decode) to get widths
+- Groups similar widths → minimal padding per batch
+- Result: **2.1 it/s → 6.3 it/s (3x speedup)**
+
+**Data loading:**
+- PIL decode in workers is the bottleneck, not LMDB I/O
+- TurboJPEG installed (2.4x faster than PIL) but GPU is the bottleneck
+- DALI integration attempted — OOM issues with variable-width images, abandoned
+- Final approach: LMDB on-the-fly reads + 8 workers + width bucketing
+
+**Augmentation expanded to 19 transforms:**
+- Original 9: JPEG, blur, noise, brightness, contrast, rotation, perspective, shadow, downsample
+- Added: motion blur, elastic distortion, random erasing, color jitter,
+  erosion/dilation, paper texture, paper warp, spot light, flash glare, grayscale
+
+**Synthetic data generator built:**
+- Auto-discovers system fonts, categorizes (40% sans, 25% serif, 15% mono, 10% hand)
+- Filters bad fonts (symbol, barcode, broken glyph detection)
+- Random backgrounds (solid, gradient, noise), random text colors
+- Integrated augmentation, multi-process, direct LMDB output
+- 1300+ images/sec on 4 cores
+
+**Hindi bigrams curated:**
+- 73 Devanagari bigrams from 110K Hindi Wikipedia words
+- 37.7% compression on Hindi text
+- Hindi adapter vocab: 372 tokens (95 ASCII + 128 Devanagari + 75+73 bigrams)
+
+### Step 4 v3: Bigram vs Char on Augmented Backbone — RUNNING
+- Backbone: step3_aug epoch 5 (67.2% IIIT5k, augmented)
+- 3 epochs RNN-T on 1M MJSynth, width-bucketed batching
+- Awaiting results
+
 ### Validation Sequence Status
-1. [DONE] Download PARSeq LMDB data (MJSynth + eval benchmarks)
+1. [DONE] Download PARSeq LMDB data
 2. [DONE] Step 2: Overfit 100 real crops — **100% PASS**
-3. [DONE] Step 3: Train backbone 3ep/1M MJSynth — 67.5% IIIT5k (below target)
-4. [DONE] Step 4: Bigram vs char — INCONCLUSIVE (backbone too weak)
-5. [NEXT] Re-run Step 3: 10 epochs, full MJSynth (~8M crops)
-6. [NEXT] Re-run Step 4 on stronger backbone
-7. Step 5: Full backbone training (~$40-60)
-8. Step 6: First Hindi adapter (~$16-24)
+3. [DONE] Step 3 v1: 1M×3ep — 67.5% IIIT5k
+4. [DONE] Step 3 v2: 3M×2ep — 67.9% IIIT5k
+5. [DONE] Step 3 v3: augmented — 67.2% (epoch 5), regressed at epoch 6 (scheduler bug, fixed)
+6. [DONE] Step 4 v1: bigram vs char — INCONCLUSIVE (11% accuracy)
+7. [DONE] Step 4 v2: bigram vs char — char wins 37% vs 17.6% (bigram needs more training)
+8. [RUNNING] Step 4 v3: bigram vs char on augmented backbone (3 epochs, 1M samples)
+9. [NEXT] Retrain backbone with fixed scheduler + 19 augmentations + synthetic data
+10. Step 5: Full backbone training
+11. Step 6: First Hindi adapter
 
