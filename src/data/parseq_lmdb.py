@@ -37,12 +37,17 @@ class PARSeqLMDB(Dataset):
         max_width: int = 320,
         max_label_len: int = 25,
         case_sensitive: bool = True,
+        augment: bool = False,
     ):
         self.lmdb_path = str(lmdb_path)
         self.target_height = target_height
         self.max_width = max_width
         self.max_label_len = max_label_len
         self.case_sensitive = case_sensitive
+        self.augmentor = None
+        if augment:
+            from src.data.augmentation import RandAugmentOCR
+            self.augmentor = RandAugmentOCR(n_ops=2, p=0.5)
 
         self.env = lmdb.open(
             self.lmdb_path,
@@ -109,6 +114,8 @@ class PARSeqLMDB(Dataset):
         if self._raw_cache is not None:
             img_bytes, label = self._raw_cache[self._valid_indices[idx]]
             img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+            if self.augmentor is not None:
+                img = self.augmentor(img)
             crop = preprocess_crop(img, self.target_height, self.max_width)
             return crop, label
 
@@ -133,6 +140,8 @@ class PARSeqLMDB(Dataset):
             label = label_bytes.decode("utf-8") if label_bytes else ""
 
         img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+        if self.augmentor is not None:
+            img = self.augmentor(img)
         crop = preprocess_crop(img, self.target_height, self.max_width)
         return crop, label
 

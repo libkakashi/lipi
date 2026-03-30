@@ -126,6 +126,9 @@ def main():
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--save_dir", type=str, default="checkpoints/step3")
     parser.add_argument("--resume", type=str, default=None, help="Resume from checkpoint path")
+    parser.add_argument("--augment", action="store_true", help="Enable training augmentation")
+    parser.add_argument("--scheduler", type=str, default="onecycle", choices=["onecycle", "cosine"],
+                        help="LR scheduler (cosine recommended for resume)")
     args = parser.parse_args()
 
     if args.device == "auto":
@@ -137,8 +140,10 @@ def main():
 
     # Load training data
     print(f"Loading training data from {args.train_dir}...")
-    train_dataset = PARSeqLMDB(args.train_dir)
+    train_dataset = PARSeqLMDB(args.train_dir, augment=args.augment)
     print(f"  Full dataset: {len(train_dataset)} samples")
+    if args.augment:
+        print(f"  Augmentation: ENABLED")
 
     # Load raw bytes into RAM (fast, no decoding), decode per-batch during training
     max_load = args.max_samples if args.max_samples and args.max_samples < len(train_dataset) else None
@@ -165,9 +170,14 @@ def main():
 
     # LR scheduler
     total_steps = len(train_loader) * args.epochs
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer, max_lr=args.lr, total_steps=total_steps, pct_start=0.1,
-    )
+    if args.scheduler == "cosine":
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=total_steps, eta_min=1e-6,
+        )
+    else:
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer, max_lr=args.lr, total_steps=total_steps, pct_start=0.1,
+        )
 
     # Mixed precision
     use_amp = device.type == "cuda"
