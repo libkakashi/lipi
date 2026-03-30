@@ -16,22 +16,11 @@ But the images may be different sizes and formats (not pre-normalized to 32px).
 import io
 import lmdb
 import numpy as np
-import torch
-import torchvision
-import torchvision.transforms.functional as TF
 from pathlib import Path
 from PIL import Image
 from torch.utils.data import Dataset
 
 from src.data.dataset import preprocess_crop
-
-
-def _decode_image(args: tuple) -> tuple[np.ndarray, str]:
-    """Decode a single image from raw bytes. Module-level for pickling."""
-    img_bytes, label, target_h, max_w = args
-    img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-    crop = preprocess_crop(img, target_h, max_w)
-    return (crop, label)
 
 
 class PARSeqLMDB(Dataset):

@@ -38,67 +38,6 @@ from src.training.loss import ctc_loss
 from src.data.bigrams import LipiTokenizer
 from src.data.parseq_lmdb import PARSeqLMDB, discover_parseq_structure
 from src.data.dataset import collate_ocr
-import torchvision
-import torchvision.transforms.functional as TF
-
-
-def collate_raw(batch):
-    """Collate raw byte tensors + labels. No image decode yet."""
-    byte_tensors, labels = zip(*batch)
-    return list(byte_tensors), list(labels)
-
-
-def gpu_decode_batch(byte_tensors, labels, target_height=32, max_width=320, device="cuda"):
-    """Decode + resize a batch of images on GPU.
-
-    Args:
-        byte_tensors: list of uint8 tensors (raw JPEG/PNG bytes)
-        labels: list of strings
-        target_height: resize height
-        max_width: max width
-        device: cuda device
-
-    Returns:
-        (padded_images, labels, widths) matching collate_ocr format
-    """
-    crops = []
-    valid_labels = []
-
-    for bt, label in zip(byte_tensors, labels):
-        try:
-            img = torchvision.io.decode_image(bt)  # (C, H, W) uint8
-            if img.shape[0] == 1:
-                img = img.expand(3, -1, -1)
-            elif img.shape[0] == 4:
-                img = img[:3]
-
-            h, w = img.shape[1], img.shape[2]
-            new_w = int(w * target_height / h)
-            new_w = min(max(new_w, 1), max_width)
-
-            img = TF.resize(img, [target_height, new_w], antialias=False)
-            # Normalize to [-1, 1]
-            crop = img.float().div_(127.5).sub_(1.0)
-            crops.append(crop)
-            valid_labels.append(label)
-        except Exception:
-            continue
-
-    if not crops:
-        return None, None, None
-
-    # Pad to max width
-    max_w = max(c.shape[2] for c in crops)
-    B = len(crops)
-    padded = torch.zeros(B, 3, target_height, max_w, device=device)
-    widths = torch.zeros(B, dtype=torch.long)
-
-    for i, c in enumerate(crops):
-        w = c.shape[2]
-        padded[i, :, :, :w] = c
-        widths[i] = w
-
-    return padded, valid_labels, widths
 
 
 def ctc_greedy_decode(logits, tokenizer):
