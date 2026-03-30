@@ -1,39 +1,42 @@
 """
-NVIDIA DALI Pipeline for GPU-accelerated data loading.
+GPU-accelerated data loader with background prefetch.
 
-Decodes JPEG/PNG on GPU, does resize + normalize + augmentation on GPU.
-Zero CPU image processing during training.
+Decodes JPEG on GPU via torchvision.io.decode_jpeg.
+Uses a background thread + separate CUDA stream to overlap
+decode of next batch with model training on current batch.
 
 Usage:
-    loader = DALIOCRLoader(lmdb_path, batch_size=600, augment=True)
+    loader = GPULoader(lmdb_path, batch_size=600, augment=True)
     for images, labels, widths in loader:
-        # images: (B, 3, 32, max_W) on GPU
-        # labels: list of strings
-        # widths: (B,) original widths
-
-Requires: pip install nvidia-dali-cuda120
+        # images already on GPU, model trains immediately
 """
 
+import io
 import random
 import time
-import io
+import threading
+import queue
+
+import lmdb
 import numpy as np
 import torch
-import lmdb
+import torchvision
+import torchvision.transforms.functional as TF
 from PIL import Image
 
 from src.data.dataset import preprocess_crop
 
 
-class DALIOCRLoader:
-    """GPU-accelerated OCR data loader.
+class GPULoader:
+    """GPU-decoded data loader with background prefetch.
 
-    Phase 1: Reads raw bytes from LMDB into RAM (fast, ~10s for 3M).
-    Phase 2: Each batch — decode + resize + augment on GPU via torchvision.
-    Phase 3: Pad and collate on GPU.
+    Architecture:
+      Main thread:     trains model on batch N
+      BG thread:       decodes batch N+1 and N+2 on a separate CUDA stream
 
-    The key insight: instead of PIL decode in 16 CPU workers (slow),
-    we decode in the main thread using torch JPEG decode on GPU.
+    The bg thread reads raw bytes from RAM, decodes JPEG on GPU,
+    resizes, normalizes, pads, and puts the ready tensor into a queue.
+    Main thread just pops from the queue — zero wait if prefetch keeps up.
     """
 
     def __init__(
@@ -45,34 +48,31 @@ class DALIOCRLoader:
         max_width: int = 320,
         augment: bool = False,
         device: str = "cuda:0",
-        shuffle: bool = True,
+        prefetch: int = 3,
     ):
         self.batch_size = batch_size
         self.target_height = target_height
         self.max_width = max_width
         self.augment = augment
         self.device = torch.device(device)
-        self.shuffle = shuffle
+        self.prefetch = prefetch
 
         # Load raw bytes into RAM
         self.image_bytes, self.labels = self._load_raw(lmdb_path, max_samples)
         self.n = len(self.image_bytes)
-        self.indices = list(range(self.n))
 
-        # Try to import torchvision GPU decode
-        import torchvision
-        self._decode = torchvision.io.decode_jpeg
-        self._resize = torchvision.transforms.functional.resize
+        # Check GPU JPEG decode support
+        self._gpu_decode_available = self._check_gpu_decode()
 
-        # Warmup GPU decode
-        test_bytes = torch.frombuffer(bytearray(self.image_bytes[0]), dtype=torch.uint8)
+    def _check_gpu_decode(self):
         try:
-            test_img = self._decode(test_bytes, device=self.device)
-            self._gpu_decode = True
+            buf = torch.frombuffer(bytearray(self.image_bytes[0]), dtype=torch.uint8)
+            torchvision.io.decode_jpeg(buf, device=self.device)
             print(f"  GPU JPEG decode: available")
+            return True
         except Exception:
-            self._gpu_decode = False
-            print(f"  GPU JPEG decode: not available, using CPU torchvision")
+            print(f"  GPU JPEG decode: not available, using CPU")
+            return False
 
     def _load_raw(self, lmdb_path, max_samples):
         env = lmdb.open(lmdb_path, max_readers=4, readonly=True,
@@ -118,113 +118,119 @@ class DALIOCRLoader:
 
         return image_bytes, labels
 
-    def _decode_and_resize(self, raw_bytes: bytes) -> torch.Tensor:
-        """Decode image and resize to target height. Returns (3, H, W) float tensor on GPU."""
-        buf = torch.frombuffer(bytearray(raw_bytes), dtype=torch.uint8)
-
+    def _decode_one(self, raw_bytes: bytes) -> torch.Tensor:
+        """Decode one image to (3, H, W) float32 on GPU. Returns None on failure."""
         try:
-            if self._gpu_decode:
-                # GPU JPEG decode (only works for JPEG)
-                img = self._decode(buf, device=self.device)  # (3, H, W) uint8 on GPU
+            buf = torch.frombuffer(bytearray(raw_bytes), dtype=torch.uint8)
+            if self._gpu_decode_available:
+                img = torchvision.io.decode_jpeg(buf, device=self.device)
             else:
-                img = self._decode(buf)  # CPU decode
+                img = torchvision.io.decode_image(buf)
                 img = img.to(self.device)
         except Exception:
-            # Fallback: PIL for non-JPEG (PNG etc)
-            pil_img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
-            arr = np.array(pil_img)
-            img = torch.from_numpy(arr).permute(2, 0, 1).to(self.device)  # (3, H, W)
+            # Fallback for PNG or corrupt images
+            try:
+                pil_img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
+                arr = np.array(pil_img)
+                img = torch.from_numpy(arr).permute(2, 0, 1).to(self.device)
+            except Exception:
+                return None
 
-        # Ensure 3 channels
         if img.shape[0] == 1:
             img = img.expand(3, -1, -1)
         elif img.shape[0] == 4:
             img = img[:3]
 
-        # Resize to target height, preserve aspect ratio
         h, w = img.shape[1], img.shape[2]
         new_w = int(w * self.target_height / h)
         new_w = min(max(new_w, 1), self.max_width)
-        img = self._resize(img, [self.target_height, new_w], antialias=False)
 
-        # Normalize to [-1, 1]
-        return img.float().div_(127.5).sub_(1.0)
+        img = TF.resize(img, [self.target_height, new_w], antialias=False)
+        img = img.float().div_(127.5).sub_(1.0)
 
-    def _augment_gpu(self, img: torch.Tensor) -> torch.Tensor:
-        """GPU augmentation — simple but effective transforms."""
-        if random.random() > 0.5:
-            return img
+        if self.augment and random.random() > 0.5:
+            if random.random() < 0.3:
+                img = img * random.uniform(0.7, 1.3)
+            if random.random() < 0.3:
+                mean = img.mean()
+                img = (img - mean) * random.uniform(0.7, 1.3) + mean
+            if random.random() < 0.2:
+                img = img + torch.randn_like(img) * 0.05
+            img = img.clamp(-1, 1)
 
-        # Random brightness
-        if random.random() < 0.3:
-            factor = random.uniform(0.7, 1.3)
-            img = img * factor
+        return img
 
-        # Random contrast
-        if random.random() < 0.3:
-            mean = img.mean()
-            factor = random.uniform(0.7, 1.3)
-            img = (img - mean) * factor + mean
+    def _build_batch(self, batch_indices: list[int], stream: torch.cuda.Stream) -> tuple:
+        """Decode a batch of images on a given CUDA stream."""
+        with torch.cuda.stream(stream):
+            crops = []
+            batch_labels = []
 
-        # Gaussian noise
-        if random.random() < 0.2:
-            noise = torch.randn_like(img) * 0.05
-            img = img + noise
+            for idx in batch_indices:
+                crop = self._decode_one(self.image_bytes[idx])
+                if crop is not None:
+                    crops.append(crop)
+                    batch_labels.append(self.labels[idx])
 
-        return img.clamp(-1, 1)
+            if not crops:
+                return None, None, None
+
+            max_w = max(c.shape[2] for c in crops)
+            B = len(crops)
+            padded = torch.zeros(B, 3, self.target_height, max_w, device=self.device)
+            widths = torch.zeros(B, dtype=torch.long, device=self.device)
+
+            for i, c in enumerate(crops):
+                padded[i, :, :, :c.shape[2]] = c
+                widths[i] = c.shape[2]
+
+            # Don't hold references to individual crops
+            del crops
+
+            return padded, batch_labels, widths
+
+    def _prefetch_worker(self, batch_list: list[list[int]], out_queue: queue.Queue,
+                         stream: torch.cuda.Stream):
+        """Background thread: decode batches and push to queue."""
+        for batch_indices in batch_list:
+            result = self._build_batch(batch_indices, stream)
+            out_queue.put(result)
+        out_queue.put(None)  # Sentinel
 
     def __len__(self):
         return (self.n + self.batch_size - 1) // self.batch_size
 
     def __iter__(self):
-        if self.shuffle:
-            random.shuffle(self.indices)
-        self.pos = 0
-        return self
+        indices = list(range(self.n))
+        random.shuffle(indices)
 
-    def __next__(self):
-        if self.pos >= self.n:
-            raise StopIteration
+        # Split into batches
+        batch_list = []
+        for i in range(0, self.n, self.batch_size):
+            batch_list.append(indices[i:i + self.batch_size])
 
-        end = min(self.pos + self.batch_size, self.n)
-        batch_indices = self.indices[self.pos:end]
-        self.pos = end
+        # Create a separate CUDA stream for decoding
+        decode_stream = torch.cuda.Stream(device=self.device)
 
-        # Two-pass approach to avoid OOM:
-        # Pass 1: decode on CPU to get widths (cheap, no GPU memory)
-        # Pass 2: allocate padded tensor once, decode directly into it
+        # Start background prefetch thread
+        q = queue.Queue(maxsize=self.prefetch)
+        thread = threading.Thread(
+            target=self._prefetch_worker,
+            args=(batch_list, q, decode_stream),
+            daemon=True,
+        )
+        thread.start()
 
-        # Pass 1: get widths via PIL (fast, just reads header)
-        batch_widths = []
-        batch_labels = []
-        valid_indices = []
-        for idx in batch_indices:
-            try:
-                pil_img = Image.open(io.BytesIO(self.image_bytes[idx]))
-                w, h = pil_img.size
-                new_w = int(w * self.target_height / h)
-                new_w = min(max(new_w, 1), self.max_width)
-                batch_widths.append(new_w)
-                batch_labels.append(self.labels[idx])
-                valid_indices.append(idx)
-            except Exception:
+        # Yield batches from queue
+        while True:
+            result = q.get()
+            if result is None:
+                break
+            padded, labels, widths = result
+            if padded is None:
                 continue
+            # Sync the decode stream before yielding to training
+            torch.cuda.current_stream(self.device).wait_stream(decode_stream)
+            yield padded, labels, widths
 
-        if not valid_indices:
-            return self.__next__()
-
-        # Pass 2: allocate padded tensor, decode directly into it
-        max_w = max(batch_widths)
-        B = len(valid_indices)
-        padded = torch.zeros(B, 3, self.target_height, max_w, device=self.device)
-        widths = torch.tensor(batch_widths, dtype=torch.long, device=self.device)
-
-        for i, idx in enumerate(valid_indices):
-            crop = self._decode_and_resize(self.image_bytes[idx])
-            if self.augment:
-                crop = self._augment_gpu(crop)
-            w = crop.shape[2]
-            padded[i, :, :, :w] = crop
-            del crop  # free immediately
-
-        return padded, batch_labels, widths
+        thread.join()

@@ -145,14 +145,14 @@ def main():
     use_gpu_loader = getattr(args, 'gpu_loader', False)
 
     if use_gpu_loader:
-        from src.data.dali_pipeline import DALIOCRLoader
+        from src.data.dali_pipeline import GPULoader
         max_load = args.max_samples if args.max_samples and args.max_samples > 0 else None
-        train_loader = DALIOCRLoader(
+        train_loader = GPULoader(
             args.train_dir, batch_size=args.batch_size,
             max_samples=max_load, augment=args.augment,
-            device=str(device),
+            device=str(device), prefetch=3,
         )
-        print(f"  GPU loader: ENABLED ({len(train_loader)} batches)")
+        print(f"  GPU loader: ENABLED ({len(train_loader)} batches, prefetch=3)")
     else:
         train_dataset = PARSeqLMDB(args.train_dir, augment=args.augment)
         print(f"  Full dataset: {len(train_dataset)} samples")
