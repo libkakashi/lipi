@@ -130,6 +130,7 @@ def main():
     parser.add_argument("--scheduler", type=str, default="onecycle", choices=["onecycle", "cosine"],
                         help="LR scheduler (cosine recommended for resume)")
     parser.add_argument("--gpu-loader", action="store_true", help="Use GPU decode (requires torchvision)")
+    parser.add_argument("--max-width", type=int, default=192, help="Max image width after resize (default 192, covers 93%% of data)")
     args = parser.parse_args()
 
     if args.device == "auto":
@@ -154,7 +155,7 @@ def main():
         )
         print(f"  DALI GPU loader: ENABLED ({len(train_loader)} batches)")
     else:
-        train_dataset = PARSeqLMDB(args.train_dir, augment=args.augment)
+        train_dataset = PARSeqLMDB(args.train_dir, augment=args.augment, max_width=args.max_width)
         print(f"  Full dataset: {len(train_dataset)} samples")
         if args.augment:
             print(f"  Augmentation: ENABLED")
