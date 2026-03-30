@@ -33,7 +33,7 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.model.encoder import LipiEncoder
-from src.training.foundation_trainer import CTCHead
+from src.training.foundation_trainer import CTCHead, CTCHeadMLP, CTCHeadBiLSTM
 from src.training.loss import ctc_loss
 from src.data.bigrams import LipiTokenizer
 from src.data.parseq_lmdb import PARSeqLMDB, discover_parseq_structure
@@ -51,7 +51,7 @@ def ctc_greedy_decode(logits, tokenizer):
     return results
 
 
-def evaluate(encoder, ctc_head, tokenizer, test_dir, device, batch_size=64):
+def evaluate(encoder, ctc_head, tokenizer, test_dir, device, batch_size=64, max_width=192):
     """Evaluate on all available benchmarks in test_dir."""
     encoder.eval()
     ctc_head.eval()
@@ -70,7 +70,7 @@ def evaluate(encoder, ctc_head, tokenizer, test_dir, device, batch_size=64):
 
     for name, path in sorted(benchmarks.items()):
         try:
-            dataset = PARSeqLMDB(path)
+            dataset = PARSeqLMDB(path, max_width=max_width)
         except Exception as e:
             print(f"  {name:<25} {'ERROR':>8} — {e}")
             continue
@@ -130,6 +130,10 @@ def main():
     parser.add_argument("--scheduler", type=str, default="onecycle", choices=["onecycle", "cosine"],
                         help="LR scheduler (cosine recommended for resume)")
     parser.add_argument("--max-width", type=int, default=192, help="Max image width after resize (default 192, covers 93%% of data)")
+    parser.add_argument("--model", type=str, default="12m", choices=["12m", "56m"],
+                        help="Backbone model size")
+    parser.add_argument("--ctc-head", type=str, default="linear", choices=["linear", "mlp", "bilstm"],
+                        help="CTC head type")
     args = parser.parse_args()
 
     if args.device == "auto":
@@ -183,8 +187,24 @@ def main():
     print(f"  Vocab size: {tokenizer.vocab_size}")
 
     # Build model
-    encoder = LipiEncoder().to(device)
-    ctc_head = CTCHead(encoder.output_dim, tokenizer.vocab_size).to(device)
+    if args.model == "56m":
+        encoder = LipiEncoder(
+            stage1_dim=288, stage1_heads=9, stage1_blocks=8,
+            stage1_window_h=4, stage1_window_w=4, stage1_mlp_ratio=4,
+            stage2_dim=576, stage2_heads=18, stage2_blocks=12,
+            stage2_window_h=4, stage2_window_w=16, stage2_mlp_ratio=4,
+            stage3_dim=576, stage3_heads=18, stage3_blocks=0,
+            heavy_stem=True,
+        ).to(device)
+    else:
+        encoder = LipiEncoder().to(device)
+
+    if args.ctc_head == "bilstm":
+        ctc_head = CTCHeadBiLSTM(encoder.output_dim, tokenizer.vocab_size).to(device)
+    elif args.ctc_head == "mlp":
+        ctc_head = CTCHeadMLP(encoder.output_dim, tokenizer.vocab_size).to(device)
+    else:
+        ctc_head = CTCHead(encoder.output_dim, tokenizer.vocab_size).to(device)
 
     total_params = sum(p.numel() for p in encoder.parameters())
     print(f"  Encoder params: {total_params/1e6:.2f}M")
@@ -302,6 +322,7 @@ def main():
             loss = ctc_loss(logits.float(), targets, enc_lengths, target_lengths)
 
             if torch.isinf(loss) or torch.isnan(loss):
+                print(f"\n  [WARN] Skipped batch {batch_idx}: loss={'inf' if torch.isinf(loss) else 'nan'}")
                 continue
 
             optimizer.zero_grad()
@@ -359,7 +380,8 @@ def main():
 
         # Evaluate after each epoch
         print(f"\n  Evaluation after epoch {epoch}:")
-        results = evaluate(encoder, ctc_head, tokenizer, args.test_dir, device)
+        results = evaluate(encoder, ctc_head, tokenizer, args.test_dir, device,
+                           max_width=args.max_width)
 
     # Final summary
     total_time = time.time() - start

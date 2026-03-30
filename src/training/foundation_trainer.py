@@ -164,7 +164,7 @@ class FoundationTrainer:
                 for i, ids in enumerate(target_ids):
                     targets[i, :len(ids)] = torch.tensor(ids, dtype=torch.long)
                 targets = targets.to(self.device, non_blocking=True)
-                target_lengths_t = torch.tensor(target_lengths, dtype=torch.long)
+                target_lengths_t = torch.tensor(target_lengths, dtype=torch.long, device=self.device)
 
                 # Forward pass with mixed precision
                 with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
