@@ -223,14 +223,16 @@ def main():
         if "scaler" in ckpt:
             scaler.load_state_dict(ckpt["scaler"])
 
-        saved_step = ckpt.get("step", 0)
         saved_epoch = ckpt.get("epoch", 1)
-        total_batches = len(train_loader)
 
-        if saved_step > 0 and saved_step < total_batches:
+        # Check if this is a mid-epoch checkpoint (filename contains _p)
+        is_mid_epoch = "_p" in str(args.resume) and "epoch" not in str(Path(args.resume).stem)
+        saved_step = ckpt.get("step", 0)
+
+        if is_mid_epoch and saved_step > 0:
             start_epoch = saved_epoch
             skip_batches = saved_step
-            print(f"  Resumed at epoch {start_epoch}, step {skip_batches}/{total_batches}, loss was {ckpt.get('loss', '?')}")
+            print(f"  Resumed mid-epoch {start_epoch} at step {skip_batches}, loss was {ckpt.get('loss', '?')}")
         else:
             start_epoch = saved_epoch + 1
             print(f"  Resumed at epoch {start_epoch}, loss was {ckpt.get('loss', '?')}")
