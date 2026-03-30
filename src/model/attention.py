@@ -340,3 +340,60 @@ class GlobalBlock(nn.Module):
         x = x + self.attn(self.norm1(x), seq_len)
         x = x + self.mlp(self.norm2(x))
         return x
+
+
+class ParallelBlock(nn.Module):
+    """VIPTR-style parallel local + global attention block.
+
+    Runs SWA (local) and Global attention in parallel on the same input,
+    then merges their outputs. Each frame gets both fine-grained local
+    detail AND full-sequence context in a single block.
+
+    2x compute per block vs SWA-only, but richer features.
+    Use for 2D stages (before height collapse).
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        window_h: int = 4,
+        window_w: int = 4,
+        shift: bool = False,
+        mlp_ratio: int = 3,
+    ):
+        super().__init__()
+        # Local branch (SWA)
+        self.norm_local = nn.LayerNorm(dim)
+        self.local_attn = ShiftedWindowAttention(dim, num_heads, window_h, window_w, shift)
+
+        # Global branch
+        self.norm_global = nn.LayerNorm(dim)
+        self.global_attn = GlobalAttention(dim, num_heads)
+
+        # Merge: project concatenated local+global back to dim
+        self.merge = nn.Linear(dim * 2, dim)
+
+        # Shared MLP after merge
+        self.norm2 = nn.LayerNorm(dim)
+        self.mlp = MLP(dim, mlp_ratio)
+
+    def forward(self, x: Tensor, h: int, w: int) -> Tensor:
+        """
+        Args:
+            x: (B, h*w, C)
+            h, w: spatial dimensions.
+
+        Returns: (B, h*w, C)
+        """
+        # Parallel attention
+        local_out = self.local_attn(self.norm_local(x), h, w)
+        global_out = self.global_attn(self.norm_global(x), h * w)
+
+        # Merge local + global
+        merged = torch.cat([local_out, global_out], dim=-1)  # (B, h*w, 2*C)
+        merged = self.merge(merged)  # (B, h*w, C)
+
+        x = x + merged
+        x = x + self.mlp(self.norm2(x))
+        return x

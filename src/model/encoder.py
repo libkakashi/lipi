@@ -23,7 +23,7 @@ from torch import Tensor
 
 from src.model.stem import ConvNeXtStem, ResNetStem
 from src.model.pooling import LearnedHeightPooling
-from src.model.attention import SWABlock, GlobalBlock
+from src.model.attention import SWABlock, GlobalBlock, ParallelBlock
 
 
 class LipiEncoder(nn.Module):
@@ -52,6 +52,7 @@ class LipiEncoder(nn.Module):
         stage3_heads: int = 12,
         stage3_blocks: int = 3,
         stage3_mlp_ratio: int = 4,
+        stage3_window_w: int = 0,  # 0 = global attention (default), >0 = SWA with this width
         heavy_stem: bool = False,
     ):
         super().__init__()
@@ -65,15 +66,12 @@ class LipiEncoder(nn.Module):
         # Channel projection: stem_channels -> stage1_dim
         self.proj1 = nn.Linear(stem_channels, stage1_dim)
 
-        # Stage 1: SWA blocks with alternating shift
+        # Stage 1: SWA blocks — tight windows for single-character features
         self.stage1 = nn.ModuleList([
             SWABlock(
-                dim=stage1_dim,
-                num_heads=stage1_heads,
-                window_h=stage1_window_h,
-                window_w=stage1_window_w,
-                shift=(i % 2 == 1),
-                mlp_ratio=stage1_mlp_ratio,
+                dim=stage1_dim, num_heads=stage1_heads,
+                window_h=stage1_window_h, window_w=stage1_window_w,
+                shift=(i % 2 == 1), mlp_ratio=stage1_mlp_ratio,
             )
             for i in range(stage1_blocks)
         ])
@@ -87,14 +85,12 @@ class LipiEncoder(nn.Module):
         self.proj2 = nn.Linear(stage1_dim, stage2_dim)
 
         # Stage 2: SWA blocks with alternating shift
+        # Stage 2: SWA blocks — wider windows for neighbor context
         self.stage2 = nn.ModuleList([
             SWABlock(
-                dim=stage2_dim,
-                num_heads=stage2_heads,
-                window_h=stage2_window_h,
-                window_w=stage2_window_w,
-                shift=(i % 2 == 1),
-                mlp_ratio=stage2_mlp_ratio,
+                dim=stage2_dim, num_heads=stage2_heads,
+                window_h=stage2_window_h, window_w=stage2_window_w,
+                shift=(i % 2 == 1), mlp_ratio=stage2_mlp_ratio,
             )
             for i in range(stage2_blocks)
         ])
@@ -104,15 +100,26 @@ class LipiEncoder(nn.Module):
             channels=stage2_dim, h_in=4, h_out=1
         )
 
-        # Stage 3: Global self-attention blocks (1D sequence)
-        self.stage3 = nn.ModuleList([
-            GlobalBlock(
-                dim=stage3_dim,
-                num_heads=stage3_heads,
-                mlp_ratio=stage3_mlp_ratio,
-            )
-            for _ in range(stage3_blocks)
-        ])
+        # Stage 3: after height collapse (1D sequence)
+        # Global (default) or wide SWA for larger models
+        self._stage3_global = (stage3_window_w == 0)
+        if self._stage3_global:
+            self.stage3 = nn.ModuleList([
+                GlobalBlock(
+                    dim=stage3_dim, num_heads=stage3_heads,
+                    mlp_ratio=stage3_mlp_ratio,
+                )
+                for _ in range(stage3_blocks)
+            ])
+        else:
+            self.stage3 = nn.ModuleList([
+                SWABlock(
+                    dim=stage3_dim, num_heads=stage3_heads,
+                    window_h=1, window_w=stage3_window_w,
+                    shift=(i % 2 == 1), mlp_ratio=stage3_mlp_ratio,
+                )
+                for i in range(stage3_blocks)
+            ])
 
         # Final layer norm
         self.norm = nn.LayerNorm(stage3_dim)
@@ -171,9 +178,12 @@ class LipiEncoder(nn.Module):
         # (B, C2, 1, w) -> squeeze height -> (B, w, C2) = (B, T, 384)
         x = x.squeeze(2).permute(0, 2, 1)
 
-        # Stage 3: Global self-attention (1D sequence)
+        # Stage 3: 1D sequence attention (global or wide SWA)
         for block in self.stage3:
-            x = block(x, seq_len=w)
+            if self._stage3_global:
+                x = block(x, seq_len=w)
+            else:
+                x = block(x, h=1, w=w)
 
         # Final norm
         x = self.norm(x)
