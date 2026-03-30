@@ -15,6 +15,7 @@ import tempfile
 from pathlib import Path
 
 from src.model.encoder import LipiEncoder
+from src.data.color import INPUT_CHANNELS
 
 
 @pytest.fixture
@@ -26,7 +27,7 @@ def encoder():
 
 def _export_encoder_onnx(encoder, onnx_path: str):
     """Helper to export encoder to ONNX with correct settings."""
-    dummy = torch.randn(1, 3, 32, 128)
+    dummy = torch.randn(1, INPUT_CHANNELS, 32, 128)
 
     # Use dynamic_shapes (torch 2.11+ preferred over dynamic_axes)
     batch = torch.export.Dim("batch", min=1, max=64)
@@ -51,7 +52,7 @@ class TestEncoderShapes:
 
     @pytest.mark.parametrize("width", [32, 64, 128, 256, 320])
     def test_output_shape_various_widths(self, encoder, width):
-        x = torch.randn(1, 3, 32, width)
+        x = torch.randn(1, INPUT_CHANNELS, 32, width)
         features, lengths = encoder(x)
         expected_T = width // 4
         assert features.shape == (1, expected_T, 384)
@@ -60,7 +61,7 @@ class TestEncoderShapes:
 
     @pytest.mark.parametrize("batch_size", [1, 4, 16])
     def test_output_shape_various_batches(self, encoder, batch_size):
-        x = torch.randn(batch_size, 3, 32, 128)
+        x = torch.randn(batch_size, INPUT_CHANNELS, 32, 128)
         features, lengths = encoder(x)
         assert features.shape == (batch_size, 32, 384)
         assert lengths.shape == (batch_size,)
@@ -75,7 +76,7 @@ class TestEncoderGradients:
     def test_backward_pass(self):
         encoder = LipiEncoder()
         encoder.train()
-        x = torch.randn(2, 3, 32, 128)
+        x = torch.randn(2, INPUT_CHANNELS, 32, 128)
         features, lengths = encoder(x)
         loss = features.sum()
         loss.backward()
@@ -108,7 +109,7 @@ class TestEncoderONNX:
             _export_encoder_onnx(encoder, onnx_path)
 
             # PyTorch inference
-            test_input = torch.randn(1, 3, 32, 128)
+            test_input = torch.randn(1, INPUT_CHANNELS, 32, 128)
             with torch.no_grad():
                 pt_features, pt_lengths = encoder(test_input)
 

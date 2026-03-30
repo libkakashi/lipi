@@ -7,7 +7,7 @@ Two-stage routing for script-specific expert selection:
     Visually maximally distinct families. Stem conv features handle this.
     Routes to group-specific Stage 1 expert MLPs.
 
-  LID-2 (after Stage 1): Fine script classification (15 scripts).
+  LID-2 (after Stage 1): Fine script classification (17 scripts).
     Distinguishes within-group scripts (e.g., Tamil vs Malayalam).
     SWA features capture full character shapes needed for this.
     Routes to script-specific Stage 2 expert MLPs + BiLSTM heads.

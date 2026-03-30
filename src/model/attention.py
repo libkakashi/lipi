@@ -317,12 +317,13 @@ class SWABlock(nn.Module):
 
 
 class SWABlockMoE(nn.Module):
-    """SWA block with group-specific expert MLPs.
+    """SWA block with shared + expert MLPs.
 
-    Shared attention (spatial relationships are universal across scripts),
-    but separate MLPs per group (interpretation differs per script family).
+    Shared attention: spatial relationships are universal across scripts.
+    Shared MLP: universal characters (digits, punctuation, common symbols).
+    Expert MLPs: script-specific interpretation (one per group).
 
-    At forward time, group_ids routes each sample to its group's MLP.
+    All three are additive residuals on the same features.
     """
 
     def __init__(
@@ -340,7 +341,8 @@ class SWABlockMoE(nn.Module):
         self.norm1 = nn.LayerNorm(dim)
         self.attn = ShiftedWindowAttention(dim, num_heads, window_h, window_w, shift)
         self.norm2 = nn.LayerNorm(dim)
-        # One MLP per group
+        self.shared_mlp = MLP(dim, mlp_ratio=1)  # small — just digits/punctuation
+        self.norm3 = nn.LayerNorm(dim)
         self.expert_mlps = nn.ModuleList([MLP(dim, mlp_ratio) for _ in range(num_groups)])
 
     def forward(self, x: Tensor, h: int, w: int, group_ids: Tensor) -> Tensor:
@@ -355,14 +357,17 @@ class SWABlockMoE(nn.Module):
         # Shared attention
         x = x + self.attn(self.norm1(x), h, w)
 
-        # Group-routed MLP
-        normed = self.norm2(x)
-        mlp_out = torch.zeros_like(normed)
+        # Shared MLP (universal characters — digits, punctuation)
+        x = x + self.shared_mlp(self.norm2(x))
+
+        # Expert MLP (script-specific interpretation)
+        normed = self.norm3(x)
+        expert_out = torch.zeros_like(normed)
         for g in range(self.num_groups):
             mask = (group_ids == g)
             if mask.any():
-                mlp_out[mask] = self.expert_mlps[g](normed[mask])
-        x = x + mlp_out
+                expert_out[mask] = self.expert_mlps[g](normed[mask])
+        x = x + expert_out
         return x
 
 

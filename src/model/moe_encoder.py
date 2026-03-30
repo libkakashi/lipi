@@ -180,10 +180,12 @@ class LipiMoEEncoder(nn.Module):
         self.output_dim = stage2_dim
 
         # Build script→group mapping tensor for deriving group_ids from script_ids
-        self._script_to_group = torch.zeros(num_scripts, dtype=torch.long)
+        # Register as buffer so it moves with .to(device)
+        s2g = torch.zeros(num_scripts, dtype=torch.long)
         for script, group in SCRIPT_TO_GROUP.items():
             if script in SCRIPTS:
-                self._script_to_group[SCRIPTS.index(script)] = GROUP_TO_ID[group]
+                s2g[SCRIPTS.index(script)] = GROUP_TO_ID[group]
+        self.register_buffer("_script_to_group", s2g)
 
     def forward(
         self,

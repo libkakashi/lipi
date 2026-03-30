@@ -140,10 +140,17 @@ class FoundationTrainer:
         self.encoder.train()
         self.ctc_head.train()
 
-        # Mixed precision for CUDA
-        use_amp = self.device.type == "cuda"
-        scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
-        amp_dtype = torch.bfloat16 if use_amp and torch.cuda.is_bf16_supported() else torch.float16
+        # Mixed precision for CUDA and MPS
+        use_amp = self.device.type in ("cuda", "mps")
+        if self.device.type == "cuda":
+            amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+            scaler = torch.amp.GradScaler("cuda", enabled=True)
+        elif self.device.type == "mps":
+            amp_dtype = torch.float16
+            scaler = torch.amp.GradScaler(enabled=False)  # MPS doesn't need GradScaler
+        else:
+            amp_dtype = torch.float32
+            scaler = torch.amp.GradScaler(enabled=False)
 
         history = {"loss": [], "epoch_loss": []}
         global_step = 0
@@ -173,7 +180,7 @@ class FoundationTrainer:
                 target_lengths_t = torch.tensor(target_lengths, dtype=torch.long, device=self.device)
 
                 # Forward pass with mixed precision
-                with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
+                with torch.amp.autocast(self.device.type, enabled=use_amp, dtype=amp_dtype):
                     features, enc_lengths = self.encoder(images)
                     logits = self.ctc_head(features)
 
