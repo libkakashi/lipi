@@ -237,18 +237,10 @@ def main():
             start_epoch = saved_epoch + 1
             print(f"  Resumed at epoch {start_epoch}, loss was {ckpt.get('loss', '?')}")
 
-        # Rebuild scheduler for remaining epochs (fresh LR curve)
-        remaining_epochs = args.epochs - start_epoch + 1
-        remaining_steps = len(train_loader) * remaining_epochs
-        if args.scheduler == "cosine":
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, T_max=remaining_steps, eta_min=1e-6,
-            )
-        else:
-            scheduler = torch.optim.lr_scheduler.OneCycleLR(
-                optimizer, max_lr=args.lr, total_steps=remaining_steps, pct_start=0.1,
-            )
-        print(f"  Fresh {args.scheduler} scheduler for {remaining_epochs} remaining epochs")
+        # Load saved scheduler state — continues the LR curve from where it left off
+        if "scheduler" in ckpt:
+            scheduler.load_state_dict(ckpt["scheduler"])
+            print(f"  Restored scheduler (LR={scheduler.get_last_lr()[0]:.2e})")
 
     # Training
     print(f"\n{'='*60}")
