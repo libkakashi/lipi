@@ -69,12 +69,11 @@ def ocr_train_pipeline(source, target_height=32, max_width=320, augment=False):
     # GPU decode via nvJPEG hardware decoder
     images = fn.decoders.image(encoded, device="mixed", output_type=types.RGB)
 
-    # Resize to target height, cap width
+    # Resize height to target, preserve aspect ratio
+    # DALI resize_y sets height, width scales proportionally
     images = fn.resize(
         images,
         resize_y=target_height,
-        mode="not_larger",
-        max_size=[target_height, max_width],
     )
 
     if augment:
@@ -191,7 +190,7 @@ class DALIOCRLoader:
             source=source,
             target_height=self.target_height,
             max_width=self.max_width,
-            augment=False,  # Set below after build
+            augment=self.augment,
             batch_size=self.batch_size,
             num_threads=4,
             device_id=self.device_id,
