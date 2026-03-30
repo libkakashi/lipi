@@ -186,6 +186,7 @@ def main():
     parser.add_argument("--lr", type=float, default=7e-4)
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--save_dir", type=str, default="checkpoints/step3")
+    parser.add_argument("--resume", type=str, default=None, help="Resume from checkpoint path")
     args = parser.parse_args()
 
     if args.device == "auto":
@@ -234,9 +235,24 @@ def main():
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
     amp_dtype = torch.bfloat16 if use_amp and torch.cuda.is_bf16_supported() else torch.float16
 
+    # Resume from checkpoint
+    start_epoch = 1
+    if args.resume:
+        print(f"\nResuming from {args.resume}...")
+        ckpt = torch.load(args.resume, map_location=device, weights_only=False)
+        encoder.load_state_dict(ckpt["encoder"])
+        ctc_head.load_state_dict(ckpt["ctc_head"])
+        optimizer.load_state_dict(ckpt["optimizer"])
+        if "scheduler" in ckpt:
+            scheduler.load_state_dict(ckpt["scheduler"])
+        if "scaler" in ckpt:
+            scaler.load_state_dict(ckpt["scaler"])
+        start_epoch = ckpt.get("epoch", 0) + 1
+        print(f"  Resumed at epoch {start_epoch}, loss was {ckpt.get('loss', '?')}")
+
     # Training
     print(f"\n{'='*60}")
-    print(f"TRAINING: {args.epochs} epochs, lr={args.lr}, batch={args.batch_size}")
+    print(f"TRAINING: epochs {start_epoch}-{args.epochs}, lr={args.lr}, batch={args.batch_size}")
     print(f"{'='*60}")
 
     save_dir = Path(args.save_dir)
@@ -244,7 +260,7 @@ def main():
 
     start = time.time()
 
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
         encoder.train()
         ctc_head.train()
 
