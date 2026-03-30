@@ -190,31 +190,41 @@ class DALIOCRLoader:
         batch_indices = self.indices[self.pos:end]
         self.pos = end
 
-        # Decode + resize + augment on GPU
-        crops = []
+        # Two-pass approach to avoid OOM:
+        # Pass 1: decode on CPU to get widths (cheap, no GPU memory)
+        # Pass 2: allocate padded tensor once, decode directly into it
+
+        # Pass 1: get widths via PIL (fast, just reads header)
+        batch_widths = []
         batch_labels = []
+        valid_indices = []
         for idx in batch_indices:
             try:
-                crop = self._decode_and_resize(self.image_bytes[idx])
-                if self.augment:
-                    crop = self._augment_gpu(crop)
-                crops.append(crop)
+                pil_img = Image.open(io.BytesIO(self.image_bytes[idx]))
+                w, h = pil_img.size
+                new_w = int(w * self.target_height / h)
+                new_w = min(max(new_w, 1), self.max_width)
+                batch_widths.append(new_w)
                 batch_labels.append(self.labels[idx])
+                valid_indices.append(idx)
             except Exception:
                 continue
 
-        if not crops:
+        if not valid_indices:
             return self.__next__()
 
-        # Pad to max width (all on GPU already)
-        max_w = max(c.shape[2] for c in crops)
-        B = len(crops)
+        # Pass 2: allocate padded tensor, decode directly into it
+        max_w = max(batch_widths)
+        B = len(valid_indices)
         padded = torch.zeros(B, 3, self.target_height, max_w, device=self.device)
-        widths = torch.zeros(B, dtype=torch.long, device=self.device)
+        widths = torch.tensor(batch_widths, dtype=torch.long, device=self.device)
 
-        for i, c in enumerate(crops):
-            w = c.shape[2]
-            padded[i, :, :, :w] = c
-            widths[i] = w
+        for i, idx in enumerate(valid_indices):
+            crop = self._decode_and_resize(self.image_bytes[idx])
+            if self.augment:
+                crop = self._augment_gpu(crop)
+            w = crop.shape[2]
+            padded[i, :, :, :w] = crop
+            del crop  # free immediately
 
         return padded, batch_labels, widths
