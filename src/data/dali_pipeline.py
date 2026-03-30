@@ -26,6 +26,7 @@ class LMDBExternalSource:
 
     def __init__(self, image_bytes: list[bytes], labels: list[str],
                  batch_size: int, shuffle: bool = True):
+        from collections import deque
         self.image_bytes = image_bytes
         self.labels = labels
         self.batch_size = batch_size
@@ -33,7 +34,9 @@ class LMDBExternalSource:
         self.indices = list(range(self.n))
         self.shuffle = shuffle
         self.pos = 0
-        self._current_batch_labels = []
+        # FIFO queue for labels — DALI prefetches N batches ahead,
+        # so _current_batch_labels would be wrong. Queue stays in sync.
+        self._label_queue = deque()
         if shuffle:
             import random
             random.shuffle(self.indices)
@@ -54,8 +57,8 @@ class LMDBExternalSource:
         batch_indices = self.indices[self.pos:end]
         self.pos = end
 
-        # Track labels for this batch (retrieved by the loader after pipeline.run())
-        self._current_batch_labels = [self.labels[i] for i in batch_indices]
+        # Push labels to FIFO queue — popped in order by DALIOCRLoader.__next__
+        self._label_queue.append([self.labels[i] for i in batch_indices])
 
         # Return raw bytes as numpy arrays (DALI ExternalSource format)
         return [np.frombuffer(self.image_bytes[i], dtype=np.uint8) for i in batch_indices]
@@ -233,6 +236,6 @@ class DALIOCRLoader:
         for i, t in enumerate(tensors):
             padded[i, :, :, :widths[i]] = t
 
-        labels = self._source._current_batch_labels[:B]
+        labels = self._source._label_queue.popleft()[:B]
 
         return padded, labels, width_tensor
