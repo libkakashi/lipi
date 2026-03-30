@@ -157,14 +157,16 @@ def random_erasing(img: Image.Image) -> Image.Image:
     """Random rectangular cutout — simulates occlusion, stains, tape."""
     arr = np.array(img)
     h, w = arr.shape[:2]
+    if h < 6 or w < 6:
+        return img
 
-    # Erase 1-3 small rectangles
     for _ in range(random.randint(1, 3)):
         rh = random.randint(2, max(3, h // 3))
         rw = random.randint(2, max(3, w // 6))
+        if h - rh <= 0 or w - rw <= 0:
+            continue
         ry = random.randint(0, h - rh)
         rx = random.randint(0, w - rw)
-        # Fill with random color (paper-like)
         fill = random.randint(180, 255)
         arr[ry:ry+rh, rx:rx+rw] = fill
 
