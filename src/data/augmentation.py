@@ -126,18 +126,120 @@ def invert(img: Image.Image) -> Image.Image:
     return ImageOps.invert(img)
 
 
+def motion_blur(img: Image.Image) -> Image.Image:
+    """Horizontal motion blur — simulates camera shake or scanner movement."""
+    size = random.choice([3, 5, 7])
+    kernel = [0] * (size * size)
+    mid = size // 2
+    for i in range(size):
+        kernel[mid * size + i] = 1.0 / size
+    return img.filter(ImageFilter.Kernel(size=(size, size), kernel=kernel, scale=1, offset=0))
+
+
+def elastic_distortion(img: Image.Image) -> Image.Image:
+    """Simulate ink bleed, paper warping, character deformation."""
+    from scipy.ndimage import gaussian_filter as gf, map_coordinates as mc
+
+    arr = np.array(img, dtype=np.float32)
+    h, w = arr.shape[:2]
+
+    strength = random.uniform(1.0, 3.0)
+    dx = gf(np.random.randn(h, w) * strength, sigma=3)
+    dy = gf(np.random.randn(h, w) * strength, sigma=3)
+
+    x, y = np.meshgrid(np.arange(w), np.arange(h))
+    x_new = np.clip(x + dx, 0, w - 1).astype(np.float32)
+    y_new = np.clip(y + dy, 0, h - 1).astype(np.float32)
+
+    result = np.zeros_like(arr)
+    for c in range(3):
+        result[:, :, c] = mc(arr[:, :, c], [y_new, x_new], order=1, mode='reflect')
+
+    return Image.fromarray(result.astype(np.uint8))
+
+
+def random_erasing(img: Image.Image) -> Image.Image:
+    """Random rectangular cutout — simulates occlusion, stains, tape."""
+    arr = np.array(img)
+    h, w = arr.shape[:2]
+
+    # Erase 1-3 small rectangles
+    for _ in range(random.randint(1, 3)):
+        rh = random.randint(2, max(3, h // 3))
+        rw = random.randint(2, max(3, w // 6))
+        ry = random.randint(0, h - rh)
+        rx = random.randint(0, w - rw)
+        # Fill with random color (paper-like)
+        fill = random.randint(180, 255)
+        arr[ry:ry+rh, rx:rx+rw] = fill
+
+    return Image.fromarray(arr)
+
+
+def color_jitter(img: Image.Image) -> Image.Image:
+    """Shift hue/saturation — simulates yellowed paper, colored ink, scanner color drift."""
+    # Convert to HSV, jitter, convert back
+    arr = np.array(img, dtype=np.float32)
+
+    # Tint towards yellow/brown (old paper) or blue (photocopy)
+    tint = random.choice(['yellow', 'blue', 'none'])
+    if tint == 'yellow':
+        arr[:, :, 0] = np.clip(arr[:, :, 0] * random.uniform(1.0, 1.1), 0, 255)  # boost red
+        arr[:, :, 1] = np.clip(arr[:, :, 1] * random.uniform(0.95, 1.05), 0, 255)  # slight green
+        arr[:, :, 2] = np.clip(arr[:, :, 2] * random.uniform(0.85, 0.95), 0, 255)  # reduce blue
+    elif tint == 'blue':
+        arr[:, :, 0] = np.clip(arr[:, :, 0] * random.uniform(0.9, 0.95), 0, 255)
+        arr[:, :, 2] = np.clip(arr[:, :, 2] * random.uniform(1.0, 1.1), 0, 255)
+
+    return Image.fromarray(arr.astype(np.uint8))
+
+
+def erosion_dilation(img: Image.Image) -> Image.Image:
+    """Make text thinner or thicker — simulates ink weight variation."""
+    if random.random() < 0.5:
+        # Erosion (thinner text)
+        return img.filter(ImageFilter.MinFilter(size=3))
+    else:
+        # Dilation (thicker text)
+        return img.filter(ImageFilter.MaxFilter(size=3))
+
+
+def paper_texture(img: Image.Image) -> Image.Image:
+    """Add paper grain noise — simulates scanned paper texture."""
+    arr = np.array(img, dtype=np.float32)
+    intensity = random.uniform(3, 15)
+    noise = np.random.normal(0, intensity, arr.shape)
+    arr = np.clip(arr + noise, 0, 255)
+    return Image.fromarray(arr.astype(np.uint8))
+
+
 # All available augmentation transforms
 AUGMENT_OPS: list[Callable] = [
+    # Basic image quality
     jpeg_compress,
     gaussian_blur,
     salt_pepper_noise,
     brightness_jitter,
     contrast_jitter,
+    downsample_upsample,
+    # Geometric
     rotation,
     perspective_warp,
+    # Real-world degradation
     shadow_gradient,
-    downsample_upsample,
+    motion_blur,
+    color_jitter,
+    paper_texture,
+    erosion_dilation,
+    random_erasing,
 ]
+
+# elastic_distortion needs scipy — add only if available
+try:
+    import scipy.ndimage  # noqa: F401
+    AUGMENT_OPS.append(elastic_distortion)
+except ImportError:
+    pass
 
 
 class RandAugmentOCR:
