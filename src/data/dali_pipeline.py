@@ -46,6 +46,7 @@ class LMDBExternalSource:
             import random
             random.shuffle(self.indices)
         self.pos = 0
+        self._label_queue.clear()
         return self
 
     def __next__(self):
@@ -218,23 +219,32 @@ class DALIOCRLoader:
             raise StopIteration
 
         # Convert DALI TensorListGPU to padded PyTorch tensor
+        # DALI tensors on GPU → PyTorch tensors on GPU via DLPack (zero-copy)
+        from nvidia.dali.plugin.pytorch import feed_ndarray
+        import torch.utils.dlpack as dlpack
+
         B = len(images_tl)
-
-        # Get individual tensors and their widths
-        tensors = []
         widths = []
-        for i in range(B):
-            t = torch.as_tensor(images_tl[i], device=self.device)
-            tensors.append(t)
-            widths.append(t.shape[2])
+        tensors = []
 
-        # Pad to max width
+        for i in range(B):
+            # Zero-copy: DALI GPU tensor → DLPack → PyTorch GPU tensor
+            dali_tensor = images_tl[i]  # TensorGPU
+            pt_tensor = torch.empty(
+                dali_tensor.shape(), dtype=torch.float32, device=self.device
+            )
+            feed_ndarray(dali_tensor, pt_tensor)
+            tensors.append(pt_tensor)
+            widths.append(pt_tensor.shape[2])
+
         max_w = max(widths)
         padded = torch.zeros(B, 3, self.target_height, max_w, device=self.device)
         width_tensor = torch.tensor(widths, dtype=torch.long, device=self.device)
 
         for i, t in enumerate(tensors):
             padded[i, :, :, :widths[i]] = t
+
+        del tensors
 
         labels = self._source._label_queue.popleft()[:B]
 
