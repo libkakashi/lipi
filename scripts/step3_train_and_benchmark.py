@@ -158,11 +158,16 @@ def main():
         print(f"  Full dataset: {len(train_dataset)} samples")
         if args.augment:
             print(f"  Augmentation: ENABLED")
-        max_load = args.max_samples if args.max_samples and args.max_samples < len(train_dataset) else None
-        train_dataset.preload_raw(max_samples=max_load)
+        if args.max_samples and args.max_samples < len(train_dataset):
+            from torch.utils.data import Subset
+            import random
+            random.seed(42)
+            indices = random.sample(range(len(train_dataset)), args.max_samples)
+            train_dataset = Subset(train_dataset, indices)
+            print(f"  Using subset: {len(train_dataset)} samples")
         train_loader = DataLoader(
             train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collate_ocr,
-            drop_last=True, num_workers=16, pin_memory=True, persistent_workers=True,
+            drop_last=True, num_workers=8, pin_memory=True,
         )
 
     # Build tokenizer
