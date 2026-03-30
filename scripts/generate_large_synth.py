@@ -123,14 +123,27 @@ def discover_fonts(font_dirs=None, min_size=10000):
 
 def random_background(w, h):
     """Generate a random background image."""
-    bg_type = random.choice(["solid", "solid", "gradient", "noise"])
+    bg_type = random.choice(["solid", "solid", "gradient", "noise", "colored_solid"])
 
     if bg_type == "solid":
-        # Random light color (paper-like)
-        r = random.randint(200, 255)
-        g = random.randint(200, 255)
-        b = random.randint(200, 255)
-        return Image.new("RGB", (w, h), (r, g, b))
+        # White/off-white paper
+        v = random.randint(230, 255)
+        return Image.new("RGB", (w, h), (v, v, v))
+
+    elif bg_type == "colored_solid":
+        # Colored paper: cream, yellow, light blue, pink, gray
+        presets = [
+            (255, 253, 240),  # cream
+            (255, 255, 220),  # yellow notepad
+            (230, 240, 255),  # light blue
+            (255, 230, 230),  # pink
+            (220, 220, 220),  # gray
+            (240, 255, 240),  # light green
+            (255, 240, 230),  # peach
+        ]
+        base = random.choice(presets)
+        jitter = tuple(min(255, max(0, c + random.randint(-10, 10))) for c in base)
+        return Image.new("RGB", (w, h), jitter)
 
     elif bg_type == "gradient":
         arr = np.zeros((h, w, 3), dtype=np.uint8)
@@ -149,21 +162,24 @@ def random_background(w, h):
 
 
 def random_text_color():
-    """Random dark color for text."""
-    style = random.choice(["black", "dark", "colored"])
+    """Random text color — biased toward realistic document/sign colors."""
+    style = random.choice([
+        "black", "black", "black",  # most common
+        "dark_gray", "blue_ink", "red", "brown",
+        "dark_green", "dark_blue", "purple",
+    ])
 
-    if style == "black":
-        v = random.randint(0, 40)
-        return (v, v, v)
-    elif style == "dark":
-        return tuple(random.randint(0, 80) for _ in range(3))
-    elif style == "colored":
-        # Dark but colored (blue ink, red stamp, etc.)
-        return (
-            random.randint(0, 120),
-            random.randint(0, 80),
-            random.randint(0, 120),
-        )
+    colors = {
+        "black": (random.randint(0, 30), random.randint(0, 30), random.randint(0, 30)),
+        "dark_gray": (random.randint(40, 80),) * 3,
+        "blue_ink": (random.randint(0, 30), random.randint(0, 40), random.randint(120, 200)),
+        "red": (random.randint(150, 220), random.randint(0, 40), random.randint(0, 40)),
+        "brown": (random.randint(80, 140), random.randint(40, 80), random.randint(0, 30)),
+        "dark_green": (random.randint(0, 40), random.randint(80, 140), random.randint(0, 40)),
+        "dark_blue": (random.randint(0, 40), random.randint(0, 40), random.randint(100, 170)),
+        "purple": (random.randint(80, 140), random.randint(0, 40), random.randint(80, 140)),
+    }
+    return colors[style]
 
 
 def _font_has_glyphs(font, text="Hello"):
@@ -290,6 +306,10 @@ def render_word_advanced(
         # Apply augmentation
         if augmentor is not None:
             img = augmentor(img)
+
+        # 20% chance: convert to grayscale (many real scans are grayscale)
+        if random.random() < 0.2:
+            img = img.convert("L").convert("RGB")
 
         return img
 
