@@ -316,6 +316,56 @@ class SWABlock(nn.Module):
         return x
 
 
+class SWABlockMoE(nn.Module):
+    """SWA block with group-specific expert MLPs.
+
+    Shared attention (spatial relationships are universal across scripts),
+    but separate MLPs per group (interpretation differs per script family).
+
+    At forward time, group_ids routes each sample to its group's MLP.
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        num_groups: int,
+        window_h: int = 4,
+        window_w: int = 4,
+        shift: bool = False,
+        mlp_ratio: int = 3,
+    ):
+        super().__init__()
+        self.num_groups = num_groups
+        self.norm1 = nn.LayerNorm(dim)
+        self.attn = ShiftedWindowAttention(dim, num_heads, window_h, window_w, shift)
+        self.norm2 = nn.LayerNorm(dim)
+        # One MLP per group
+        self.expert_mlps = nn.ModuleList([MLP(dim, mlp_ratio) for _ in range(num_groups)])
+
+    def forward(self, x: Tensor, h: int, w: int, group_ids: Tensor) -> Tensor:
+        """
+        Args:
+            x: (B, h*w, C)
+            h, w: spatial dimensions.
+            group_ids: (B,) integer group ID per sample.
+
+        Returns: (B, h*w, C)
+        """
+        # Shared attention
+        x = x + self.attn(self.norm1(x), h, w)
+
+        # Group-routed MLP
+        normed = self.norm2(x)
+        mlp_out = torch.zeros_like(normed)
+        for g in range(self.num_groups):
+            mask = (group_ids == g)
+            if mask.any():
+                mlp_out[mask] = self.expert_mlps[g](normed[mask])
+        x = x + mlp_out
+        return x
+
+
 class GlobalBlock(nn.Module):
     """Global self-attention block with pre-norm residual.
 

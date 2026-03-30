@@ -37,10 +37,12 @@ output_dim: 576
 
 head:
   type: bilstm_ctc
-  hidden_dim: 128
-  # ~430K params, bidirectional, full word context
+  hidden_dim: 256
+  num_layers: 2
+  dropout: 0.1
+  # ~3.4M params, 2-layer bidirectional, full word context
 
 deployment:
-  params: 56.5M (encoder) + 430K (head) = 56.9M total
-  fp16_size: 113 MB
-  nvfp4_size: 28 MB
+  params: 56.5M (encoder) + 3.4M (head) = 59.9M total
+  fp16_size: 120 MB
+  nvfp4_size: 30 MB

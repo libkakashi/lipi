@@ -1,87 +1,176 @@
 """
-Micro-LID Script Classifier.
+Hierarchical Script Identification (LID).
 
-Tiny CNN (~1MB) that classifies word crop images into script families.
-Runs in ~0.2ms — negligible overhead.
+Two-stage routing for script-specific expert selection:
 
-Input:  (B, 3, 32, W) — same word crop as recognition model
-Output: (B, num_scripts) — logits over script families
+  LID-1 (after stem): Coarse group classification (6 groups).
+    Visually maximally distinct families. Stem conv features handle this.
+    Routes to group-specific Stage 1 expert MLPs.
 
-Supported script families (11 classes):
-  0: Latin (English)
-  1: Devanagari (Hindi, Marathi, Sanskrit, Nepali)
-  2: Tamil
-  3: Telugu
-  4: Kannada
-  5: Eastern Nagari (Bengali, Assamese)
-  6: Odia
-  7: Gujarati
-  8: Gurmukhi (Punjabi)
-  9: Malayalam
-  10: Urdu (Nastaliq Perso-Arabic)
+  LID-2 (after Stage 1): Fine script classification (15 scripts).
+    Distinguishes within-group scripts (e.g., Tamil vs Malayalam).
+    SWA features capture full character shapes needed for this.
+    Routes to script-specific Stage 2 expert MLPs + BiLSTM heads.
 """
 
+import torch
 import torch.nn as nn
 from torch import Tensor
 
 
-SCRIPT_NAMES = [
-    "en",     # 0: Latin
-    "hi",     # 1: Devanagari
-    "ta",     # 2: Tamil
-    "te",     # 3: Telugu
-    "kn",     # 4: Kannada
-    "bn_as",  # 5: Eastern Nagari
-    "or",     # 6: Odia
-    "gu",     # 7: Gujarati
-    "pa",     # 8: Gurmukhi
-    "ml",     # 9: Malayalam
-    "ur",     # 10: Urdu
+# --- Fine-grained scripts (15 classes) ---
+
+SCRIPTS = [
+    # latin_like
+    "latin",       # 0  English, French, Spanish, German, etc.
+    "cyrillic",    # 1  Russian, Ukrainian, etc.
+    "greek",       # 2  Greek (also covers math symbols)
+    # indic
+    "devanagari",  # 3  Hindi, Marathi, Sanskrit, Nepali
+    "bengali",     # 4  Bengali, Assamese
+    "tamil",       # 5
+    "telugu",      # 6
+    "kannada",     # 7
+    "malayalam",   # 8
+    "gujarati",    # 9
+    "gurmukhi",    # 10 Punjabi
+    "odia",        # 11
+    # arabic
+    "arabic",      # 12 Arabic, Urdu, Persian, Hebrew
+    # east_asian
+    "cjk",         # 13 Chinese, Japanese Kanji
+    "korean",      # 14 Hangul
+    # southeast_asian
+    "thai",        # 15
+    # emoji
+    "emoji",       # 16 Emoji, pictographs
 ]
 
-NUM_SCRIPTS = len(SCRIPT_NAMES)
+SCRIPT_TO_ID = {name: i for i, name in enumerate(SCRIPTS)}
+NUM_SCRIPTS = len(SCRIPTS)
 
 
-class MicroLID(nn.Module):
-    """Tiny CNN for script family classification.
+# --- Coarse groups (6 families) ---
 
-    MobileNet-V4-Tiny inspired architecture. Uses depthwise separable
-    convolutions for efficiency. AdaptiveAvgPool handles variable width.
+GROUPS = [
+    "latin_like",       # 0  Latin, Cyrillic, Greek, math symbols
+    "indic",            # 1  ALL Indian scripts (Brahmi-derived)
+    "arabic",           # 2  Arabic, Hebrew, Perso-Arabic (RTL cursive)
+    "east_asian",       # 3  CJK, Korean (dense strokes, boxy)
+    "southeast_asian",  # 4  Thai, Lao, Khmer, Myanmar
+    "emoji",            # 5  Emoji, pictographs (colorful blobs)
+]
+
+GROUP_TO_ID = {name: i for i, name in enumerate(GROUPS)}
+NUM_GROUPS = len(GROUPS)
+
+# Map each script to its coarse group
+SCRIPT_TO_GROUP = {
+    "latin": "latin_like",
+    "cyrillic": "latin_like",
+    "greek": "latin_like",
+    "devanagari": "indic",
+    "bengali": "indic",
+    "tamil": "indic",
+    "telugu": "indic",
+    "kannada": "indic",
+    "malayalam": "indic",
+    "gujarati": "indic",
+    "gurmukhi": "indic",
+    "odia": "indic",
+    "arabic": "arabic",
+    "cjk": "east_asian",
+    "korean": "east_asian",
+    "thai": "southeast_asian",
+    "emoji": "emoji",
+}
+
+# Which scripts belong to each group
+GROUP_SCRIPTS = {
+    "latin_like": ["latin", "cyrillic", "greek"],
+    "indic": ["devanagari", "bengali", "tamil", "telugu", "kannada",
+              "malayalam", "gujarati", "gurmukhi", "odia"],
+    "arabic": ["arabic"],
+    "east_asian": ["cjk", "korean"],
+    "southeast_asian": ["thai"],
+    "emoji": ["emoji"],
+}
+
+
+def script_to_group_id(script: str) -> int:
+    """Get coarse group ID for a script."""
+    return GROUP_TO_ID[SCRIPT_TO_GROUP[script]]
+
+
+class LIDCoarse(nn.Module):
+    """LID-1: Coarse group classifier on stem features.
+
+    Global average pool + MLP. Separates 6 visually distinct families.
+    Hidden dim scales with input — enough capacity to disentangle script
+    identity from the rich visual features in stem output.
     """
 
-    def __init__(self, num_scripts: int = NUM_SCRIPTS):
+    def __init__(self, in_channels: int = 64, num_groups: int = NUM_GROUPS):
         super().__init__()
-        self.features = nn.Sequential(
-            # Block 1: 3 -> 16, stride 2
-            nn.Conv2d(3, 16, 3, stride=2, padding=1, bias=False),
-            nn.BatchNorm2d(16),
-            nn.ReLU(inplace=True),
-            # Block 2: depthwise separable 16 -> 32, stride 2
-            nn.Conv2d(16, 16, 3, stride=2, padding=1, groups=16, bias=False),
-            nn.BatchNorm2d(16),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(16, 32, 1, bias=False),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-            # Block 3: depthwise separable 32 -> 64, stride 2
-            nn.Conv2d(32, 32, 3, stride=2, padding=1, groups=32, bias=False),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(32, 64, 1, bias=False),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            # Global pool
-            nn.AdaptiveAvgPool2d(1),
+        hidden = in_channels
+        self.classifier = nn.Sequential(
+            nn.Linear(in_channels, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, hidden // 2),
+            nn.ReLU(),
+            nn.Linear(hidden // 2, num_groups),
         )
-        self.classifier = nn.Linear(64, num_scripts)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, stem_features: Tensor) -> Tensor:
         """
         Args:
-            x: (B, 3, 32, W) — word crop images.
-
+            stem_features: (B, C, H, W) from stem output.
         Returns:
-            (B, num_scripts) — logits over script families.
+            logits: (B, num_groups)
         """
-        x = self.features(x).flatten(1)
-        return self.classifier(x)
+        pooled = stem_features.mean(dim=[2, 3])
+        return self.classifier(pooled)
+
+    def predict(self, stem_features: Tensor) -> tuple[Tensor, Tensor]:
+        """Predict group with confidence."""
+        logits = self.forward(stem_features)
+        probs = torch.softmax(logits, dim=-1)
+        confidences, group_ids = probs.max(dim=-1)
+        return group_ids, confidences
+
+
+class LIDFine(nn.Module):
+    """LID-2: Fine script classifier on Stage 1 features.
+
+    Global average pool + MLP. Distinguishes scripts within groups
+    (e.g., Tamil vs Malayalam, Devanagari vs Bengali).
+
+    MLP needed because Stage 1 output carries rich visual features —
+    script identity is one signal among many. Hidden layer disentangles it.
+    """
+
+    def __init__(self, in_dim: int = 288, num_scripts: int = NUM_SCRIPTS):
+        super().__init__()
+        hidden = max(64, in_dim // 3)
+        self.classifier = nn.Sequential(
+            nn.Linear(in_dim, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, num_scripts),
+        )
+
+    def forward(self, stage1_features: Tensor) -> Tensor:
+        """
+        Args:
+            stage1_features: (B, H*W, C) from Stage 1 output.
+        Returns:
+            logits: (B, num_scripts)
+        """
+        pooled = stage1_features.mean(dim=1)  # (B, C)
+        return self.classifier(pooled)
+
+    def predict(self, stage1_features: Tensor) -> tuple[Tensor, Tensor]:
+        """Predict script with confidence."""
+        logits = self.forward(stage1_features)
+        probs = torch.softmax(logits, dim=-1)
+        confidences, script_ids = probs.max(dim=-1)
+        return script_ids, confidences

@@ -59,16 +59,22 @@ class CTCHeadMLP(nn.Module):
 
 
 class CTCHeadBiLSTM(nn.Module):
-    """BiLSTM CTC head — bidirectional context for each frame. ~430K params.
+    """BiLSTM CTC head — bidirectional context for each frame. ~1.7M params.
 
-    Gives CTC the sequential context that RNN-T gets from the GRU,
-    but runs in parallel (no autoregressive decode loop).
-    Still 4-5x faster than RNN-T at inference.
+    2-layer BiLSTM with dropout. Gives CTC full sequential context
+    that RNN-T gets from the GRU, but runs in parallel (no autoregressive
+    decode loop). Still 4-5x faster than RNN-T at inference.
     """
 
-    def __init__(self, enc_dim: int, vocab_size: int, hidden_dim: int = 128):
+    def __init__(self, enc_dim: int, vocab_size: int, hidden_dim: int = 256, num_layers: int = 2, dropout: float = 0.1):
         super().__init__()
-        self.lstm = nn.LSTM(enc_dim, hidden_dim, bidirectional=True, batch_first=True)
+        self.lstm = nn.LSTM(
+            enc_dim, hidden_dim,
+            num_layers=num_layers,
+            dropout=dropout if num_layers > 1 else 0.0,
+            bidirectional=True,
+            batch_first=True,
+        )
         self.proj = nn.Linear(hidden_dim * 2, vocab_size)
 
     def forward(self, features: Tensor) -> Tensor:

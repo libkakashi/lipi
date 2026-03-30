@@ -5,12 +5,15 @@ Two variants:
   ConvNeXtStem: lightweight (70K params) — for 12.5M backbone
   ResNetStem: heavier with residual blocks (500K+ params) — for 50M backbone
 
-Both output stride 4×4: (B, 3, 32, W) → (B, out_channels, 8, W/4)
+Both output stride 4×4: (B, C_in, 32, W) → (B, out_channels, 8, W/4)
+Default in_channels comes from src.data.color.INPUT_CHANNELS.
 """
 
 import torch
 import torch.nn as nn
 from torch import Tensor
+
+from src.data.color import INPUT_CHANNELS
 
 
 class ConvNeXtStem(nn.Module):
@@ -19,7 +22,7 @@ class ConvNeXtStem(nn.Module):
     Good for 12.5M backbone where stem should be small.
     """
 
-    def __init__(self, in_channels: int = 3, out_channels: int = 64):
+    def __init__(self, in_channels: int = INPUT_CHANNELS, out_channels: int = 64):
         super().__init__()
         self.layers = nn.Sequential(
             nn.Conv2d(in_channels, 32, kernel_size=3, stride=2, padding=1, bias=False),
@@ -73,7 +76,7 @@ class ResNetStem(nn.Module):
       Conv 128→out_channels     (project to stage 1 dim)
     """
 
-    def __init__(self, in_channels: int = 3, out_channels: int = 64):
+    def __init__(self, in_channels: int = INPUT_CHANNELS, out_channels: int = 64):
         super().__init__()
         self.layers = nn.Sequential(
             # Downsample 2× and expand channels
