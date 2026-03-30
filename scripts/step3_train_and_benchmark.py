@@ -202,6 +202,7 @@ def main():
 
     # Resume from checkpoint
     start_epoch = 1
+    skip_batches = 0
     if args.resume:
         print(f"\nResuming from {args.resume}...")
         ckpt = torch.load(args.resume, map_location=device, weights_only=False)
@@ -212,8 +213,20 @@ def main():
             scheduler.load_state_dict(ckpt["scheduler"])
         if "scaler" in ckpt:
             scaler.load_state_dict(ckpt["scaler"])
-        start_epoch = ckpt.get("epoch", 0) + 1
-        print(f"  Resumed at epoch {start_epoch}, loss was {ckpt.get('loss', '?')}")
+
+        saved_step = ckpt.get("step", 0)
+        saved_epoch = ckpt.get("epoch", 1)
+        total_batches = len(train_loader)
+
+        if saved_step > 0 and saved_step < total_batches:
+            # Mid-epoch checkpoint — resume within the same epoch
+            start_epoch = saved_epoch
+            skip_batches = saved_step
+            print(f"  Resumed at epoch {start_epoch}, step {skip_batches}/{total_batches}, loss was {ckpt.get('loss', '?')}")
+        else:
+            # End-of-epoch checkpoint — start next epoch
+            start_epoch = saved_epoch + 1
+            print(f"  Resumed at epoch {start_epoch}, loss was {ckpt.get('loss', '?')}")
 
     # Training
     print(f"\n{'='*60}")
@@ -233,7 +246,13 @@ def main():
         n_batches = 0
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}")
-        for batch_imgs, batch_labels, widths in pbar:
+        for batch_idx, (batch_imgs, batch_labels, widths) in enumerate(pbar):
+            # Skip batches we already trained on (mid-epoch resume)
+            if skip_batches > 0 and batch_idx < skip_batches:
+                if batch_idx == 0:
+                    pbar.set_description(f"Epoch {epoch}/{args.epochs} (skipping to batch {skip_batches})")
+                continue
+
             batch_imgs = batch_imgs.to(device, non_blocking=True)
 
             target_ids = [tokenizer.encode(l) for l in batch_labels]
@@ -291,6 +310,9 @@ def main():
                     "loss": loss.item(),
                 }, ckpt_path)
                 print(f"\n  Checkpoint saved: {ckpt_path}")
+
+        # Reset skip for subsequent epochs
+        skip_batches = 0
 
         avg_loss = epoch_loss / max(n_batches, 1)
         elapsed = time.time() - start
