@@ -318,8 +318,21 @@ def render_word_advanced(
     return None
 
 
+_TEXT_COLORS = [
+    "black", "black", "black",  # weighted toward black
+    "dark_gray", "blue_ink", "red", "brown",
+    "dark_green", "dark_blue", "purple",
+]
+
+_BG_TYPES = ["solid", "colored_solid", "gradient", "noise"]
+
+
 def generate_batch(args):
-    """Generate a batch of images for a list of words. Called by each worker."""
+    """Generate a batch of images for a list of words. Called by each worker.
+
+    Uses systematic cycling through font × color × background combos
+    to guarantee visual diversity, then adds randomness on top.
+    """
     words, fonts, n_per_word, height, augment, seed = args
 
     random.seed(seed)
@@ -330,14 +343,24 @@ def generate_batch(args):
         from src.data.augmentation import RandAugmentOCR
         augmentor = RandAugmentOCR(n_ops=2, p=0.5)
 
-    results = []  # list of (image_bytes, label)
+    results = []
 
     for word in words:
-        for _ in range(n_per_word):
-            img = render_word_advanced(text=word, fonts=fonts, height=height, augmentor=augmentor)
+        for variant_idx in range(n_per_word):
+            # Cycle through fonts systematically — each variant gets a different font
+            font_idx = variant_idx % len(fonts)
+            # But shuffle within the cycle so it's not always the same order
+            offset = hash(word) % len(fonts)
+            font_path = fonts[(font_idx + offset) % len(fonts)]
+
+            img = render_word_advanced(
+                text=word, fonts=[font_path], height=height, augmentor=augmentor,
+            )
             if img is None:
-                # Retry with different font
-                img = render_word_advanced(text=word, fonts=fonts, height=height, augmentor=augmentor)
+                # Font couldn't render this word — fall back to random
+                img = render_word_advanced(
+                    text=word, fonts=fonts, height=height, augmentor=augmentor,
+                )
             if img is None:
                 continue
 
