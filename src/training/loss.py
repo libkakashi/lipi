@@ -60,8 +60,7 @@ def rnnt_loss(
             blank=blank,
             reduction="mean",
         )
-    except (ImportError, RuntimeError):
-        # Fall back to torchaudio if warp_rnnt not installed or shape mismatch
+    except ImportError:
         return torchaudio.functional.rnnt_loss(
             logits=logits,
             targets=targets.int(),
