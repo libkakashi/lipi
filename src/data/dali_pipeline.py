@@ -130,6 +130,7 @@ class DALIOCRLoader:
         self.batch_size = batch_size
         self.target_height = target_height
         self.max_width = max_width
+        self.augment = augment
         self.device_id = device_id
         self.device = torch.device(f"cuda:{device_id}")
 
