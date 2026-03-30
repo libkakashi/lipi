@@ -214,8 +214,9 @@ def main():
         encoder.load_state_dict(ckpt["encoder"])
         ctc_head.load_state_dict(ckpt["ctc_head"])
         optimizer.load_state_dict(ckpt["optimizer"])
-        if "scheduler" in ckpt:
-            scheduler.load_state_dict(ckpt["scheduler"])
+        # Create FRESH scheduler for remaining epochs (don't load old one —
+        # the old scheduler's LR may have decayed to zero)
+        # Optimizer LR is reset to args.lr by the new scheduler
         if "scaler" in ckpt:
             scaler.load_state_dict(ckpt["scaler"])
 
@@ -224,14 +225,25 @@ def main():
         total_batches = len(train_loader)
 
         if saved_step > 0 and saved_step < total_batches:
-            # Mid-epoch checkpoint — resume within the same epoch
             start_epoch = saved_epoch
             skip_batches = saved_step
             print(f"  Resumed at epoch {start_epoch}, step {skip_batches}/{total_batches}, loss was {ckpt.get('loss', '?')}")
         else:
-            # End-of-epoch checkpoint — start next epoch
             start_epoch = saved_epoch + 1
             print(f"  Resumed at epoch {start_epoch}, loss was {ckpt.get('loss', '?')}")
+
+        # Rebuild scheduler for remaining epochs (fresh LR curve)
+        remaining_epochs = args.epochs - start_epoch + 1
+        remaining_steps = len(train_loader) * remaining_epochs
+        if args.scheduler == "cosine":
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=remaining_steps, eta_min=1e-6,
+            )
+        else:
+            scheduler = torch.optim.lr_scheduler.OneCycleLR(
+                optimizer, max_lr=args.lr, total_steps=remaining_steps, pct_start=0.1,
+            )
+        print(f"  Fresh {args.scheduler} scheduler for {remaining_epochs} remaining epochs")
 
     # Training
     print(f"\n{'='*60}")
