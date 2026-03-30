@@ -17,17 +17,17 @@ from src.model.decode import greedy_decode, greedy_decode_with_confidence
 
 @pytest.fixture
 def pred_net():
-    return PredictionNetwork(vocab_size=401)
+    return PredictionNetwork(vocab_size=171)
 
 
 @pytest.fixture
 def joint_net():
-    return JointNetwork(enc_dim=384, pred_dim=128, joint_dim=256, vocab_size=401)
+    return JointNetwork(enc_dim=384, pred_dim=128, joint_dim=256, vocab_size=171)
 
 
 @pytest.fixture
 def rnnt_model():
-    return LipiRNNT(vocab_size=401)
+    return LipiRNNT(vocab_size=171)
 
 
 class TestPredictionNetwork:
@@ -50,15 +50,15 @@ class TestPredictionNetwork:
         assert not torch.allclose(h, h2)
 
     def test_batch(self, pred_net):
-        tokens = torch.randint(0, 401, (8, 5))
+        tokens = torch.randint(0, 171, (8, 5))
         output, hidden = pred_net(tokens)
         assert output.shape == (8, 5, 128)
         assert hidden.shape == (1, 8, 128)
 
     def test_param_count(self, pred_net):
         params = sum(p.numel() for p in pred_net.parameters())
-        # Embedding: 401*128=51K + GRU: ~99K = ~150K total
-        assert 0.1e6 < params < 0.2e6, f"Unexpected param count: {params}"
+        # Embedding: 171*128=22K + GRU: ~99K = ~121K total
+        assert 0.1e6 < params < 0.15e6, f"Unexpected param count: {params}"
 
 
 class TestJointNetwork:
@@ -67,34 +67,34 @@ class TestJointNetwork:
         enc = torch.randn(2, 32, 1, 384)
         pred = torch.randn(2, 1, 10, 128)
         logits = joint_net(enc, pred)
-        assert logits.shape == (2, 32, 10, 401)
+        assert logits.shape == (2, 32, 10, 171)
 
     def test_inference_single(self, joint_net):
         enc = torch.randn(1, 1, 1, 384)
         pred = torch.randn(1, 1, 1, 128)
         logits = joint_net(enc, pred)
-        assert logits.shape == (1, 1, 1, 401)
+        assert logits.shape == (1, 1, 1, 171)
 
     def test_param_count(self, joint_net):
         params = sum(p.numel() for p in joint_net.parameters())
-        # enc_proj: 384*256 + pred_proj: 128*256 + output: 256*401 = ~235K
-        assert 0.2e6 < params < 0.3e6, f"Unexpected param count: {params}"
+        # enc_proj: 384*256 + pred_proj: 128*256 + output: 256*171 = ~176K
+        assert 0.15e6 < params < 0.2e6, f"Unexpected param count: {params}"
 
 
 class TestRNNTModel:
 
     def test_forward_shape(self, rnnt_model):
         images = torch.randn(2, 3, 32, 128)
-        targets = torch.randint(1, 401, (2, 8))
+        targets = torch.randint(1, 171, (2, 8))
         logits, enc_lengths = rnnt_model(images, targets)
         # T=32 (W=128 -> W/4), U+1=9 (8 targets + 1 blank prepend)
-        assert logits.shape == (2, 32, 9, 401)
+        assert logits.shape == (2, 32, 9, 171)
         assert enc_lengths.tolist() == [32, 32]
 
     def test_backward(self, rnnt_model):
         rnnt_model.train()
         images = torch.randn(2, 3, 32, 128)
-        targets = torch.randint(1, 401, (2, 8))
+        targets = torch.randint(1, 171, (2, 8))
         logits, _ = rnnt_model(images, targets)
         logits.sum().backward()
         for name, p in rnnt_model.named_parameters():
@@ -104,7 +104,7 @@ class TestRNNTModel:
 class TestRNNTLoss:
 
     def test_loss_computes(self):
-        B, T, U, V = 2, 32, 9, 401
+        B, T, U, V = 2, 32, 9, 171
         logits = torch.randn(B, T, U, V, requires_grad=True)
         targets = torch.randint(1, V, (B, 8)).int()
         logit_lengths = torch.full((B,), T, dtype=torch.int)
@@ -147,7 +147,7 @@ class TestRNNTLoss:
         """End-to-end: model forward -> RNN-T loss -> backward."""
         rnnt_model.train()
         images = torch.randn(2, 3, 32, 64)
-        targets = torch.randint(1, 401, (2, 5))
+        targets = torch.randint(1, 171, (2, 5))
 
         logits, _ = rnnt_model(images, targets)
         T = logits.shape[1]
@@ -181,7 +181,7 @@ class TestGreedyDecode:
         for tokens in results:
             assert isinstance(tokens, list)
             assert all(isinstance(t, int) for t in tokens)
-            assert all(0 < t < 401 for t in tokens)
+            assert all(0 < t < 171 for t in tokens)
 
     def test_decode_max_tokens(self, pred_net, joint_net):
         enc_out = torch.randn(1, 16, 384)

@@ -2,7 +2,7 @@
 # Total per language: ~1.0M params
 
 prediction_network:
-  vocab_size: 401       # ~250 chars + ~150 bigrams + blank
+  vocab_size: 171       # 95 ASCII + 75 bigrams + blank (English/Latin)
   embed_dim: 128
   hidden_dim: 128
   num_layers: 1
@@ -14,7 +14,7 @@ joint_network:
   enc_dim: 384          # Must match backbone output_dim
   pred_dim: 128         # Must match prediction_network.hidden_dim
   joint_dim: 256
-  vocab_size: 401       # Must match prediction_network.vocab_size
+  vocab_size: 171       # Must match prediction_network.vocab_size
   activation: gelu
 
 decoding:

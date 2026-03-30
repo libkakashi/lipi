@@ -11,7 +11,6 @@ RNN-T decoding comes in Phase 2 with language-specific heads.
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch import Tensor
 from torch.utils.data import DataLoader
 from torch.optim import AdamW

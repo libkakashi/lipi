@@ -9,7 +9,7 @@ Tests:
   1. Mini backbone CTC overfit (proves encoder architecture learns)
   2. LID classifier training (proves script classification works)
   3. LoRA adapter training on frozen backbone (proves Phase 2 pipeline)
-  4. BPE tokenizer training (proves vocabulary pipeline)
+  4. Bigram tokenizer training (proves vocabulary pipeline)
   5. Full ONNX deployment pipeline (proves export + inference)
   6. PolarQuant rotation (proves quantization prep)
   7. Inference latency profiling
@@ -477,10 +477,10 @@ def validate_lora_training(pretrained_encoder, tokenizer):
 
 
 # ─────────────────────────────────────────────────────────────────────
-# 4. BPE TOKENIZER TRAINING
+# 4. BIGRAM TOKENIZER TRAINING
 # ─────────────────────────────────────────────────────────────────────
 
-def validate_bpe_training():
+def validate_bigram_tokenizer():
     """Train a bigram tokenizer and verify the 2-char max rule."""
     section("4. BIGRAM TOKENIZER TRAINING")
 
@@ -827,9 +827,9 @@ if __name__ == "__main__":
     lora_ok = validate_lora_training(mini_enc, tok)
     results["lora"] = "PASS" if lora_ok else "FAIL"
 
-    # 4. BPE tokenizer
-    bpe_ok = validate_bpe_training()
-    results["bpe"] = "PASS" if bpe_ok else "PARTIAL"
+    # 4. Bigram tokenizer
+    bigram_ok = validate_bigram_tokenizer()
+    results["bigram"] = "PASS" if bigram_ok else "PARTIAL"
 
     # 5. Deployment pipeline
     deploy_ok = validate_deployment_pipeline()

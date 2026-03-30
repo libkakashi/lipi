@@ -3,7 +3,7 @@
 Data quality validation.
 
 Runs before training to catch issues early:
-  - BPE tokenization roundtrips for all labels
+  - Vocab tokenization roundtrips for all labels
   - LID classification matches expected script
   - Font coverage statistics per script
   - Image quality checks (dimensions, corruption)
@@ -26,8 +26,8 @@ from src.data.bigrams import LipiTokenizer, SCRIPT_CHARSETS
 from src.data.dataset import LMDBDataset
 
 
-def validate_bpe_roundtrip(dataset, tokenizer, max_samples=10000):
-    """Verify BPE encode -> decode roundtrips for all labels."""
+def validate_vocab_roundtrip(dataset, tokenizer, max_samples=10000):
+    """Verify Vocab encode -> decode roundtrips for all labels."""
     failures = []
     checked = 0
 
@@ -111,9 +111,9 @@ def main():
     else:
         tokenizer = LipiTokenizer.build_character_level(args.script_id)
 
-    # 1. BPE roundtrip
-    print("\n1. BPE Roundtrip Test")
-    checked, failures = validate_bpe_roundtrip(dataset, tokenizer, args.max_samples)
+    # 1. Vocab roundtrip
+    print("\n1. Vocab Roundtrip Test")
+    checked, failures = validate_vocab_roundtrip(dataset, tokenizer, args.max_samples)
     if failures:
         print(f"   FAIL: {len(failures)} / {checked} roundtrip failures")
         for label, decoded, ids in failures[:5]:

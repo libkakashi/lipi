@@ -23,7 +23,7 @@ class PredictionNetwork(nn.Module):
 
     def __init__(
         self,
-        vocab_size: int = 401,
+        vocab_size: int = 171,
         embed_dim: int = 128,
         hidden_dim: int = 128,
     ):

@@ -60,7 +60,7 @@ def export_rnnt_head(
     joint_net_state: dict | str | Path,
     output_dir: str | Path,
     language: str,
-    vocab_size: int = 401,
+    vocab_size: int = 171,
     opset_version: int = 18,
 ):
     """Export Prediction Network and Joint Network as separate ONNX models.

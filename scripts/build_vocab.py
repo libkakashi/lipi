@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Build BPE vocabulary for a language.
+Build vocabulary for a language.
 
 Usage:
     python scripts/build_vocab.py --config configs/vocab/hindi.yaml
@@ -17,14 +17,14 @@ from src.data.bigrams import LipiTokenizer, SCRIPT_CHARSETS
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Build BPE vocabulary")
+    parser = argparse.ArgumentParser(description="Build vocabulary")
     parser.add_argument("--config", type=str, help="YAML config file")
     parser.add_argument("--script_id", type=str, help="Script ID (e.g., hi, ta)")
     parser.add_argument("--word_list", type=str, help="Word list file path")
     parser.add_argument("--vocab_size", type=int, default=2000)
     parser.add_argument("--max_token_length", type=int, default=4)
     parser.add_argument("--output", type=str, help="Output JSON path")
-    parser.add_argument("--char_level", action="store_true", help="Character-level only (no BPE)")
+    parser.add_argument("--char_level", action="store_true", help="Character-level only (no bigrams)")
     args = parser.parse_args()
 
     if args.config:

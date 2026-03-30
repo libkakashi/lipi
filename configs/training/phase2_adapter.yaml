@@ -13,7 +13,7 @@ lora:
   dropout: 0.05
 
 rnnt_head:
-  vocab_size: 401        # ~250 chars + ~150 bigrams + blank
+  vocab_size: 171        # 95 ASCII + 75 bigrams + blank (English/Latin)
   pred_embed_dim: 128
   pred_hidden_dim: 128
   joint_dim: 256

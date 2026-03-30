@@ -28,7 +28,7 @@ class JointNetwork(nn.Module):
         enc_dim: int = 384,
         pred_dim: int = 128,
         joint_dim: int = 256,
-        vocab_size: int = 401,
+        vocab_size: int = 171,
     ):
         super().__init__()
         self.enc_proj = nn.Linear(enc_dim, joint_dim)

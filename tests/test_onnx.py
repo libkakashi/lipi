@@ -72,7 +72,7 @@ class TestEncoderONNXExport:
 class TestPredNetONNXExport:
 
     def test_export_and_run(self):
-        pred_net = PredictionNetwork(vocab_size=401)
+        pred_net = PredictionNetwork(vocab_size=171)
         pred_net.eval()
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -123,7 +123,7 @@ class TestJointNetONNXExport:
             ort_logits = sess.run(
                 None, {"enc_frame": test_enc, "pred_out": test_pred}
             )
-            assert ort_logits[0].shape == (1, 1, 1, 401)
+            assert ort_logits[0].shape == (1, 1, 1, 171)
 
 
 class TestLIDONNXExport:
@@ -233,4 +233,4 @@ class TestAllComponentsExportTogether:
                 None, {"enc_frame": frame, "pred_out": pred_4d}
             )
 
-            assert logits[0].shape == (1, 1, 1, 401)
+            assert logits[0].shape == (1, 1, 1, 171)

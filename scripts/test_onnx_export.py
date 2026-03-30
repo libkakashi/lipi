@@ -80,7 +80,7 @@ def test_pred_net_export():
     print("2. Testing pred_net ONNX export...")
     import onnxruntime as ort
 
-    pred_net = PredictionNetwork(vocab_size=401)
+    pred_net = PredictionNetwork(vocab_size=171)
     pred_net.eval()
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -110,7 +110,7 @@ def test_joint_net_export():
     print("3. Testing joint_net ONNX export...")
     import onnxruntime as ort
 
-    joint_net = JointNetwork(vocab_size=401)
+    joint_net = JointNetwork(vocab_size=171)
     joint_net.eval()
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -129,7 +129,7 @@ def test_joint_net_export():
             "enc_frame": np.random.randn(1, 1, 1, 384).astype(np.float32),
             "pred_out": np.random.randn(1, 1, 1, 128).astype(np.float32),
         })
-        assert logits[0].shape == (1, 1, 1, 401)
+        assert logits[0].shape == (1, 1, 1, 171)
 
         size_kb = Path(path).stat().st_size / 1e3
         print(f"   PASS — joint_net.onnx ({size_kb:.0f} KB)")
@@ -169,8 +169,8 @@ def test_end_to_end_ort():
     import onnxruntime as ort
 
     encoder = LipiEncoder()
-    pred_net = PredictionNetwork(vocab_size=401)
-    joint_net = JointNetwork(vocab_size=401)
+    pred_net = PredictionNetwork(vocab_size=171)
+    joint_net = JointNetwork(vocab_size=171)
 
     encoder.eval()
     pred_net.eval()
