@@ -198,14 +198,13 @@ def evaluate_rnnt(encoder, pred_net, joint_net, tokenizer, test_dir, device, bat
 
 
 def train_ctc_head(encoder, tokenizer, train_dataset, test_dir,
-                   device, epochs, batch_size, lr, label):
+                   device, epochs, batch_size, lr, label, widths):
     """Train a CTC head on frozen encoder."""
     print(f"\n  Training {label} CTC head (vocab_size={tokenizer.vocab_size})...")
 
     ctc_head = CTCHead(encoder.output_dim, tokenizer.vocab_size).to(device)
     optimizer = torch.optim.AdamW(ctc_head.parameters(), lr=lr, weight_decay=0.01)
 
-    widths = get_image_widths(train_dataset, target_height=32, max_width=192)
     sampler = WidthBucketSampler(widths, batch_size=batch_size)
     loader = DataLoader(
         train_dataset, batch_sampler=sampler, collate_fn=collate_ocr,
@@ -281,7 +280,7 @@ def train_ctc_head(encoder, tokenizer, train_dataset, test_dir,
 
 
 def train_rnnt_head(encoder, tokenizer, train_dataset, test_dir,
-                    device, epochs, batch_size, lr, label):
+                    device, epochs, batch_size, lr, label, widths):
     """Train an RNN-T head on frozen encoder."""
     print(f"\n  Training {label} RNN-T head (vocab_size={tokenizer.vocab_size})...")
 
@@ -296,7 +295,6 @@ def train_rnnt_head(encoder, tokenizer, train_dataset, test_dir,
     head_params = list(pred_net.parameters()) + list(joint_net.parameters())
     optimizer = torch.optim.AdamW(head_params, lr=lr, weight_decay=0.01)
 
-    widths = get_image_widths(train_dataset, target_height=32, max_width=192)
     sampler = WidthBucketSampler(widths, batch_size=batch_size)
     loader = DataLoader(
         train_dataset, batch_sampler=sampler, collate_fn=collate_ocr,
@@ -422,6 +420,10 @@ def main():
     print(f"  Character vocab: {char_tok.vocab_size} tokens")
     print(f"  Bigram vocab: {bigram_tok.vocab_size} tokens")
 
+    # Precompute widths once (shared across all 4 heads)
+    print("  Computing width buckets...")
+    widths = get_image_widths(train_dataset, target_height=32, max_width=192)
+
     # Run combinations
     all_results = {}
     combos = [
@@ -442,12 +444,12 @@ def main():
         if decoder == "ctc":
             results = train_ctc_head(
                 encoder, tokenizer, train_dataset, args.test_dir,
-                device, args.epochs, args.batch_size, args.lr, label,
+                device, args.epochs, args.batch_size, args.lr, label, widths,
             )
         else:
             results = train_rnnt_head(
                 encoder, tokenizer, train_dataset, args.test_dir,
-                device, args.epochs, args.batch_size, args.lr, label,
+                device, args.epochs, args.batch_size, args.lr, label, widths,
             )
 
         all_results[key] = results
