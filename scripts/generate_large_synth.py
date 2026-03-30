@@ -442,11 +442,13 @@ def main():
         for i, batch_results in enumerate(pool.imap_unordered(generate_batch, chunks)):
             all_results.extend(batch_results)
             elapsed = time.time() - t0
-            rate = len(all_results) / elapsed
-            print(f"  {len(all_results):,}/{total:,} generated ({rate:.0f}/sec, "
-                  f"{elapsed:.0f}s elapsed)", end="\r")
+            rate = len(all_results) / max(elapsed, 0.1)
+            eta = (total - len(all_results)) / max(rate, 1)
+            pct = len(all_results) * 100 // total
+            print(f"  [{pct:3d}%] {len(all_results):,}/{total:,} generated "
+                  f"({rate:.0f}/sec, {elapsed:.0f}s elapsed, ETA {eta:.0f}s)")
 
-    print(f"\n  Generated {len(all_results):,} images in {time.time()-t0:.0f}s")
+    print(f"  Generated {len(all_results):,} images in {time.time()-t0:.0f}s")
 
     # Shuffle
     random.shuffle(all_results)

@@ -117,7 +117,7 @@ def evaluate(encoder, ctc_head, tokenizer, test_dir, device, batch_size=64):
 
 def main():
     parser = argparse.ArgumentParser(description="Step 3: Train and benchmark")
-    parser.add_argument("--train_dir", type=str, required=True, help="MJSynth LMDB path")
+    parser.add_argument("--train_dir", type=str, nargs="+", required=True, help="LMDB paths (multiple allowed)")
     parser.add_argument("--test_dir", type=str, required=True, help="Test benchmarks directory")
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--max_samples", type=int, default=1000000, help="Limit training samples")
@@ -139,20 +139,37 @@ def main():
 
     print(f"Device: {device}")
 
-    # Load training data
-    print(f"Loading training data from {args.train_dir}...")
+    # Load training data (supports multiple LMDB dirs)
+    from torch.utils.data import ConcatDataset
+    from src.data.width_sampler import WidthBucketSampler, get_image_widths
 
-    train_dataset = PARSeqLMDB(args.train_dir, augment=args.augment, max_width=args.max_width)
-    print(f"  Full dataset: {len(train_dataset)} samples")
+    datasets = []
+    for train_dir in args.train_dir:
+        print(f"  Loading: {train_dir}")
+        ds = PARSeqLMDB(train_dir, augment=args.augment, max_width=args.max_width)
+        print(f"    {len(ds)} samples")
+        datasets.append(ds)
+
+    if len(datasets) == 1:
+        train_dataset = datasets[0]
+    else:
+        train_dataset = ConcatDataset(datasets)
+    print(f"  Total: {len(train_dataset)} samples")
+
     if args.augment:
         print(f"  Augmentation: ENABLED")
 
-    # Preload raw bytes for width-sorted batching
-    max_load = args.max_samples if args.max_samples and args.max_samples < len(train_dataset) else None
-    train_dataset.preload_raw(max_samples=max_load)
+    # Preload raw bytes for all datasets that support it
+    total_preloaded = 0
+    for ds in datasets:
+        if hasattr(ds, 'preload_raw'):
+            max_per = args.max_samples // len(datasets) if args.max_samples else None
+            ds.preload_raw(max_samples=max_per)
+            total_preloaded += len(ds)
+    if total_preloaded > 0:
+        print(f"  Preloaded: {total_preloaded} samples")
 
-    # Width-bucketed sampler: groups similar widths → minimal padding → faster
-    from src.data.width_sampler import WidthBucketSampler, get_image_widths
+    # Width-bucketed sampler
     widths = get_image_widths(train_dataset, target_height=32, max_width=args.max_width)
     sampler = WidthBucketSampler(widths, batch_size=args.batch_size)
     print(f"  Width-bucketed batching: {len(sampler)} batches")

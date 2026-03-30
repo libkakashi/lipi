@@ -56,20 +56,23 @@ def get_image_widths(dataset, target_height: int = 32, max_width: int = 320) -> 
     widths = []
     n = len(dataset)
 
-    if hasattr(dataset, '_raw_cache') and dataset._raw_cache is not None:
-        # Fast path: read JPEG headers from raw bytes
-        for img_bytes, _ in dataset._raw_cache:
-            dims = jpeg_dimensions(img_bytes)
-            if dims:
-                w, h = dims
-                new_w = int(w * target_height / max(h, 1))
-                new_w = min(max(new_w, 1), max_width)
-                widths.append(new_w)
-            else:
-                widths.append(max_width // 2)  # default for non-JPEG
-    else:
-        # No cache — just use default
-        widths = [max_width // 2] * n
+    # Handle ConcatDataset — iterate over sub-datasets
+    from torch.utils.data import ConcatDataset
+    sub_datasets = dataset.datasets if isinstance(dataset, ConcatDataset) else [dataset]
+
+    for ds in sub_datasets:
+        if hasattr(ds, '_raw_cache') and ds._raw_cache is not None:
+            for img_bytes, _ in ds._raw_cache:
+                dims = jpeg_dimensions(img_bytes)
+                if dims:
+                    w, h = dims
+                    new_w = int(w * target_height / max(h, 1))
+                    new_w = min(max(new_w, 1), max_width)
+                    widths.append(new_w)
+                else:
+                    widths.append(max_width // 2)
+        else:
+            widths.extend([max_width // 2] * len(ds))
 
     return widths
 
