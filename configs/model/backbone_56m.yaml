@@ -1,0 +1,45 @@
+# Lipi Vision Encoder — 56M Production Model
+# Deep architecture: 6/8/6 blocks for maximum character refinement
+# All SWA: no global attention, BiLSTM CTC head provides word context
+# 56.2M params → 28 MB at NVFP4
+
+stem:
+  type: resnet  # heavy stem with residual blocks
+  in_channels: 3
+  out_channels: 64
+
+stage1:
+  # "What character is this?" — tight window sees single glyph
+  dim: 288
+  num_heads: 9
+  head_dim: 32
+  blocks: 6
+  window_h: 4
+  window_w: 4
+  mlp_ratio: 3
+
+stage2:
+  # "What fits here given neighbors?" — wide window sees 6 chars
+  dim: 576
+  num_heads: 18
+  head_dim: 32
+  blocks: 8
+  window_h: 4
+  window_w: 16
+  mlp_ratio: 3
+
+stage3:
+  # "Does this chunk make sense?" — 1D wide window after height collapse
+  dim: 576
+  num_heads: 18
+  head_dim: 32
+  blocks: 6
+  window_w: 32  # 0 = global, >0 = SWA width
+  mlp_ratio: 4
+
+output_dim: 576
+
+deployment:
+  fp16_size: 112 MB
+  nvfp4_size: 28 MB
+  fp8_size: 56 MB
