@@ -78,31 +78,65 @@ for bs in [32, 64, 128, 256, 400, 600, 800]:
         torch.cuda.empty_cache()
         break
 
-# Test 4: With DALI loaded
-print("\n--- Test 4: DALI pipeline memory ---")
+# Test 4: CPU loader (PARSeqLMDB with preload_raw)
+print("\n--- Test 4: CPU loader with preload_raw ---")
 gc.collect()
 torch.cuda.empty_cache()
 
-before = torch.cuda.memory_allocated() / 1e9
-try:
-    from src.data.dali_pipeline import DALIOCRLoader
-    loader = DALIOCRLoader(
-        "training_data/external/train/synth/MJ/train",
-        batch_size=256, max_samples=100000, device_id=0,
-    )
-    after_init = torch.cuda.memory_allocated() / 1e9
-    print(f"  DALI init: {before:.2f} -> {after_init:.2f} GB (+{after_init-before:.2f} GB)")
+import psutil
+ram_before = psutil.Process().memory_info().rss / 1e9
+gpu_before = torch.cuda.memory_allocated() / 1e9
 
-    # Get one batch
-    it = iter(loader)
-    batch = next(it)
-    after_batch = torch.cuda.memory_allocated() / 1e9
-    print(f"  After 1 batch: {after_batch:.2f} GB (+{after_batch-after_init:.2f} GB)")
-    del batch, it, loader
-except Exception as e:
-    print(f"  DALI error: {e}")
+from src.data.parseq_lmdb import PARSeqLMDB
+from src.data.dataset import collate_ocr
+from torch.utils.data import DataLoader
 
-gc.collect()
-torch.cuda.empty_cache()
-final = torch.cuda.memory_allocated() / 1e9
-print(f"\n  Final after cleanup: {final:.2f} GB")
+dataset = PARSeqLMDB("training_data/external/train/synth/MJ/train", augment=True)
+print(f"  Dataset: {len(dataset)} samples")
+
+dataset.preload_raw(max_samples=100000)
+ram_after_preload = psutil.Process().memory_info().rss / 1e9
+print(f"  RAM after preload: {ram_before:.1f} -> {ram_after_preload:.1f} GB (+{ram_after_preload-ram_before:.1f} GB)")
+
+loader = DataLoader(
+    dataset, batch_size=600, shuffle=True, collate_fn=collate_ocr,
+    drop_last=True, num_workers=16, pin_memory=True, persistent_workers=True,
+)
+ram_after_loader = psutil.Process().memory_info().rss / 1e9
+print(f"  RAM after DataLoader init: {ram_after_loader:.1f} GB")
+
+# Get a few batches and check GPU
+print("  Loading batches...")
+for i, (imgs, labels, widths) in enumerate(loader):
+    imgs = imgs.cuda(non_blocking=True)
+
+    gpu_now = torch.cuda.memory_allocated() / 1e9
+    ram_now = psutil.Process().memory_info().rss / 1e9
+    print(f"    Batch {i}: GPU={gpu_now:.2f} GB, RAM={ram_now:.1f} GB, img_shape={imgs.shape}")
+
+    # Do a forward+backward like real training
+    with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+        features, enc_lengths = encoder(imgs)
+        logits = ctc_head(features)
+    loss = logits.float().sum()
+    loss.backward()
+    optimizer.step()
+    optimizer.zero_grad()
+
+    gpu_peak = torch.cuda.max_memory_allocated() / 1e9
+    print(f"           GPU peak={gpu_peak:.2f} GB")
+
+    del imgs, features, logits, loss
+    torch.cuda.empty_cache()
+
+    if i >= 4:
+        break
+
+ram_final = psutil.Process().memory_info().rss / 1e9
+gpu_final = torch.cuda.memory_allocated() / 1e9
+print(f"\n  Final: GPU={gpu_final:.2f} GB, RAM={ram_final:.1f} GB")
+
+# Check per-worker memory
+print(f"\n  Note: 16 persistent workers each fork the process.")
+print(f"  If preload_raw holds 3M images * ~5KB = ~15GB in the parent,")
+print(f"  each fork copies that on write. Check system RAM usage.")
