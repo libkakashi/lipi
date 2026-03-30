@@ -129,6 +129,7 @@ def main():
     parser.add_argument("--augment", action="store_true", help="Enable training augmentation")
     parser.add_argument("--scheduler", type=str, default="onecycle", choices=["onecycle", "cosine"],
                         help="LR scheduler (cosine recommended for resume)")
+    parser.add_argument("--gpu-loader", action="store_true", help="Use GPU decode (requires torchvision)")
     args = parser.parse_args()
 
     if args.device == "auto":
@@ -140,14 +141,29 @@ def main():
 
     # Load training data
     print(f"Loading training data from {args.train_dir}...")
-    train_dataset = PARSeqLMDB(args.train_dir, augment=args.augment)
-    print(f"  Full dataset: {len(train_dataset)} samples")
-    if args.augment:
-        print(f"  Augmentation: ENABLED")
 
-    # Load raw bytes into RAM (fast, no decoding), decode per-batch during training
-    max_load = args.max_samples if args.max_samples and args.max_samples < len(train_dataset) else None
-    train_dataset.preload_raw(max_samples=max_load)
+    use_gpu_loader = getattr(args, 'gpu_loader', False)
+
+    if use_gpu_loader:
+        from src.data.dali_pipeline import DALIOCRLoader
+        max_load = args.max_samples if args.max_samples and args.max_samples > 0 else None
+        train_loader = DALIOCRLoader(
+            args.train_dir, batch_size=args.batch_size,
+            max_samples=max_load, augment=args.augment,
+            device=str(device),
+        )
+        print(f"  GPU loader: ENABLED ({len(train_loader)} batches)")
+    else:
+        train_dataset = PARSeqLMDB(args.train_dir, augment=args.augment)
+        print(f"  Full dataset: {len(train_dataset)} samples")
+        if args.augment:
+            print(f"  Augmentation: ENABLED")
+        max_load = args.max_samples if args.max_samples and args.max_samples < len(train_dataset) else None
+        train_dataset.preload_raw(max_samples=max_load)
+        train_loader = DataLoader(
+            train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collate_ocr,
+            drop_last=True, num_workers=16, pin_memory=True, persistent_workers=True,
+        )
 
     # Build tokenizer
     tokenizer = LipiTokenizer.build_character_level("en")
@@ -162,11 +178,6 @@ def main():
 
     params = list(encoder.parameters()) + list(ctc_head.parameters())
     optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=0.01)
-
-    train_loader = DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collate_ocr,
-        drop_last=True, num_workers=16, pin_memory=True, persistent_workers=True,
-    )
 
     # LR scheduler
     total_steps = len(train_loader) * args.epochs
