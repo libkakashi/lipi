@@ -217,39 +217,32 @@ class DALIOCRLoader:
             raise StopIteration
 
         # Convert DALI TensorListGPU to padded PyTorch tensor
-        # DALI tensors on GPU → PyTorch tensors on GPU via DLPack (zero-copy)
-        from nvidia.dali.plugin.pytorch import feed_ndarray
-        import torch.utils.dlpack as dlpack
-
+        # Transfer to CPU for padding (avoids GPU OOM from holding B variable-size tensors),
+        # then single transfer of padded batch to GPU
         B = len(images_tl)
-        widths = []
-        tensors = []
+        images_cpu = images_tl.as_cpu()
 
+        widths = []
         for i in range(B):
-            dali_tensor = images_tl[i]
-            pt_tensor = torch.empty(
-                dali_tensor.shape(), dtype=torch.float32, device=self.device
-            )
-            feed_ndarray(dali_tensor, pt_tensor)
-            # Force exact height — crop or pad if DALI rounded differently
-            h = pt_tensor.shape[1]
-            if h > self.target_height:
-                pt_tensor = pt_tensor[:, :self.target_height, :]
-            elif h < self.target_height:
-                pad = torch.zeros(3, self.target_height - h, pt_tensor.shape[2],
-                                  device=self.device)
-                pt_tensor = torch.cat([pt_tensor, pad], dim=1)
-            tensors.append(pt_tensor)
-            widths.append(pt_tensor.shape[2])
+            shape = images_cpu.at(i).shape  # (H, W, C) or (C, H, W) depending on layout
+            # With output_layout="CHW": shape is (C, H, W)
+            widths.append(shape[2] if len(shape) == 3 else shape[1])
 
         max_w = max(widths)
-        padded = torch.zeros(B, 3, self.target_height, max_w, device=self.device)
-        width_tensor = torch.tensor(widths, dtype=torch.long, device=self.device)
+        padded = torch.zeros(B, 3, self.target_height, max_w)
 
-        for i, t in enumerate(tensors):
+        for i in range(B):
+            arr = images_cpu.at(i)  # numpy-compatible, (C, H, W)
+            t = torch.from_numpy(np.array(arr))
+            h = t.shape[1]
+            if h > self.target_height:
+                t = t[:, :self.target_height, :]
+            elif h < self.target_height:
+                t = torch.nn.functional.pad(t, (0, 0, 0, self.target_height - h))
             padded[i, :, :, :widths[i]] = t
 
-        del tensors
+        padded = padded.to(self.device, non_blocking=True)
+        width_tensor = torch.tensor(widths, dtype=torch.long, device=self.device)
 
         labels = self._source._label_queue.popleft()[:B]
 
