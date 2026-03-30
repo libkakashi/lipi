@@ -192,17 +192,6 @@ def main():
     params = list(encoder.parameters()) + list(ctc_head.parameters())
     optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=0.01)
 
-    # LR scheduler
-    total_steps = len(train_loader) * args.epochs
-    if args.scheduler == "cosine":
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=total_steps, eta_min=1e-6,
-        )
-    else:
-        scheduler = torch.optim.lr_scheduler.OneCycleLR(
-            optimizer, max_lr=args.lr, total_steps=total_steps, pct_start=0.1,
-        )
-
     # Mixed precision
     use_amp = device.type == "cuda"
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
@@ -217,15 +206,10 @@ def main():
         encoder.load_state_dict(ckpt["encoder"])
         ctc_head.load_state_dict(ckpt["ctc_head"])
         optimizer.load_state_dict(ckpt["optimizer"])
-        # Create FRESH scheduler for remaining epochs (don't load old one —
-        # the old scheduler's LR may have decayed to zero)
-        # Optimizer LR is reset to args.lr by the new scheduler
         if "scaler" in ckpt:
             scaler.load_state_dict(ckpt["scaler"])
 
         saved_epoch = ckpt.get("epoch", 1)
-
-        # Check if this is a mid-epoch checkpoint (filename contains _p)
         is_mid_epoch = "_p" in str(args.resume) and "epoch" not in str(Path(args.resume).stem)
         saved_step = ckpt.get("step", 0)
 
@@ -237,10 +221,37 @@ def main():
             start_epoch = saved_epoch + 1
             print(f"  Resumed at epoch {start_epoch}, loss was {ckpt.get('loss', '?')}")
 
-        # Load saved scheduler state — continues the LR curve from where it left off
-        if "scheduler" in ckpt:
-            scheduler.load_state_dict(ckpt["scheduler"])
-            print(f"  Restored scheduler (LR={scheduler.get_last_lr()[0]:.2e})")
+    # LR scheduler — always created for the FULL training plan (all epochs).
+    # On resume, we fast-forward the scheduler to match where we left off.
+    # This ensures the LR curve is the same whether trained in one go or with restarts.
+    steps_per_epoch = len(train_loader)
+    total_steps = steps_per_epoch * args.epochs
+    warmup_steps = steps_per_epoch  # 1 epoch warmup
+
+    if args.scheduler == "cosine":
+        # Warmup + cosine decay
+        warmup = torch.optim.lr_scheduler.LinearLR(
+            optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_steps,
+        )
+        cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=total_steps - warmup_steps, eta_min=1e-6,
+        )
+        scheduler = torch.optim.lr_scheduler.SequentialLR(
+            optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps],
+        )
+    else:
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer, max_lr=args.lr, total_steps=total_steps, pct_start=0.05,
+        )
+
+    # Fast-forward scheduler to match resume point
+    if args.resume:
+        completed_steps = (start_epoch - 1) * steps_per_epoch + skip_batches
+        if completed_steps > 0:
+            print(f"  Fast-forwarding scheduler {completed_steps} steps...")
+            for _ in range(completed_steps):
+                scheduler.step()
+            print(f"  Scheduler LR: {scheduler.get_last_lr()[0]:.2e}")
 
     # Training
     print(f"\n{'='*60}")
