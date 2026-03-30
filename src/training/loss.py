@@ -43,16 +43,28 @@ def rnnt_loss(
     """
     # Try warp-rnnt first (CUDA-native, much faster)
     # Fall back to torchaudio (CPU kernel, slower)
-    import warp_rnnt
-    log_probs = logits.log_softmax(-1)
-    return warp_rnnt.rnnt_loss(
-        log_probs=log_probs,
-        labels=targets.int().contiguous(),
-        frames_lengths=logit_lengths.int().contiguous(),
-        labels_lengths=target_lengths.int().contiguous(),
-        blank=blank,
-        reduction="mean",
-    )
+    # Use warp_rnnt (GPU CUDA kernel) if available, else torchaudio (CPU)
+    try:
+        import warp_rnnt
+        log_probs = logits.log_softmax(-1)
+        return warp_rnnt.rnnt_loss(
+            log_probs=log_probs,
+            labels=targets.int().contiguous(),
+            frames_lengths=logit_lengths.int().contiguous(),
+            labels_lengths=target_lengths.int().contiguous(),
+            blank=blank,
+            reduction="mean",
+        )
+    except ImportError:
+        return torchaudio.functional.rnnt_loss(
+            logits=logits,
+            targets=targets.int(),
+            logit_lengths=logit_lengths.int(),
+            target_lengths=target_lengths.int(),
+            blank=blank,
+            reduction="mean",
+            fused_log_softmax=True,
+        )
 
 
 def ctc_loss(
