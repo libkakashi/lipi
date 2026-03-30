@@ -73,12 +73,9 @@ def ocr_train_pipeline(source, target_height=32, max_width=320, augment=False):
     # GPU decode via nvJPEG hardware decoder
     images = fn.decoders.image(encoded, device="mixed", output_type=types.RGB)
 
-    # Resize height to target, preserve aspect ratio
-    # DALI resize_y sets height, width scales proportionally
-    images = fn.resize(
-        images,
-        resize_y=target_height,
-    )
+    # Resize height to target — DALI may round by ±2px
+    # We fix exact height in the padding step (DALIOCRLoader.__next__)
+    images = fn.resize(images, resize_y=target_height)
 
     if augment:
         # Brightness + contrast jitter
@@ -229,12 +226,19 @@ class DALIOCRLoader:
         tensors = []
 
         for i in range(B):
-            # Zero-copy: DALI GPU tensor → DLPack → PyTorch GPU tensor
-            dali_tensor = images_tl[i]  # TensorGPU
+            dali_tensor = images_tl[i]
             pt_tensor = torch.empty(
                 dali_tensor.shape(), dtype=torch.float32, device=self.device
             )
             feed_ndarray(dali_tensor, pt_tensor)
+            # Force exact height — crop or pad if DALI rounded differently
+            h = pt_tensor.shape[1]
+            if h > self.target_height:
+                pt_tensor = pt_tensor[:, :self.target_height, :]
+            elif h < self.target_height:
+                pad = torch.zeros(3, self.target_height - h, pt_tensor.shape[2],
+                                  device=self.device)
+                pt_tensor = torch.cat([pt_tensor, pad], dim=1)
             tensors.append(pt_tensor)
             widths.append(pt_tensor.shape[2])
 
