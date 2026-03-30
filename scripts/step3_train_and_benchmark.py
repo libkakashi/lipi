@@ -159,15 +159,14 @@ def main():
     if args.augment:
         print(f"  Augmentation: ENABLED")
 
-    # Preload raw bytes for all datasets that support it
+    # Preload raw bytes for all datasets
     total_preloaded = 0
     for ds in datasets:
         if hasattr(ds, 'preload_raw'):
-            max_per = args.max_samples // len(datasets) if args.max_samples else None
-            ds.preload_raw(max_samples=max_per)
+            ds.preload_raw(max_samples=None)  # load all
             total_preloaded += len(ds)
     if total_preloaded > 0:
-        print(f"  Preloaded: {total_preloaded} samples")
+        print(f"  Preloaded: {total_preloaded:,} samples total")
 
     # Width-bucketed sampler
     widths = get_image_widths(train_dataset, target_height=32, max_width=args.max_width)
