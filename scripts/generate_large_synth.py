@@ -52,16 +52,18 @@ def discover_fonts(font_dirs=None, min_size=10000):
       10% handwriting (notes, casual, signatures)
       10% other (misc fonts that render Latin)
     """
+    # Default: use bundled fonts (assets/fonts/) + system fonts as fallback
+    bundled = str(Path(__file__).parent.parent / "assets" / "fonts")
+
     if font_dirs is None:
-        font_dirs = [
-            "/usr/share/fonts",
-            "/usr/local/share/fonts",
-            "/System/Library/Fonts",
-            "/Library/Fonts",
-            os.path.expanduser("~/Library/Fonts"),
-            os.path.expanduser("~/.fonts"),
-            "C:\\Windows\\Fonts",
-        ]
+        font_dirs = [bundled]  # bundled fonts first
+        # Add system fonts as extra diversity
+        for d in ["/usr/share/fonts", "/usr/local/share/fonts",
+                  "/System/Library/Fonts", "/Library/Fonts",
+                  os.path.expanduser("~/Library/Fonts"),
+                  os.path.expanduser("~/.fonts"), "C:\\Windows\\Fonts"]:
+            if Path(d).exists():
+                font_dirs.append(d)
 
     extensions = {".ttf", ".ttc", ".otf"}
     raw_fonts = []
