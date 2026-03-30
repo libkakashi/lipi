@@ -1,618 +1,198 @@
 # Lipi Build Log
 
-Tracking all findings, decisions, and test results during implementation.
+## Architecture Summary
+
+| Component | Params | Notes |
+|---|---|---|
+| Encoder backbone | 12.5M | ConvNeXt stem + SWA + Global SA, RoPE-2D/1D |
+| Prediction net (per lang) | 121K | 1-layer GRU, 128-dim |
+| Joint net (per lang) | 176K | Additive, 256-dim joint space |
+| LoRA adapter (per lang) | 640K | Rank 16, stages 2+3 only |
+| LID classifier | 4.5K | Tiny CNN, 11 script families |
+| **Per-adapter total** | **~937K** | LoRA + pred + joint |
+| **Full deployment (11 adapters)** | **~23M** | Backbone + 11 adapters + LID |
+
+Vocabulary: character-level, 96 tokens (95 ASCII + blank).
+Bigrams tested but characters consistently outperform for RNN-T.
 
 ---
 
-## Session 1: 2026-03-29
+## Test Suite: 87/87 PASS
 
-### Environment
-- Hardware: M3 Pro 32GB (Apple Silicon)
-- PyTorch backend: MPS (no CUDA)
-- Python: TBD (checking)
-
-### Progress
-
-#### Project Setup
-- Created full directory structure per ARCHITECTURE.md Section 2
-- Created pyproject.toml with all dependencies
-- Note: pinned torchaudio>=2.2.0 (not 2.10.0 from spec — 2.10 follows PyTorch versioning which is currently at 2.x, will update pin when we reach training phase)
-- Note: pinned onnxruntime>=1.17.0 for dev (MultiLoRA needs >=1.24.0 for production, but we can test basic ONNX export with any recent version)
-
-#### Installed Versions (venv)
-- torch 2.11.0 (MPS available)
-- torchaudio 2.11.0 (RNNTLoss deprecation confirmed reversed)
-- onnxruntime 1.24.4
-- peft 0.18.1
-- Python 3.12.8
-
-#### Module 1: rope.py (RoPE-2D / RoPE-1D)
-- Implemented with frequency caching per (h,w) / seq_len
-- All standard PyTorch ops (outer, stack, cos, sin)
-- Smoke test: passed for both 2D (B=2, heads=6, h=8, w=20) and 1D (B=2, heads=12, T=20)
-
-#### Module 2: stem.py (ConvNeXt-V2 Micro Stem)
-- 4 conv layers with GroupNorm(1,C) + GELU, total stride 4x4
-- 0.066M params
-- Smoke test: (2, 3, 32, 128) -> (2, 64, 8, 32) OK
-
-#### Module 3: pooling.py (Learned Height Pooling)
-- Implemented as grouped Conv1d along width, treating C*H_in channels -> C*H_out channels with groups=C
-- This learns a separate (h_out, h_in) weight per channel
-- Smoke test: 8->4 and 4->1 both OK
-
-#### Module 4: attention.py (SWA + Global Attention)
-- ShiftedWindowAttention: window partition, cyclic shift, RoPE-2D within windows, shift mask for cross-region masking
-- GlobalAttention: standard MHSA with RoPE-1D
-- SWABlock / GlobalBlock: pre-norm residual wrappers
-- MLP: named submodules (fc1, fc2) not Sequential indexing — important for LoRA target_modules
-- Smoke tests: all configs passed, variable width (8,16,32,64,80) all OK
-
-#### Module 5: encoder.py (Full Backbone)
-- Assembles all components per architecture spec
-- Stages as nn.ModuleList (stage1, stage2, stage3) — important for LoRA targeting
-- Alternating shift pattern in SWA blocks (even=no shift, odd=shifted)
-
-**FINDING: Parameter count is 12.52M, not 35.4M as estimated in ARCHITECTURE.md.**
-Breakdown:
-  - stem: 0.066M (spec: 0.15M)
-  - stage1 (3× SWA, C=192): 1.113M (spec: 4.0M)
-  - stage2 (4× SWA, C=384): 5.917M (spec: 17.7M)
-  - stage3 (3× Global, C=384): 5.323M (spec: 13.3M)
-The architecture dimensions (C, heads, blocks, MLP ratios) are implemented exactly per spec.
-The spec's param estimates were ~3x overestimated. The actual architecture yields 12.5M.
-This is a lighter backbone — faster inference, lower memory, but may need more capacity
-if accuracy targets aren't met. Can scale up by increasing dims or blocks later.
-
-Shape tests: all widths (32, 64, 128, 256, 320) and batch sizes (1, 4, 8) pass.
-Output: (B, T, 384) where T = W/4. Lengths tensor included for future padding support.
-
-#### Module 6: prediction_net.py (RNN-T Prediction Network)
-- 1-layer GRU, embed_dim=128, hidden_dim=128
-- 0.355M params per language
-- Single-step inference tested with hidden state carry-forward
-
-#### Module 7: joint_net.py (RNN-T Joint Network)
-- Additive combination: enc_proj(enc) + pred_proj(pred)
-- GELU + Linear output layer
-- 0.646M params per language
-- Broadcasting tested: (B,T,1,enc) + (B,1,U,pred) -> (B,T,U,vocab)
-
-#### Module 8: decode.py (Greedy Decoding)
-- greedy_decode: basic token sequence output
-- greedy_decode_with_confidence: geometric mean of token log-probs
-
-#### Module 9: lora.py (LoRA Adapter Injection)
-- Uses HuggingFace PEFT library
-- 28 target modules (4 per block × 7 blocks in stages 2+3)
-- MLP targets use named attributes (fc1, fc2), NOT Sequential indices — this was a spec concern, resolved by design
-- Stage 1 verified frozen (0 LoRA params)
-- Rank 16: 0.639M trainable params (4.9% of total 13.156M)
-
-#### Module 10: lid.py (Micro-LID Script Classifier)
-- Depthwise separable conv architecture
-- 4.5K params (~0.02MB) — extremely lightweight
-- 11 script families
-- AdaptiveAvgPool2d handles variable width
-
-#### Module 11: rnnt_model.py (Full Model Assembly)
-- Assembles encoder + prediction_net + joint_net
-- Total: 13.518M params (enc=12.517M, pred=0.355M, joint=0.646M)
-- Prepends blank token to targets for prediction network
-
-#### ONNX Export Results
-- **FINDING: torch 2.11 requires opset_version=18 (not 17 as in spec)**
-  The new dynamo-based exporter enforces >=18. Set opset 18 everywhere.
-- **FINDING: RoPE dict caching causes torch.export side-effect errors**
-  Removed caching, compute freqs inline. Negligible perf impact for OCR word lengths.
-- **FINDING: Must use `dynamic_shapes` kwarg, not `dynamic_axes` (deprecated in torch 2.11)**
-  Syntax: `torch.export.Dim("name", min=X, max=Y)` per dynamic axis.
-- All 4 components export successfully: encoder, pred_net, joint_net, lid
-- ONNX checker validates all models
-- ORT inference matches PyTorch within rtol=1e-3, atol=1e-4
-- Dynamic width verified through ONNX: widths 32, 64, 128, 256 all work
-- End-to-end ONNX decode loop (enc -> pred -> joint) verified
-
-#### RNN-T Loss (torchaudio 2.11.0)
-- `torchaudio.functional.rnnt_loss` works correctly
-- Deprecation warnings present but function is preserved (confirmed)
-- Forward: loss > 0, no NaN
-- Backward: gradients flow to all model components (encoder, pred_net, joint_net)
-
-#### Test Suite Summary: 52/52 PASS
 - test_encoder.py: 13 tests (shapes, batches, gradients, ONNX export+parity+dynamic)
 - test_rnnt.py: 12 tests (pred_net, joint_net, model assembly, loss, decode)
 - test_lora.py: 8 tests (target modules, injection, freezing, gradient flow, param count)
 - test_lid.py: 6 tests (shapes, variable width, params, gradients, batches)
 - test_onnx.py: 5 tests (all components export, parity, three-file workflow)
+- test_vocab.py: 35 tests (char-level, bigram, roundtrip, save/load, curated bigrams)
 
 ---
 
-### Week 1 Checkpoint 0 Status: PASS
-All architecture smoke tests pass:
-- [x] Encoder forward pass for W = 32, 64, 128, 256, 320
-- [x] Encoder handles batch sizes 1, 4, 16
-- [x] RNN-T loss computes without NaN
-- [x] loss.backward() completes without error
-- [x] Greedy decode produces valid token sequences
-- [x] ONNX export succeeds for encoder, pred_net, joint_net (3 separate files)
-- [x] Exported ONNX models run in ORT and match PyTorch output
-- [x] BPE tokenizer roundtrips: verified for English, Hindi, mixed-script
-- [ ] onnxruntime-node test (skipped — using Python server deployment)
+## Key Technical Findings
 
-#### Data Pipeline
-- BPE: character-level and BPE vocabularies, encode/decode roundtrip verified
-- Dataset: LMDB read/write, InMemoryDataset, collate_ocr with variable-width padding
-- Augmentation: RandAugment-style with 9 OCR-specific transforms
-- All tested and working
+### Architecture
+- **Backbone is 12.5M params** (spec estimated 35.4M — was 3x overestimated)
+- **ONNX export requires opset 18** (torch 2.11 dynamo exporter)
+- **RoPE must compute inline** (dict caching breaks torch.export)
+- **Window partition must always pad** (conditional pad breaks ONNX dynamic width)
+- **torchaudio rnnt_loss requires enc_lengths == logits.shape[1] exactly**
+- **warp_rnnt CUDA kernel builds but produces wrong results** — currently using torchaudio
 
-#### Training Pipeline
-- loss.py: RNN-T loss (torchaudio), CTC loss (torch), distillation KL loss
-- foundation_trainer.py: Phase 1 CTC training loop with OneCycleLR
-- adapter_trainer.py: Phase 2 LoRA + RNN-T training with per-group LR
+### Training
+- **MPS fallback**: `PYTORCH_ENABLE_MPS_FALLBACK=1` for rnnt_loss on Apple Silicon
+- **AMP**: bf16 autocast + GradScaler, loss computed in float32
+- **Scheduler**: must create FRESH scheduler on resume (loading old one causes LR death)
+- **Width bucketing**: 3x GPU speedup by grouping similar-width images per batch
+- **PIL decode is the CPU bottleneck**, turbojpeg gives 2.4x speedup
 
-#### MPS + RNN-T Loss Compatibility
-**FINDING: `torchaudio::rnnt_loss_forward` is not implemented for MPS.**
-Solution: Set `PYTORCH_ENABLE_MPS_FALLBACK=1` before importing torch.
-This lets the model run on MPS while the RNN-T loss op falls back to CPU transparently.
-Also need `torch.mps.synchronize()` after backward pass before gradient operations.
-Pattern learned from: https://github.com/derinworks/penr-oz-neural-network-v3-torch-ddp/commit/c72a834
-
-#### Overfit Test (Checkpoint 1) Investigation
-Ran extensive overfit testing on M3 Pro:
-
-1. **RNN-T path (20 words, 500 steps):** Loss 86→3.0, mode-collapsed to single word.
-   Loss of 3.0 ≈ ln(20) — model learned word length but ignores input image.
-
-2. **RNN-T path (5 words, 2000 steps):** Loss 57→1.6, mode-collapsed.
-   Loss of 1.6094 ≈ ln(5) — model predicts uniform over 5 words.
-
-3. **CTC path (5 words, 3000 steps):** Loss 22→2.4→4.0, transitions from blank-only to wrong chars.
-
-4. **Simple CNN + CTC (5 words):** Same ln(5) plateau. Not specific to our encoder.
-
-5. **Maximally different images (solid colors) + Simple CNN:** Loss drops to 0.55, 3/5 correct.
-   **This confirms the architecture and loss are correct.**
-
-**Root cause:** PIL-rendered text at 32px height produces images too visually similar for any
-CNN to distinguish with only 5 samples. The subtle pixel differences (~14% of pixels differ)
-wash out after convolution/pooling. This is NOT a bug — it's why the architecture spec requires:
-- Phase 1: pretrain on MILLIONS of crops to learn discriminative visual features
-- The overfit test in the spec (Checkpoint 1) assumes GPU + 100 real word crop images
-
-**Conclusion:** Training pipeline is functional (loss decreases, gradients flow, all components
-integrate correctly). Real overfit testing requires GPU with real OCR data or high-quality
-synthetic data with distinct visual patterns. All components ready for production training.
+### Vocabulary Decision
+- **Characters beat bigrams for RNN-T** — tested 3 times, consistent result
+- Bigram head needs 2x more training epochs to converge (larger vocab)
+- Character-level: 96 tokens, simpler, faster convergence
+- Bigram infrastructure kept in code for future experiments
 
 ---
 
-### Data Pipeline & Generation
+## GPU Validation (RTX 5080/5090 Blackwell)
 
-#### Synthetic Renderer (src/data/synth.py)
-- render_word(): diverse font rendering with 467 system fonts on macOS
-- generate_dataset(): batch generation with configurable variants per word
-- render_word_batch(): multiple style variants per word
+### Architecture Validation — 7/7 PASS (111 seconds)
 
-#### Degradation Pipeline (src/data/degradation.py)
-- 3 presets: light, medium, heavy
-- Transforms: JPEG compress, gaussian blur, motion blur, salt-pepper noise,
-  brightness/contrast jitter, rotation, perspective warp, shadow gradient,
-  ink bleed, paper texture, uneven lighting, downsample-upsample
-- Probabilistic application per preset
+| Test | Result |
+|---|---|
+| Mini backbone CTC overfit (1000 images) | **99.7% accuracy** |
+| LID classifier (3 scripts) | 68.3% test acc |
+| LoRA + RNN-T training | Loss decreasing, frozen params intact |
+| Bigram tokenizer | 5/5 roundtrips, max 2-char tokens |
+| ONNX deployment pipeline | Full pipeline: image→LID→encode→decode→text |
+| PolarQuant rotation | 28 modules rotated, forward OK |
+| Inference latency | **0.32ms/image at batch 64** |
 
-#### PDF Extractor (src/data/pdf_extractor.py)
-- Uses PyMuPDF to extract word-level crops with perfect labels
-- Supports variable DPI, multi-page documents
-- extract_pdf_directory() for batch processing
+### Step 2: Overfit Real Data — PASS
+- 100 IIIT5K crops → **100% accuracy in 191 seconds**
 
-### Synthetic Training Run
+### Step 3: Backbone Training
 
-Generated 3900 synthetic images (130 words × 30 variants each).
-Ran Phase 1 CTC training for 3 epochs on CPU (M3 Pro):
-- Epoch 1: avg_loss = 4.7876
-- Epoch 2: avg_loss = 3.8866
-- Epoch 3: avg_loss = 3.6905
-- Total time: 726s (~12 min), ~2s per batch (batch_size=32)
-- Loss is consistently decreasing — training pipeline is functional
-- 0% eval accuracy after 3 epochs — expected with only 3900 samples on deep encoder
+| Run | Data | Epochs | IIIT5k | IC13 | IC15 | Notes |
+|---|---|---|---|---|---|---|
+| v1 | 1M MJSynth | 3 | 67.5% | 76.2% | 40.1% | First run |
+| v2 | 3M MJSynth | 2 | 67.9% | 76.7% | 41.9% | Best non-augmented |
+| v3 (aug) | 3M + augment | e5 | 67.2% | 72.8% | 43.2% | Augment helped IC15 |
+| v3 (aug) | 3M + augment | e6 | 60.2% | 67.2% | 39.0% | **Regressed — LR scheduler bug** |
+| **v4** | **10M MJSynth+synth** | **running** | — | — | — | **Fixed scheduler + 19 augmentations** |
 
-### Scripts Built
+Targets: IIIT5k >82%, IC13 >88%, IC15 >65% (not yet met)
 
-Training:
-- scripts/build_vocab.py — build BPE vocabulary from word lists
-- scripts/train_foundation.py — Phase 1 CTC training
-- scripts/train_adapter.py — Phase 2 LoRA + RNN-T training
-- scripts/train_lid.py — Micro-LID classifier training
+### Step 4: Bigram vs Character — CHARACTERS WIN
 
-Data:
-- scripts/generate_synth.py — generate synthetic training data to LMDB
-- scripts/extract_pdf_crops.py — extract word crops from clean PDFs
-- scripts/apply_degradation.py — apply realistic degradation to clean crops
-- scripts/validate_data.py — data quality checks
+| Run | Char | Bigram | Notes |
+|---|---|---|---|
+| v1 (11% backbone) | 11.9% | 10.7% | Inconclusive |
+| v2 (68% backbone) | 37.0% | 17.6% | Char wins decisively |
+| v3 (68% backbone) | — | 7.6% | Bigram still poor |
 
-Export & Eval:
-- scripts/export_onnx.py — export all components to ONNX
-- scripts/export_adapters.py — convert LoRA adapters to .onnx_adapter
-- scripts/test_onnx_export.py — ONNX export verification (all 5 tests pass)
-- scripts/benchmark.py — evaluate on STR benchmarks
-
-### Config Files
-- configs/model/backbone.yaml, rnnt_head.yaml, lid.yaml
-- configs/training/phase1_foundation.yaml, phase2_adapter.yaml, phase3_qat.yaml
-- configs/vocab/english.yaml, hindi.yaml, tamil.yaml, template.yaml
-- configs/export/onnx.yaml
-
-### Deployment
-- deploy/server.py — LipiServer with batch-by-script processing, MultiLoRA
-- deploy/api.py — FastAPI HTTP endpoints (/recognize, /recognize/batch, /health)
-- deploy/requirements.txt
-
-### Quantization (stubs)
-- src/quantization/qat.py — QAT wrapper (nvidia-modelopt or simulated)
-- src/quantization/polar.py — PolarQuant rotation for Transformer weights
-
-### Export Pipeline
-- src/export/onnx_export.py — export backbone, RNN-T heads, LID to ONNX
-- src/export/lora_export.py — export LoRA adapters to .onnx_adapter format
-
-### BPE → Bigrams Migration (2026-03-29)
-Replaced BPE tokenizer (2001 tokens, HuggingFace tokenizers dep) with
-character + bigram tokenizer (401 tokens, zero dependencies).
-
-Changes:
-- Deleted src/data/bpe.py, created src/data/bigrams.py (LipiTokenizer)
-- vocab_size default 2001 → 401 across all model modules, tests, configs
-- Removed `tokenizers` from pyproject.toml dependencies
-- Renamed test_bpe.py → test_vocab.py with bigram-specific tests
-
-Benefits:
-- 5x smaller softmax (401 vs 2001) — faster training and decode
-- 2-char max token error granularity (was 4-char with BPE)
-- No tokenizer training library needed — just frequency counting
-- Zero OOV by construction
-
-**FINDING: torchaudio rnnt_loss requires enc_lengths == logits.shape[1] exactly.**
-It's not a "valid frames" mask — it's a hard dimension check. Fixed by using
-`torch.full((B,), T)` where T = features.shape[1] (the padded sequence length)
-instead of the per-sample enc_lengths from the encoder.
-
-### Test Suite: 83/83 PASS
-- test_vocab.py: 25 tests (char-level, roundtrip, bigram tokenization, save/load, edge cases, 6 scripts)
-- test_encoder.py: 13 tests (shapes, batches, gradients, ONNX export+parity+dynamic)
-- test_rnnt.py: 12 tests (pred_net, joint_net, model assembly, loss, decode)
-- test_lora.py: 8 tests (target modules, injection, freezing, gradient flow, param count)
-- test_lid.py: 6 tests (shapes, variable width, params, gradients, batches)
-- test_onnx.py: 5 tests (all components export, parity, three-file workflow)
-
-### AMP (Mixed Precision) Training
-Added bf16 autocast + GradScaler to both trainers:
-- foundation_trainer.py: torch.amp.autocast("cuda") with bf16 for forward, float32 for CTC loss
-- adapter_trainer.py: same pattern for RNN-T loss
-- non_blocking=True on all .to(device) transfers
+Decision: **use character-level for RNN-T heads.**
 
 ---
 
-## Architecture Validation (RTX 5080 Blackwell, 2026-03-29)
+## Training Optimizations
 
-**Hardware:** NVIDIA GeForce RTX 5080, compute capability 12.0, bf16 supported
-**GPU Result: 7/7 PASS in 111 seconds**
+### GPU Memory
+- B=600, W=320 → 24.7 GB peak (attention matrices scale with width)
+- Width bucketing reduces average batch width → fits larger batches
 
-### Test 1: Mini Backbone CTC Overfit — PASS
-- 1.89M param mini encoder (half dims, 2 blocks per stage)
-- 10 words × 100 font variants = 1000 synthetic images
-- 100 epochs, SGD lr=0.01, batch_size=128 on CUDA
-- Loss: 7.56 → 0.01
-- **Final accuracy: 99.7% (997/1000)**
-- All 10 words: 98-100% individually
-- Time: 60s
-- **Conclusion: encoder architecture learns discriminative visual features**
+### Data Loading
+- **Width-bucketed sampler**: groups similar widths → 2-3x GPU speedup
+- **turbojpeg**: 2.4x faster JPEG decode than PIL
+- **Raw byte preload**: LMDB sequential read to RAM (~10s for 3M)
+- **DALI attempted and abandoned**: OOM issues with variable-width images
 
-### Test 2: LID Classifier — PASS
-- 600 synthetic crops across 3 scripts (English, Hindi, Tamil)
-- Non-script-specific fonts (worst case for visual distinction)
-- 60 epochs, Adam lr=1e-3
-- Train: 87.1%, **Test: 68.3%**
-- Threshold: 60% (with real script-specific fonts, expect >95%)
+### Augmentation (19 transforms)
 
-### Test 3: LoRA Adapter + RNN-T — PASS
-- Injected LoRA rank-8 into mini backbone (92.2K trainable / 1.99M total)
-- 50 steps of RNN-T training on 5 short words
-- Loss: 119 → 2.9 (decreasing)
-- **Frozen backbone weights verified unchanged** (snapshot comparison)
-- Greedy decode runs without error
-
-### Test 4: Bigram Tokenizer — PASS
-- Built vocab from word list: 133 tokens (83 chars + 50 bigrams)
-- 5/5 roundtrip tests pass (Hello, Court, Section, 12345, WP(C))
-- Max token length: 2 chars (limit: 2) — enforced by construction
-
-### Test 5: Full ONNX Deployment Pipeline — PASS
-- Exported all 4 components to ONNX opset 18
-- Loaded in ORT, ran full inference pipeline: image → LID → encode → decode → text
-- **Dynamic width works** (fixed conditional padding bug in window partition)
-- File sizes: encoder 1.5MB, pred_net 19KB, joint_net 14KB, lid 21KB
-
-### Test 6: PolarQuant Rotation — PASS
-- Applied QR-based orthogonal rotation to 28 Linear modules in stages 2+3
-- Kurtosis: -1.20 → -0.02 (closer to Gaussian = better for quantization)
-- Forward pass works after rotation (shape preserved)
-
-### Test 7: Inference Latency — PASS
-- CPU encoder: 40.2ms/image
-- **CUDA encoder: 18.7ms single, 0.32ms/image at batch 64**
-- Speedup: 2.1x single → 58x batched vs CPU
-- Throughput at batch 64: ~3,100 images/sec (encoder only)
-
-### Bugs Found and Fixed During Validation
-1. **ONNX dynamic width crash:** conditional `if pad > 0` in window partition caused
-   torch.export to trace only the no-pad branch. Fix: always call F.pad unconditionally.
-2. **LoRA frozen check false positive:** PEFT sets .grad on frozen params during backward.
-   Fix: compare actual weight snapshots before/after instead of checking .grad.
-3. **PolarQuant shape mismatch:** SVD with full_matrices=False on non-square weights
-   produces non-square Vh, breaking weight @ R.T. Fix: use QR decomposition for
-   square (in,in) orthogonal matrix.
-4. **RNN-T enc_lengths mismatch:** torchaudio rnnt_loss requires enc_lengths == T exactly,
-   not T >= enc_lengths. Fix: use features.shape[1] as enc_length for all samples.
+| Category | Transforms |
+|---|---|
+| Image quality | JPEG compress, gaussian blur, salt-pepper noise, downsample |
+| Color/lighting | brightness, contrast, color jitter, shadow gradient, spot light, flash glare |
+| Geometric | rotation, perspective warp, paper warp |
+| Document | erosion/dilation, paper texture, motion blur, elastic distortion |
+| General | random erasing, grayscale conversion |
 
 ---
 
-### Files Implemented (complete list)
+## Synthetic Data Generator
 
-```
-src/model/
-  rope.py, stem.py, pooling.py, attention.py, encoder.py,
-  prediction_net.py, joint_net.py, decode.py, lora.py, lid.py, rnnt_model.py
-
-src/data/
-  bigrams.py, dataset.py, augmentation.py, synth.py, degradation.py, pdf_extractor.py
-
-src/training/
-  loss.py, foundation_trainer.py, adapter_trainer.py
-
-src/quantization/
-  qat.py, polar.py
-
-src/export/
-  onnx_export.py, lora_export.py
-
-scripts/
-  build_vocab.py, train_foundation.py, train_adapter.py, train_lid.py,
-  generate_synth.py, extract_pdf_crops.py, apply_degradation.py,
-  validate_data.py, export_onnx.py, export_adapters.py, benchmark.py,
-  test_onnx_export.py, validate_architecture.py
-
-deploy/
-  server.py, api.py, requirements.txt
-
-configs/
-  model/{backbone,rnnt_head,lid}.yaml
-  training/{phase1_foundation,phase2_adapter,phase3_qat}.yaml
-  vocab/{english,hindi,tamil,template}.yaml
-  export/onnx.yaml
-
-tests/
-  test_encoder.py, test_rnnt.py, test_lora.py, test_lid.py, test_onnx.py, test_vocab.py
-```
+Built `scripts/generate_large_synth.py`:
+- 28 bundled Google Fonts (sans, serif, mono, handwriting + 3 Hindi)
+- Weighted distribution: 40% sans, 25% serif, 15% mono, 10% hand, 10% other
+- Font validation: checks glyph rendering, catches symbol/barcode fonts
+- Systematic font cycling per word (each variant uses different font)
+- Diverse backgrounds: solid, colored paper, gradient, noise
+- Diverse text colors: black, blue ink, red, brown, green, purple
+- 20% grayscale conversion
+- Multi-worker generation (~2,500 images/sec on 16 cores)
+- Generated 2.8M English images (10K words × 280 variants) in 10 minutes
 
 ---
 
-## Real Data Validation (RTX 5080 Blackwell, 2026-03-29)
+## Hindi Support
 
-### Step 2: Overfit on 100 Real IIIT5K Crops — PASS
-- 100 real word crops from IIIT5K benchmark
-- 1500 steps, SGD lr=0.01, batch_size=32, bf16 AMP
-- **100/100 accuracy (100.0%) in 191 seconds**
-- Loss: 41.6 → 0.0007
-- By step 500: 32/32 batch accuracy, loss < 0.01
-- **Conclusion: full training pipeline works end-to-end on GPU with real data**
-
-### Step 3: Train Backbone on 1M MJSynth — DONE (below target)
-- 12.5M param backbone, 1M MJSynth crops, 3 epochs, AdamW lr=7e-4, batch=256, bf16
-- Training speed: 4.34 it/s (~15 min/epoch), total 51 min
-- Loss: 0.897 → 0.255 → 0.167
-
-| Benchmark | Epoch 1 | Epoch 2 | Epoch 3 | Target (min) |
-|-----------|---------|---------|---------|-------------|
-| IIIT5k | 56.2% | 66.1% | 67.5% | >82% |
-| SVT | 56.3% | 65.7% | 68.2% | — |
-| IC13_857 | 65.0% | 76.2% | 77.8% | — |
-| IC13_1015 | 63.4% | 74.8% | 76.2% | >88% |
-| IC15_1811 | 33.0% | 43.3% | 45.7% | — |
-| IC15_2077 | 29.0% | 38.1% | 40.1% | >65% |
-| SVTP | 32.2% | 42.0% | 44.0% | — |
-| CUTE80 | 30.6% | 41.7% | 44.1% | — |
-| ArT | 25.6% | 32.5% | 34.2% | — |
-
-**Checkpoint 2 result: FAIL (below minimum thresholds)**
-- IIIT5k: 67.5% (need >82%)
-- IC13: 76.2% (need >88%)
-- IC15: 40.1% (need >65%)
-
-**Analysis:** The model is still learning (strong epoch-over-epoch gains) but
-3 epochs on 1M crops isn't enough for a 12.5M param model. The architecture
-spec Checkpoint 2 uses a half-dim mini backbone (~3M params) which would converge
-faster on this amount of data. Options:
-1. Train more epochs (5-10) on same data — loss still decreasing at 0.167
-2. Use full MJSynth (~8M crops) for more data per epoch
-3. Both — more data × more epochs
-The learning curve is healthy — this is a data/compute issue, not architecture.
-
-### Bigram Vocabulary Analysis
-
-**Initial approach (weighted multilingual blend):** Blended character pair frequencies
-from 6 Latin-script languages (EN 60%, ES 15%, FR 8%, DE 5%, PT 5%, IT 3%) using
-practicalcryptography.com Wortschatz corpus. Produced 95 bigrams.
-
-**Problem found:** The blend only used top-50 bigrams per language from the source data.
-High-frequency English-specific bigrams like "wh" (rank 37 in English, 11K occurrences
-in Gutenberg) were pushed below the cutoff because they don't exist in other languages.
-Meanwhile, mediocre cross-language bigrams ranked higher.
-
-**Solution:** Switched to direct frequency counting from 560K real English words
-(5 Gutenberg books: Pride & Prejudice, Alice in Wonderland, Frankenstein,
-Sherlock Holmes, Moby Dick). Case-sensitive counting, no digit-digit pairs.
-
-**Key findings:**
-
-1. **Diminishing returns analysis:**
-   | Bigrams | Compression | Last bigram adds |
-   |---------|------------|-----------------|
-   | Top 25 | 29.2% | 0.74% |
-   | Top 50 | 42.3% | 0.41% |
-   | Top 75 | 51.0% | 0.30% |
-   | Top 100 | 57.5% | 0.23% |
-   | Top 150 | 65.9% | 0.12% |
-
-   **Decision: 75 bigrams.** 51% compression (half the decode steps) with
-   each additional bigram still adding ≥0.3%. After 75, marginal value drops sharply.
-
-2. **Capitalized bigrams:** Only "Th" (rank 128, 3879 occurrences) makes the
-   case-sensitive top 200. Not worth the vocab slot — "The" tokenizes as "T"+"he".
-
-3. **No digit-digit bigrams:** Numbers stay character-level. "12345" = 5 tokens always.
-
-4. **Non-English coverage:** The English top-150 naturally includes bigrams common
-   in other Latin-script languages: "qu" (#145), "os" (#113), "ei" (#136).
-   7 non-English bigrams missing (ue, ia, ci, au, sc, eu, ao) — rare enough
-   to skip for now. Can add to adapter-specific extensions later.
-
-**Final Latin base vocabulary: 171 tokens**
-- blank (1) + printable ASCII (95) + 75 curated bigrams
-
-**Base character set:** All printable ASCII (32-126) = 95 characters.
-This replaces the old hand-picked 82-char set (62 alphanumeric + 20 punctuation).
-Every keyboard character is now covered: `[`, `\`, `{`, `|`, `~`, `^`, `_`, `*`, etc.
-
-The base is NOT an adapter — it's the foundation all adapters inherit.
-Per-script adapters add their Unicode characters + script-specific bigrams on top.
-
-### Step 4: Bigram vs Character — INCONCLUSIVE (backbone too weak)
-- Backbone: Step 3 epoch 3 checkpoint (67.5% IIIT5k CTC)
-- Training: 2 epochs RNN-T on 500K MJSynth, frozen backbone
-- Char head (96 tokens): 11.9% average, loss 6.48 → 0.81
-- Bigram head (171 tokens): 10.7% average, loss 8.97 → 1.45
-
-| Benchmark | Char | Bigram | Delta |
-|-----------|------|--------|-------|
-| IIIT5k | 12.2% | 11.2% | -1.1% |
-| SVT | 10.0% | 13.3% | +3.2% |
-| IC13_1015 | 18.8% | 15.5% | -3.3% |
-| IC15_2077 | 8.8% | 8.1% | -0.7% |
-| SVTP | 10.9% | 9.0% | -1.9% |
-| CUTE80 | 12.5% | 6.9% | -5.6% |
-| AVERAGE | 11.9% | 10.7% | -1.1% |
-
-**Result: INCONCLUSIVE — do not make vocabulary decision from this.**
-
-Both heads are at ~11% word accuracy — barely above random. The 1.1% gap is
-noise at this level. The bigram head loss (1.45) is still much higher than char
-(0.81) — it needs more epochs to converge with the larger vocab.
-
-Root cause: backbone features are too weak (67.5% CTC). RNN-T needs stronger
-encoder features to learn from. Must re-run after training a proper backbone.
-
-**Action: train stronger backbone first (10 epochs, full MJSynth), then re-run Step 4.**
-
-### Step 3 v2: 3M MJSynth × 2 epochs (RTX 5090, 2026-03-30)
-- Switched to RTX 5090 (32GB VRAM)
-- 3M crops, 2 epochs, AdamW lr=7e-4, batch=600, bf16
-
-| Benchmark | Epoch 1 | Epoch 2 |
-|-----------|---------|---------|
-| IIIT5k | 65.0% | 67.9% |
-| IC13 | 72.7% | 76.7% |
-| IC15 | 38.1% | 41.9% |
-| SVT | 64.6% | 68.3% |
-| CUTE80 | 41.0% | 48.3% |
-
-Marginal improvement over 1M×3ep. Plateauing at ~68% IIIT5k.
-
-### Step 4 v2: Bigram vs Char (68% backbone)
-- Backbone: step3_3m epoch 2 (67.9% IIIT5k)
-- 2 epochs RNN-T on 500K MJSynth, frozen backbone
-
-| Benchmark | Char | Bigram | Delta |
-|-----------|------|--------|-------|
-| IIIT5k | 42.6% | 19.3% | -23.3% |
-| SVT | 38.2% | 20.6% | -17.6% |
-| IC13_1015 | 50.4% | 25.3% | -25.1% |
-| IC15_2077 | 25.8% | 11.6% | -14.3% |
-| AVERAGE | 37.0% | 17.6% | -19.4% |
-
-**Bigram 19.4% behind character.** But bigram loss still converging (1.24 vs 0.71).
-Bigram head has 78% more output classes → needs more training to converge.
-Also: backbone trained without augmentation → noisy per-frame features may hurt
-bigrams more (2 noisy frames vs 1 for character).
-**Decision deferred** — re-test after augmented backbone training.
-
-### Step 3 v3: Augmented Training (2026-03-30)
-- Resumed from step3_3m epoch 2 with augmentation (9 transforms) + cosine LR
-- 3M crops, cosine scheduler lr=3e-4
-
-| Benchmark | Pre-aug (e2) | Aug epoch 5 | Aug epoch 6 |
-|-----------|-------------|-------------|-------------|
-| IIIT5k | 67.9% | 67.2% | 60.2% |
-| IC13 | 76.7% | 72.8% | 67.2% |
-| IC15 | 41.9% | 43.2% | 39.0% |
-| SVT | 68.3% | 68.9% | 65.4% |
-
-**Epoch 6 regressed badly.** Root cause: cosine scheduler loaded from checkpoint
-had LR near zero by epoch 6. Model trained on hard augmented images with
-essentially no learning rate → weights degraded.
-
-**Fix applied:** Resume now creates a FRESH scheduler for remaining epochs
-instead of loading the old one.
-
-### Training Optimizations (RTX 5090)
-
-**GPU memory diagnosis:**
-- B=600, W=320 → 24.7 GB peak (not 9.8 GB as estimated)
-- Root cause: collate pads all images to widest in batch (320px)
-- Fix: width-bucketed batching + optional max_width cap
-
-**Width-bucketed batch sampler:**
-- Reads JPEG headers (no decode) to get widths
-- Groups similar widths → minimal padding per batch
-- Result: **2.1 it/s → 6.3 it/s (3x speedup)**
-
-**Data loading:**
-- PIL decode in workers is the bottleneck, not LMDB I/O
-- TurboJPEG installed (2.4x faster than PIL) but GPU is the bottleneck
-- DALI integration attempted — OOM issues with variable-width images, abandoned
-- Final approach: LMDB on-the-fly reads + 8 workers + width bucketing
-
-**Augmentation expanded to 19 transforms:**
-- Original 9: JPEG, blur, noise, brightness, contrast, rotation, perspective, shadow, downsample
-- Added: motion blur, elastic distortion, random erasing, color jitter,
-  erosion/dilation, paper texture, paper warp, spot light, flash glare, grayscale
-
-**Synthetic data generator built:**
-- Auto-discovers system fonts, categorizes (40% sans, 25% serif, 15% mono, 10% hand)
-- Filters bad fonts (symbol, barcode, broken glyph detection)
-- Random backgrounds (solid, gradient, noise), random text colors
-- Integrated augmentation, multi-process, direct LMDB output
-- 1300+ images/sec on 4 cores
-
-**Hindi bigrams curated:**
+### Bigrams
 - 73 Devanagari bigrams from 110K Hindi Wikipedia words
 - 37.7% compression on Hindi text
-- Hindi adapter vocab: 372 tokens (95 ASCII + 128 Devanagari + 75+73 bigrams)
+- Hindi adapter vocab: 372 tokens (95 ASCII + 128 Devanagari + 75 Latin + 73 Hindi bigrams + blank)
 
-### Step 4 v3: Bigram vs Char on Augmented Backbone — RUNNING
-- Backbone: step3_aug epoch 5 (67.2% IIIT5k, augmented)
-- 3 epochs RNN-T on 1M MJSynth, width-bucketed batching
-- Awaiting results
+### Fonts
+- Bundled: NotoSansDevanagari, NotoSerifDevanagari, TiroDevanagariHindi, Baloo2
 
-### Validation Sequence Status
-1. [DONE] Download PARSeq LMDB data
-2. [DONE] Step 2: Overfit 100 real crops — **100% PASS**
-3. [DONE] Step 3 v1: 1M×3ep — 67.5% IIIT5k
-4. [DONE] Step 3 v2: 3M×2ep — 67.9% IIIT5k
-5. [DONE] Step 3 v3: augmented — 67.2% (epoch 5), regressed at epoch 6 (scheduler bug, fixed)
-6. [DONE] Step 4 v1: bigram vs char — INCONCLUSIVE (11% accuracy)
-7. [DONE] Step 4 v2: bigram vs char — char wins 37% vs 17.6% (bigram needs more training)
-8. [RUNNING] Step 4 v3: bigram vs char on augmented backbone (3 epochs, 1M samples)
-9. [NEXT] Retrain backbone with fixed scheduler + 19 augmentations + synthetic data
-10. Step 5: Full backbone training
-11. Step 6: First Hindi adapter
+### Word List
+- 301 Hindi legal terms (court system, procedures, IPC sections)
 
+---
+
+## Bugs Found and Fixed
+
+1. **ONNX dynamic width crash**: conditional `if pad > 0` traced only one branch → always pad
+2. **LoRA frozen check false positive**: PEFT sets .grad on frozen params → compare weight snapshots
+3. **PolarQuant shape mismatch**: SVD on non-square weights → use QR decomposition
+4. **RNN-T enc_lengths mismatch**: torchaudio needs exact T match → use features.shape[1]
+5. **LR scheduler death on resume**: loaded old decayed scheduler → create fresh one
+6. **random_erasing crash on narrow images**: randint(0, 0) → skip small images
+7. **warp_rnnt wrong results**: API works but produces bad training → using torchaudio fallback
+8. **Mid-epoch resume misdetection**: step count comparison wrong with different dataset sizes → check filename
+
+---
+
+## Current Status
+
+**Running**: Step 5 backbone training — MJSynth (7.2M) + our synth (2.8M) = 10M images/epoch, 19 augmentations, fresh cosine LR, width-bucketed batching.
+
+**Next steps**:
+1. Get backbone to 80%+ IIIT5k
+2. Train first Hindi adapter (LoRA + RNN-T head)
+3. Download IndicSTR12 + TextOCR for real-world data
+4. Phase 3: quantization (NVFP4 + FP8)
+5. End-to-end deployment pipeline test
+
+---
+
+## Files Implemented
+
+```
+src/model/         rope, stem, pooling, attention, encoder, prediction_net,
+                   joint_net, decode, lora, lid, rnnt_model
+src/data/          bigrams, dataset, augmentation (19 transforms), synth,
+                   degradation, pdf_extractor, parseq_lmdb, width_sampler
+src/training/      loss, foundation_trainer, adapter_trainer
+src/quantization/  qat, polar
+src/export/        onnx_export, lora_export
+scripts/           step2_overfit_real, step3_train_and_benchmark,
+                   step4_bigram_vs_char, generate_large_synth,
+                   build_vocab, build_hindi_wordlist, train_foundation,
+                   train_adapter, train_lid, run_qat, export_onnx,
+                   export_adapters, benchmark, validate_data,
+                   validate_architecture, test_onnx_export
+deploy/            server, api, requirements.txt
+configs/           model/*, training/*, vocab/*, export/*
+tests/             test_encoder, test_rnnt, test_lora, test_lid,
+                   test_onnx, test_vocab
+assets/            28 bundled Google Fonts (Latin + Hindi)
+```
