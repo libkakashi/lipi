@@ -40,14 +40,17 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
 def discover_fonts(font_dirs=None, min_size=10000):
-    """Find all usable TrueType/OpenType fonts on the system.
+    """Find all usable fonts, categorize them, and return a weighted list.
 
-    Args:
-        font_dirs: List of directories to scan. None = auto-detect OS defaults.
-        min_size: Minimum font file size in bytes (skip tiny/broken fonts).
+    Returns a list where common font categories (sans, serif) appear more
+    often than rare ones (handwriting), matching real-world text distribution.
 
-    Returns:
-        List of font file paths.
+    Distribution target:
+      40% sans-serif (modern docs, signs, forms, UI)
+      25% serif (books, legal, newspapers)
+      15% monospace (code, typewriter, receipts)
+      10% handwriting (notes, casual, signatures)
+      10% other (misc fonts that render Latin)
     """
     if font_dirs is None:
         font_dirs = [
@@ -61,7 +64,7 @@ def discover_fonts(font_dirs=None, min_size=10000):
         ]
 
     extensions = {".ttf", ".ttc", ".otf"}
-    fonts = []
+    raw_fonts = []
 
     for d in font_dirs:
         p = Path(d)
@@ -69,9 +72,53 @@ def discover_fonts(font_dirs=None, min_size=10000):
             continue
         for f in p.rglob("*"):
             if f.suffix.lower() in extensions and f.stat().st_size >= min_size:
-                fonts.append(str(f))
+                raw_fonts.append(str(f))
 
-    return fonts
+    # Categorize by name
+    sans_kw = ['helvetica', 'arial', 'verdana', 'futura', 'avenir', 'gill', 'gothic',
+                'grotesk', 'tahoma', 'trebuchet', 'calibri', 'geneva', 'lucida', 'sans',
+                'roboto', 'open', 'lato', 'inter', 'noto sans', 'source sans']
+    serif_kw = ['times', 'georgia', 'garamond', 'baskerville', 'palatino', 'bodoni',
+                'cambria', 'charter', 'book', 'roman', 'cochin', 'didot', 'iowan',
+                'noto serif', 'source serif', 'libre', 'serif']
+    mono_kw = ['courier', 'menlo', 'consolas', 'monaco', 'mono', 'code', 'terminal']
+    hand_kw = ['brush', 'script', 'hand', 'cursive', 'comic', 'marker', 'zapfino',
+               'snell', 'bradley', 'chalkboard', 'noteworthy', 'papyrus']
+
+    categories = {'sans': [], 'serif': [], 'mono': [], 'hand': [], 'other': []}
+
+    for f in raw_fonts:
+        name = Path(f).stem.lower()
+        if any(k in name for k in mono_kw):
+            categories['mono'].append(f)
+        elif any(k in name for k in hand_kw):
+            categories['hand'].append(f)
+        elif any(k in name for k in serif_kw):
+            categories['serif'].append(f)
+        elif any(k in name for k in sans_kw):
+            categories['sans'].append(f)
+        else:
+            categories['other'].append(f)
+
+    # Build weighted font list
+    # Target: sans 40%, serif 25%, mono 15%, hand 10%, other 10%
+    target_total = 200  # target list size
+    weights = {'sans': 0.40, 'serif': 0.25, 'mono': 0.15, 'hand': 0.10, 'other': 0.10}
+
+    weighted = []
+    for cat, weight in weights.items():
+        cat_fonts = categories[cat]
+        if not cat_fonts:
+            continue
+        n_slots = max(1, int(target_total * weight))
+        # Repeat fonts to fill slots (small categories get repeated more)
+        for i in range(n_slots):
+            weighted.append(cat_fonts[i % len(cat_fonts)])
+
+    print(f"  Font categories: " + ", ".join(f"{k}={len(v)}" for k, v in categories.items()))
+    print(f"  Weighted font list: {len(weighted)} entries")
+
+    return weighted
 
 
 def random_background(w, h):
@@ -119,6 +166,54 @@ def random_text_color():
         )
 
 
+def _font_has_glyphs(font, text="Hello"):
+    """Check if a font renders real text, not boxes/bars/symbols.
+
+    Tests:
+    1. Has ink (not blank)
+    2. Different characters render differently (not all same glyph)
+    3. Characters have reasonable aspect ratio (not bars)
+    """
+    try:
+        # Test 1: renders something
+        img = Image.new("L", (200, 50), 255)
+        ImageDraw.Draw(img).text((5, 5), text, fill=0, font=font)
+        arr = np.array(img)
+        ink = (arr < 200).sum()
+        if ink < len(text) * 5:
+            return False
+
+        # Test 2: different characters produce different images
+        renders = {}
+        for ch in set(text):
+            ch_img = Image.new("L", (40, 40), 255)
+            ImageDraw.Draw(ch_img).text((5, 5), ch, fill=0, font=font)
+            renders[ch] = np.array(ch_img)
+
+        # Compare pairs — at least some should differ
+        chars = list(renders.keys())
+        if len(chars) >= 2:
+            diffs = 0
+            for i in range(min(3, len(chars))):
+                for j in range(i + 1, min(4, len(chars))):
+                    diff = np.abs(renders[chars[i]].astype(int) - renders[chars[j]].astype(int)).sum()
+                    if diff > 50:
+                        diffs += 1
+            if diffs == 0:
+                return False  # all characters look the same — symbol font
+
+        # Test 3: characters aren't too tall/narrow (bars) or too wide (blocks)
+        bbox = ImageDraw.Draw(Image.new("L", (1, 1))).textbbox((0, 0), "H", font=font)
+        h_w = bbox[2] - bbox[0]
+        h_h = bbox[3] - bbox[1]
+        if h_h > 0 and (h_w / h_h > 3 or h_w / h_h < 0.15):
+            return False  # weird aspect ratio
+
+        return True
+    except Exception:
+        return False
+
+
 def render_word_advanced(
     text: str,
     fonts: list[str],
@@ -127,49 +222,78 @@ def render_word_advanced(
 ) -> Image.Image | None:
     """Render a word with random font, size, color, and background.
 
-    Returns None if rendering fails (bad font for this text).
+    Validates that:
+    - Font can render the characters (no replacement boxes)
+    - Text fits within the image height
+    - Reasonable width (not too wide or narrow)
+
+    Returns None if rendering fails.
     """
-    # Pick random font and size
-    font_path = random.choice(fonts)
-    font_size = random.randint(18, 28)
+    # Try up to 3 fonts
+    for _ in range(3):
+        font_path = random.choice(fonts)
 
-    try:
-        font = ImageFont.truetype(font_path, size=font_size)
-    except (IOError, OSError):
-        return None
+        # Start with a size that fits the height, then randomize slightly
+        base_size = max(12, height - 8)
+        font_size = random.randint(max(10, base_size - 6), base_size + 2)
 
-    # Measure text
-    dummy = Image.new("RGB", (1, 1))
-    bbox = ImageDraw.Draw(dummy).textbbox((0, 0), text, font=font)
-    text_w = bbox[2] - bbox[0]
-    text_h = bbox[3] - bbox[1]
+        try:
+            font = ImageFont.truetype(font_path, size=font_size)
+        except (IOError, OSError):
+            continue
 
-    if text_w <= 0 or text_h <= 0:
-        return None
+        # Check font can render this text
+        if not _font_has_glyphs(font, text):
+            continue
 
-    # Image dimensions with padding
-    pad_h = random.randint(2, 8)
-    pad_v = random.randint(2, 6)
-    img_w = text_w + 2 * pad_h
-    img_h = height
+        # Measure text
+        dummy = Image.new("RGB", (1, 1))
+        bbox = ImageDraw.Draw(dummy).textbbox((0, 0), text, font=font)
+        text_w = bbox[2] - bbox[0]
+        text_h = bbox[3] - bbox[1]
 
-    # Create background
-    img = random_background(img_w, img_h)
-    draw = ImageDraw.Draw(img)
+        if text_w <= 0 or text_h <= 0:
+            continue
 
-    # Center text vertically
-    y_offset = max(0, (img_h - text_h) // 2 - bbox[1])
-    x_offset = pad_h + random.randint(-2, 2)
+        # Skip if text is too tall (would be cropped)
+        if text_h > height - 2:
+            # Reduce font size and retry
+            font_size = int(font_size * (height - 4) / text_h)
+            font_size = max(8, font_size)
+            try:
+                font = ImageFont.truetype(font_path, size=font_size)
+                bbox = ImageDraw.Draw(dummy).textbbox((0, 0), text, font=font)
+                text_w = bbox[2] - bbox[0]
+                text_h = bbox[3] - bbox[1]
+                if text_w <= 0 or text_h <= 0 or text_h > height - 2:
+                    continue
+            except:
+                continue
 
-    # Draw text
-    color = random_text_color()
-    draw.text((x_offset, y_offset), text, fill=color, font=font)
+        # Image dimensions with padding
+        pad_h = random.randint(2, 6)
+        img_w = text_w + 2 * pad_h
+        img_h = height
 
-    # Apply augmentation
-    if augmentor is not None:
-        img = augmentor(img)
+        # Create background
+        img = random_background(img_w, img_h)
+        draw = ImageDraw.Draw(img)
 
-    return img
+        # Center text vertically
+        y_offset = max(0, (img_h - text_h) // 2 - bbox[1])
+        x_offset = pad_h + random.randint(-1, 1)
+
+        # Draw text
+        color = random_text_color()
+        draw.text((x_offset, y_offset), text, fill=color, font=font)
+
+        # Apply augmentation
+        if augmentor is not None:
+            img = augmentor(img)
+
+        return img
+
+    return None
 
 
 def generate_batch(args):
@@ -233,16 +357,23 @@ def main():
         print("ERROR: No fonts found. Install fonts or specify --font-dirs")
         sys.exit(1)
 
-    # Verify some fonts work
+    # Filter: each font must actually render Latin text
+    print("  Filtering fonts...")
     working_fonts = []
+    seen = set()
     for f in fonts:
+        if f in seen:
+            working_fonts.append(f)  # keep duplicates from weighting
+            continue
+        seen.add(f)
         try:
-            ImageFont.truetype(f, size=20)
-            working_fonts.append(f)
+            font = ImageFont.truetype(f, size=20)
+            if _font_has_glyphs(font, "Hello"):
+                working_fonts.append(f)
         except:
             pass
     fonts = working_fonts
-    print(f"Fonts (working): {len(fonts)}")
+    print(f"Fonts (filtered): {len(fonts)}")
 
     total = len(words) * args.n_per_word
     print(f"Generating {total:,} images ({len(words)} words × {args.n_per_word} variants)")
