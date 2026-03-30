@@ -123,7 +123,7 @@ def train_rnnt_head(
 
     loader = DataLoader(
         train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_ocr,
-        drop_last=True, num_workers=4, pin_memory=True,
+        drop_last=True, num_workers=16, pin_memory=True, persistent_workers=True,
     )
 
     total_steps = len(loader) * epochs
@@ -234,14 +234,11 @@ def main():
         p.requires_grad = False
     print(f"  Backbone: {sum(p.numel() for p in encoder.parameters())/1e6:.2f}M params (frozen)")
 
-    # Load training data
+    # Load training data with raw byte preload
     train_full = PARSeqLMDB(args.train_dir)
-    if args.max_samples < len(train_full):
-        random.seed(42)
-        indices = random.sample(range(len(train_full)), args.max_samples)
-        train_dataset = Subset(train_full, indices)
-    else:
-        train_dataset = train_full
+    max_load = args.max_samples if args.max_samples < len(train_full) else None
+    train_full.preload_raw(max_samples=max_load)
+    train_dataset = train_full
     print(f"  Training data: {len(train_dataset)} samples")
 
     # Build tokenizers
