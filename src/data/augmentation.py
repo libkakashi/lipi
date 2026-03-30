@@ -128,12 +128,12 @@ def invert(img: Image.Image) -> Image.Image:
 
 def motion_blur(img: Image.Image) -> Image.Image:
     """Horizontal motion blur — simulates camera shake or scanner movement."""
-    size = random.choice([3, 5, 7])
+    size = random.choice([3, 5])
     kernel = [0] * (size * size)
     mid = size // 2
     for i in range(size):
-        kernel[mid * size + i] = 1.0 / size
-    return img.filter(ImageFilter.Kernel(size=(size, size), kernel=kernel, scale=1, offset=0))
+        kernel[mid * size + i] = 1
+    return img.filter(ImageFilter.Kernel(size=(size, size), kernel=kernel, scale=size, offset=0))
 
 
 def elastic_distortion(img: Image.Image) -> Image.Image:
@@ -233,6 +233,81 @@ AUGMENT_OPS: list[Callable] = [
     erosion_dilation,
     random_erasing,
 ]
+
+def paper_warp(img: Image.Image) -> Image.Image:
+    """Simulate paper curling/warping — no scipy needed.
+
+    Uses a sinusoidal displacement to create a wavy distortion,
+    like a page that's not flat on the scanner.
+    """
+    arr = np.array(img)
+    h, w = arr.shape[:2]
+
+    # Horizontal wave (paper curling left-right)
+    amplitude = random.uniform(1.0, 3.0)
+    frequency = random.uniform(1.0, 3.0)
+    phase = random.uniform(0, 2 * np.pi)
+
+    result = np.zeros_like(arr)
+    for y in range(h):
+        shift = int(amplitude * np.sin(2 * np.pi * frequency * y / h + phase))
+        for x in range(w):
+            src_x = min(max(x + shift, 0), w - 1)
+            result[y, x] = arr[y, src_x]
+
+    return Image.fromarray(result)
+
+
+def spot_light(img: Image.Image) -> Image.Image:
+    """Simulate a spotlight or desk lamp on part of the image.
+
+    Creates a radial brightness falloff from a random point,
+    like a phone flashlight or desk lamp illuminating unevenly.
+    """
+    arr = np.array(img, dtype=np.float32)
+    h, w = arr.shape[:2]
+
+    # Random light source position
+    cx = random.uniform(0.1, 0.9) * w
+    cy = random.uniform(0.1, 0.9) * h
+    radius = random.uniform(0.3, 0.8) * max(w, h)
+
+    y_coords, x_coords = np.mgrid[0:h, 0:w]
+    dist = np.sqrt((x_coords - cx) ** 2 + (y_coords - cy) ** 2)
+
+    # Bright at center, dim at edges
+    light = 1.0 - 0.5 * np.clip(dist / radius, 0, 1)
+    arr = arr * light[:, :, np.newaxis]
+
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+
+
+def flash_glare(img: Image.Image) -> Image.Image:
+    """Simulate phone camera flash washing out part of the text.
+
+    Creates a bright white spot that fades outward — common artifact
+    when photographing documents with flash.
+    """
+    arr = np.array(img, dtype=np.float32)
+    h, w = arr.shape[:2]
+
+    # Random glare position (usually off-center)
+    cx = random.uniform(0.2, 0.8) * w
+    cy = random.uniform(0.2, 0.8) * h
+    radius = random.uniform(0.15, 0.4) * max(w, h)
+    intensity = random.uniform(0.3, 0.7)
+
+    y_coords, x_coords = np.mgrid[0:h, 0:w]
+    dist = np.sqrt((x_coords - cx) ** 2 + (y_coords - cy) ** 2)
+
+    # Gaussian glare
+    glare = intensity * np.exp(-0.5 * (dist / radius) ** 2)
+    arr = arr + glare[:, :, np.newaxis] * 255
+
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+
+
+AUGMENT_OPS.extend([paper_warp, spot_light, flash_glare])
 
 # elastic_distortion needs scipy — add only if available
 try:
