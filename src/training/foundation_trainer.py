@@ -25,11 +25,7 @@ from src.training.loss import ctc_loss
 
 
 class CTCHead(nn.Module):
-    """Temporary CTC projection head for Phase 1 training.
-
-    Simple linear projection from encoder output to character vocabulary.
-    Discarded after Phase 1 — not part of the final model.
-    """
+    """Simple CTC head — single linear projection. 37K params."""
 
     def __init__(self, enc_dim: int, vocab_size: int):
         super().__init__()
@@ -44,6 +40,40 @@ class CTCHead(nn.Module):
             (B, T, vocab_size) — logits for CTC.
         """
         return self.proj(features)
+
+
+class CTCHeadMLP(nn.Module):
+    """MLP CTC head — more capacity than single linear. ~135K params."""
+
+    def __init__(self, enc_dim: int, vocab_size: int, hidden_dim: int = 256):
+        super().__init__()
+        self.head = nn.Sequential(
+            nn.Linear(enc_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, vocab_size),
+        )
+
+    def forward(self, features: Tensor) -> Tensor:
+        return self.head(features)
+
+
+class CTCHeadBiLSTM(nn.Module):
+    """BiLSTM CTC head — bidirectional context for each frame. ~430K params.
+
+    Gives CTC the sequential context that RNN-T gets from the GRU,
+    but runs in parallel (no autoregressive decode loop).
+    Still 4-5x faster than RNN-T at inference.
+    """
+
+    def __init__(self, enc_dim: int, vocab_size: int, hidden_dim: int = 128):
+        super().__init__()
+        self.lstm = nn.LSTM(enc_dim, hidden_dim, bidirectional=True, batch_first=True)
+        self.proj = nn.Linear(hidden_dim * 2, vocab_size)
+
+    def forward(self, features: Tensor) -> Tensor:
+        out, _ = self.lstm(features)
+        return self.proj(out)
 
 
 class FoundationTrainer:
