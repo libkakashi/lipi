@@ -80,7 +80,7 @@ class ScriptCTCHeads(nn.Module):
                 continue
             head = self.heads[script]
             out, _ = head["lstm"](features[mask])
-            logits[mask] = head["proj"](out)
+            logits[mask] = head["proj"](out).to(logits.dtype)
 
         return logits
 

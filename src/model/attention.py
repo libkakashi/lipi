@@ -362,11 +362,12 @@ class SWABlockMoE(nn.Module):
 
         # Expert MLP (script-specific interpretation)
         normed = self.norm3(x)
-        expert_out = torch.zeros_like(normed)
+        expert_out = torch.zeros_like(x)
         for g in range(self.num_groups):
             mask = (group_ids == g)
             if mask.any():
-                expert_out[mask] = self.expert_mlps[g](normed[mask])
+                result = self.expert_mlps[g](normed[mask])
+                expert_out[mask] = result.to(expert_out.dtype)
         x = x + expert_out
         return x
 
