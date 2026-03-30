@@ -59,7 +59,6 @@ class FoundationTrainer:
         lr: float = 7e-4,
         weight_decay: float = 0.01,
         warmup_pct: float = 0.1,
-        swa_start_pct: float = 0.75,
         device: str = "cpu",
     ):
         self.device = torch.device(device)
@@ -72,7 +71,6 @@ class FoundationTrainer:
         self.optimizer = AdamW(self.params, lr=lr, weight_decay=weight_decay)
         self.scheduler = None  # Set in train()
         self.warmup_pct = warmup_pct
-        self.swa_start_pct = swa_start_pct
 
     def train(
         self,

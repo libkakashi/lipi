@@ -19,7 +19,7 @@ Degradation types:
 
 import random
 import numpy as np
-from PIL import Image, ImageFilter, ImageEnhance
+from PIL import Image, ImageFilter
 from src.data.augmentation import (
     jpeg_compress,
     gaussian_blur,
@@ -30,26 +30,8 @@ from src.data.augmentation import (
     perspective_warp,
     shadow_gradient,
     downsample_upsample,
+    motion_blur,
 )
-
-
-def motion_blur(img: Image.Image, kernel_size: int = 0) -> Image.Image:
-    """Apply horizontal motion blur (simulates scanner movement)."""
-    if kernel_size == 0:
-        kernel_size = random.choice([3, 5, 7])
-
-    # Horizontal motion blur kernel
-    kernel = [0] * (kernel_size * kernel_size)
-    mid = kernel_size // 2
-    for i in range(kernel_size):
-        kernel[mid * kernel_size + i] = 1.0 / kernel_size
-
-    return img.filter(ImageFilter.Kernel(
-        size=(kernel_size, kernel_size),
-        kernel=kernel,
-        scale=1,
-        offset=0,
-    ))
 
 
 def ink_bleed(img: Image.Image, radius: float = 0) -> Image.Image:

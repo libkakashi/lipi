@@ -5,15 +5,16 @@ RandAugment-style augmentation pipeline with OCR-specific transforms.
 All transforms preserve text readability while adding visual diversity.
 """
 
+import io
 import random
+
 import numpy as np
-from PIL import Image, ImageFilter, ImageEnhance, ImageOps
+from PIL import Image, ImageFilter, ImageEnhance
 from typing import Callable
 
 
 def jpeg_compress(img: Image.Image, quality_range: tuple = (30, 90)) -> Image.Image:
     """Apply JPEG compression artifacts."""
-    import io
     quality = random.randint(*quality_range)
     buffer = io.BytesIO()
     img.save(buffer, format="JPEG", quality=quality)
@@ -78,7 +79,6 @@ def perspective_warp(img: Image.Image, strength: float = 0.05) -> Image.Image:
 
 def _find_perspective_coeffs(src, dst):
     """Compute perspective transform coefficients."""
-    import numpy as np
     matrix = []
     for s, d in zip(src, dst):
         matrix.append([d[0], d[1], 1, 0, 0, 0, -s[0]*d[0], -s[0]*d[1]])
@@ -119,11 +119,6 @@ def downsample_upsample(img: Image.Image, scale_range: tuple = (0.5, 0.8)) -> Im
     scale = random.uniform(*scale_range)
     small = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.BILINEAR)
     return small.resize((w, h), Image.BILINEAR)
-
-
-def invert(img: Image.Image) -> Image.Image:
-    """Invert colors (simulate white-on-black or negative)."""
-    return ImageOps.invert(img)
 
 
 def motion_blur(img: Image.Image) -> Image.Image:

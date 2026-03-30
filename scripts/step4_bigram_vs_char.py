@@ -237,6 +237,8 @@ def main():
     parser.add_argument("--max_samples", type=int, default=1000000)
     parser.add_argument("--batch_size", type=int, default=400)
     parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--only", type=str, default=None, choices=["char", "bigram"],
+                        help="Run only char or bigram head (skip the other)")
     parser.add_argument("--device", type=str, default="auto")
     args = parser.parse_args()
 
@@ -283,23 +285,31 @@ def main():
         reduction = (1 - len(bigram_ids) / len(char_ids)) * 100 if char_ids else 0
         print(f"    {word:15s}: char={len(char_ids)} tokens, bigram={len(bigram_ids)} tokens ({reduction:+.0f}%)")
 
-    # Train Head A: character-level
-    print(f"\n{'='*60}")
-    print("HEAD A: CHARACTER-LEVEL")
-    print(f"{'='*60}")
-    char_results, _, _ = train_rnnt_head(
-        encoder, char_tokenizer, train_dataset, args.test_dir,
-        device, args.epochs, args.batch_size, args.lr, "CHAR",
-    )
+    # Train heads
+    char_results = None
+    bigram_results = None
 
-    # Train Head B: character + bigrams
-    print(f"\n{'='*60}")
-    print("HEAD B: CHARACTER + BIGRAMS")
-    print(f"{'='*60}")
-    bigram_results, _, _ = train_rnnt_head(
-        encoder, bigram_tokenizer, train_dataset, args.test_dir,
-        device, args.epochs, args.batch_size, args.lr, "BIGRAM",
-    )
+    if args.only != "bigram":
+        print(f"\n{'='*60}")
+        print("HEAD A: CHARACTER-LEVEL")
+        print(f"{'='*60}")
+        char_results, _, _ = train_rnnt_head(
+            encoder, char_tokenizer, train_dataset, args.test_dir,
+            device, args.epochs, args.batch_size, args.lr, "CHAR",
+        )
+
+    if args.only != "char":
+        print(f"\n{'='*60}")
+        print("HEAD B: CHARACTER + BIGRAMS")
+        print(f"{'='*60}")
+        bigram_results, _, _ = train_rnnt_head(
+            encoder, bigram_tokenizer, train_dataset, args.test_dir,
+            device, args.epochs, args.batch_size, args.lr, "BIGRAM",
+        )
+
+    if args.only:
+        print("\nDone (single head mode).")
+        return
 
     # Comparison
     print(f"\n{'='*60}")

@@ -129,7 +129,6 @@ def main():
     parser.add_argument("--augment", action="store_true", help="Enable training augmentation")
     parser.add_argument("--scheduler", type=str, default="onecycle", choices=["onecycle", "cosine"],
                         help="LR scheduler (cosine recommended for resume)")
-    parser.add_argument("--gpu-loader", action="store_true", help="Use GPU decode (requires torchvision)")
     parser.add_argument("--max-width", type=int, default=192, help="Max image width after resize (default 192, covers 93%% of data)")
     args = parser.parse_args()
 
@@ -143,37 +142,25 @@ def main():
     # Load training data
     print(f"Loading training data from {args.train_dir}...")
 
-    use_gpu_loader = getattr(args, 'gpu_loader', False)
+    train_dataset = PARSeqLMDB(args.train_dir, augment=args.augment, max_width=args.max_width)
+    print(f"  Full dataset: {len(train_dataset)} samples")
+    if args.augment:
+        print(f"  Augmentation: ENABLED")
 
-    if use_gpu_loader:
-        from src.data.dali_pipeline import DALIOCRLoader
-        max_load = args.max_samples if args.max_samples and args.max_samples > 0 else None
-        train_loader = DALIOCRLoader(
-            args.train_dir, batch_size=args.batch_size,
-            max_samples=max_load, augment=args.augment,
-            device_id=0,
-        )
-        print(f"  DALI GPU loader: ENABLED ({len(train_loader)} batches)")
-    else:
-        train_dataset = PARSeqLMDB(args.train_dir, augment=args.augment, max_width=args.max_width)
-        print(f"  Full dataset: {len(train_dataset)} samples")
-        if args.augment:
-            print(f"  Augmentation: ENABLED")
+    # Preload raw bytes for width-sorted batching
+    max_load = args.max_samples if args.max_samples and args.max_samples < len(train_dataset) else None
+    train_dataset.preload_raw(max_samples=max_load)
 
-        # Preload raw bytes for width-sorted batching
-        max_load = args.max_samples if args.max_samples and args.max_samples < len(train_dataset) else None
-        train_dataset.preload_raw(max_samples=max_load)
+    # Width-bucketed sampler: groups similar widths → minimal padding → faster
+    from src.data.width_sampler import WidthBucketSampler, get_image_widths
+    widths = get_image_widths(train_dataset, target_height=32, max_width=args.max_width)
+    sampler = WidthBucketSampler(widths, batch_size=args.batch_size)
+    print(f"  Width-bucketed batching: {len(sampler)} batches")
 
-        # Width-bucketed sampler: groups similar widths → minimal padding → faster
-        from src.data.width_sampler import WidthBucketSampler, get_image_widths
-        widths = get_image_widths(train_dataset, target_height=32, max_width=args.max_width)
-        sampler = WidthBucketSampler(widths, batch_size=args.batch_size)
-        print(f"  Width-bucketed batching: {len(sampler)} batches")
-
-        train_loader = DataLoader(
-            train_dataset, batch_sampler=sampler, collate_fn=collate_ocr,
-            num_workers=8, pin_memory=True,
-        )
+    train_loader = DataLoader(
+        train_dataset, batch_sampler=sampler, collate_fn=collate_ocr,
+        num_workers=8, pin_memory=True,
+    )
 
     # Build tokenizer
     tokenizer = LipiTokenizer.build_character_level("en")
