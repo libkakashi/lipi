@@ -21,7 +21,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-from src.model.stem import ConvNeXtStem
+from src.model.stem import ConvNeXtStem, ResNetStem
 from src.model.pooling import LearnedHeightPooling
 from src.model.attention import SWABlock, GlobalBlock
 
@@ -52,11 +52,15 @@ class LipiEncoder(nn.Module):
         stage3_heads: int = 12,
         stage3_blocks: int = 3,
         stage3_mlp_ratio: int = 4,
+        heavy_stem: bool = False,
     ):
         super().__init__()
 
-        # Stage 0: ConvNeXt-V2 Stem
-        self.stem = ConvNeXtStem(in_channels=3, out_channels=stem_channels)
+        # Stage 0: Stem
+        if heavy_stem:
+            self.stem = ResNetStem(in_channels=3, out_channels=stem_channels)
+        else:
+            self.stem = ConvNeXtStem(in_channels=3, out_channels=stem_channels)
 
         # Channel projection: stem_channels -> stage1_dim
         self.proj1 = nn.Linear(stem_channels, stage1_dim)
