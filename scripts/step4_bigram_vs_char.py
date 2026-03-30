@@ -46,7 +46,9 @@ from src.data.dataset import collate_ocr
 
 
 def evaluate_rnnt(encoder, pred_net, joint_net, tokenizer, test_dir, device, batch_size=64):
-    """Evaluate RNN-T model on benchmarks."""
+    """Evaluate RNN-T model on benchmarks + measure decode latency."""
+    import time as _time
+
     encoder.eval()
     pred_net.eval()
     joint_net.eval()
@@ -54,7 +56,6 @@ def evaluate_rnnt(encoder, pred_net, joint_net, tokenizer, test_dir, device, bat
     benchmarks = discover_parseq_structure(test_dir)
     results = {}
 
-    # Only eval on the standard 6 benchmarks
     standard = ["IIIT5k", "SVT", "IC13_1015", "IC15_2077", "SVTP", "CUTE80"]
 
     print(f"    {'Benchmark':<20} {'Correct':>8} {'Total':>8} {'Accuracy':>10}")
@@ -62,6 +63,8 @@ def evaluate_rnnt(encoder, pred_net, joint_net, tokenizer, test_dir, device, bat
 
     total_correct = 0
     total_total = 0
+    total_decode_time = 0.0
+    total_tokens = 0
 
     for name in standard:
         path = benchmarks.get(name)
@@ -78,10 +81,18 @@ def evaluate_rnnt(encoder, pred_net, joint_net, tokenizer, test_dir, device, bat
             for batch_imgs, batch_labels, widths in loader:
                 batch_imgs = batch_imgs.to(device)
                 features, _ = encoder(batch_imgs)
+
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
+                t0 = _time.perf_counter()
                 decoded_ids = greedy_decode(features, pred_net, joint_net, max_tokens=25)
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
+                total_decode_time += _time.perf_counter() - t0
 
                 for pred_ids, label in zip(decoded_ids, batch_labels):
                     pred_text = tokenizer.decode(pred_ids)
+                    total_tokens += len(pred_ids)
                     if pred_text.lower() == label.lower():
                         correct += 1
                     total += 1
@@ -96,9 +107,14 @@ def evaluate_rnnt(encoder, pred_net, joint_net, tokenizer, test_dir, device, bat
 
     if total_total > 0:
         avg = total_correct / total_total * 100
+        ms_per_word = total_decode_time / total_total * 1000
+        avg_tokens = total_tokens / total_total
         print(f"    {'-'*50}")
         print(f"    {'AVERAGE':<20} {total_correct:>8} {total_total:>8} {avg:>9.1f}%")
+        print(f"    Decode: {ms_per_word:.2f}ms/word, {avg_tokens:.1f} tokens/word")
         results["AVERAGE"] = avg
+        results["ms_per_word"] = ms_per_word
+        results["tokens_per_word"] = avg_tokens
 
     return results
 
@@ -292,6 +308,21 @@ def main():
         marker = "+" if delta > 0 else ""
         print(f"  {name:<20} {c:>9.1f}% {b:>9.1f}% {marker}{delta:>8.1f}%")
 
+    # Performance comparison
+    char_ms = char_results.get("ms_per_word", 0)
+    bigram_ms = bigram_results.get("ms_per_word", 0)
+    char_tpw = char_results.get("tokens_per_word", 0)
+    bigram_tpw = bigram_results.get("tokens_per_word", 0)
+
+    print(f"\n  Performance:")
+    print(f"    {'':20s} {'Char':>12} {'Bigram':>12} {'Delta':>12}")
+    print(f"    {'-'*58}")
+    print(f"    {'Decode ms/word':<20} {char_ms:>11.2f} {bigram_ms:>11.2f} {bigram_ms-char_ms:>+11.2f}")
+    print(f"    {'Tokens/word':<20} {char_tpw:>11.1f} {bigram_tpw:>11.1f} {bigram_tpw-char_tpw:>+11.1f}")
+    if char_ms > 0:
+        speedup = char_ms / bigram_ms if bigram_ms > 0 else 0
+        print(f"    {'Speedup':<20} {'':>12} {'':>12} {speedup:>11.2f}x")
+
     # Decision
     char_avg = char_results.get("AVERAGE", 0)
     bigram_avg = bigram_results.get("AVERAGE", 0)
@@ -300,13 +331,13 @@ def main():
     if bigram_avg >= char_avg:
         print(f"USE BIGRAMS (bigram {bigram_avg:.1f}% >= char {char_avg:.1f}%)")
         print(f"  Bigrams give equal or better accuracy with fewer decode steps.")
+    elif bigram_avg >= char_avg - 1.0 and bigram_ms < char_ms:
+        print(f"USE BIGRAMS (gap is only {char_avg - bigram_avg:.1f}%, bigrams are {speedup:.1f}x faster)")
     else:
         gap = char_avg - bigram_avg
-        if gap < 0.5:
-            print(f"USE BIGRAMS (gap is only {gap:.1f}%, bigrams win on speed)")
-        else:
-            print(f"USE CHARACTERS (char {char_avg:.1f}% > bigram {bigram_avg:.1f}% by {gap:.1f}%)")
-            print(f"  Consider dropping bigrams and using pure character-level.")
+        print(f"USE CHARACTERS (char {char_avg:.1f}% > bigram {bigram_avg:.1f}% by {gap:.1f}%)")
+        if bigram_ms < char_ms:
+            print(f"  But bigrams are {speedup:.1f}x faster — consider if speed matters more.")
 
 
 if __name__ == "__main__":
