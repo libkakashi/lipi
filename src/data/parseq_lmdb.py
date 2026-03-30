@@ -22,24 +22,21 @@ from torch.utils.data import Dataset
 
 from src.data.dataset import preprocess_crop
 
-# Try turbojpeg for 2-4x faster JPEG decode
-try:
-    from turbojpeg import TurboJPEG
-    _tjpeg = TurboJPEG()
-    _HAS_TURBOJPEG = True
-except ImportError:
-    _HAS_TURBOJPEG = False
+# turbojpeg for 2-4x faster JPEG decode
+# NOT optional — install it: pip install PyTurboJPEG
+# Plus libjpeg-turbo 3.x: see github.com/libjpeg-turbo/libjpeg-turbo/releases
+from turbojpeg import TurboJPEG
+_tjpeg = TurboJPEG()
 
 
 def _fast_decode(img_bytes: bytes) -> Image.Image:
-    """Decode image bytes. Uses turbojpeg if available, PIL otherwise."""
-    if _HAS_TURBOJPEG:
-        try:
-            arr = _tjpeg.decode(img_bytes)  # returns BGR numpy array
-            return Image.fromarray(arr[:, :, ::-1])  # BGR → RGB
-        except Exception:
-            pass  # fall through to PIL for non-JPEG
-    return Image.open(io.BytesIO(img_bytes)).convert("RGB")
+    """Decode image bytes via turbojpeg. Falls back to PIL only for PNG."""
+    try:
+        arr = _tjpeg.decode(img_bytes)  # returns BGR numpy array
+        return Image.fromarray(arr[:, :, ::-1])  # BGR → RGB
+    except Exception:
+        # Only PNG/BMP/etc fall through — NOT a silent JPEG fallback
+        return Image.open(io.BytesIO(img_bytes)).convert("RGB")
 
 
 class PARSeqLMDB(Dataset):
