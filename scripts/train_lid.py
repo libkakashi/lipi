@@ -190,25 +190,93 @@ def load_all_script_samples():
 
 FONT_DIR = Path(__file__).parent.parent / "training_data" / "fonts"
 
-# Local Noto fonts -> scripts they cover (downloaded by setup_fonts.sh)
+# Local fonts -> scripts they cover (downloaded by setup_fonts.sh)
+# Includes sans, serif, handwriting, display for visual diversity
 _LOCAL_FONT_MAP = {
-    "latin": ["NotoSans-Regular.ttf", "NotoSans-Bold.ttf"],
-    "cyrillic": ["NotoSans-Regular.ttf", "NotoSans-Bold.ttf"],
-    "greek": ["NotoSans-Regular.ttf", "NotoSans-Bold.ttf"],
-    "arabic": ["NotoSansArabic-Regular.ttf", "NotoNaskhArabic-Regular.ttf"],
-    "hebrew": ["NotoSansHebrew-Regular.ttf"],
-    "cjk": ["01_NotoSansCJKsc-Regular.otf", "03_NotoSansCJKjp-Regular.otf"],
-    "korean": ["05_NotoSansCJKkr-Regular.otf"],
-    "devanagari": ["NotoSansDevanagari-Regular.ttf"],
-    "bengali": ["NotoSansBengali-Regular.ttf"],
-    "gurmukhi": ["NotoSansGurmukhi-Regular.ttf"],
-    "gujarati": ["NotoSansGujarati-Regular.ttf"],
-    "tamil": ["NotoSansTamil-Regular.ttf"],
-    "telugu": ["NotoSansTelugu-Regular.ttf"],
-    "kannada": ["NotoSansKannada-Regular.ttf"],
-    "malayalam": ["NotoSansMalayalam-Regular.ttf"],
-    "thai": ["NotoSansThai-Regular.ttf"],
-    "lao": ["NotoSansLao-Regular.ttf"],
+    "latin": [
+        "NotoSans-Regular.ttf", "NotoSans-Bold.ttf", "NotoSans-Italic.ttf", "NotoSans-Light.ttf",
+        "NotoSerif-Regular.ttf", "NotoSerif-Bold.ttf", "NotoSerif-Italic.ttf",
+        "NotoSansMono-Regular.ttf",
+        "Caveat[wght].ttf", "DancingScript[wght].ttf", "IndieFlower-Regular.ttf",
+        "PatrickHand-Regular.ttf", "ShadowsIntoLight.ttf", "PermanentMarker-Regular.ttf",
+        "AmaticSC-Regular.ttf", "Lobster-Regular.ttf", "Pacifico-Regular.ttf",
+        "ComicNeue-Regular.ttf", "SpecialElite-Regular.ttf",
+    ],
+    "cyrillic": [
+        "NotoSans-Regular.ttf", "NotoSans-Bold.ttf", "NotoSans-Italic.ttf",
+        "NotoSerif-Regular.ttf", "NotoSerif-Bold.ttf",
+        "Caveat[wght].ttf", "ComicNeue-Regular.ttf", "Pacifico-Regular.ttf",
+    ],
+    "greek": [
+        "NotoSans-Regular.ttf", "NotoSans-Bold.ttf",
+        "NotoSerif-Regular.ttf",
+    ],
+    "arabic": [
+        "NotoSansArabic-Regular.ttf", "NotoSansArabic-Bold.ttf",
+        "NotoNaskhArabic-Regular.ttf", "NotoNaskhArabic-Bold.ttf",
+        "NotoNastaliqUrdu-Regular.ttf", "NotoKufiArabic-Regular.ttf",
+        "Amiri-Regular.ttf", "Amiri-Bold.ttf",
+        "ScheherazadeNew-Regular.ttf", "Lateef-Regular.ttf",
+    ],
+    "hebrew": [
+        "NotoSansHebrew-Regular.ttf", "NotoSansHebrew-Bold.ttf",
+        "NotoSerifHebrew-Regular.ttf",
+        "FrankRuhlLibre[wght].ttf", "Rubik[wght].ttf", "SecularOne-Regular.ttf",
+    ],
+    "cjk": [
+        "01_NotoSansCJKsc-Regular.otf", "01_NotoSansCJKsc-Bold.otf",
+        "03_NotoSansCJKjp-Regular.otf",
+        "01_NotoSerifCJKsc-Regular.otf", "03_NotoSerifCJKjp-Regular.otf",
+    ],
+    "korean": [
+        "05_NotoSansCJKkr-Regular.otf", "05_NotoSansCJKkr-Bold.otf",
+        "05_NotoSerifCJKkr-Regular.otf",
+        "NanumGothic-Regular.ttf", "NanumMyeongjo-Regular.ttf", "NanumPenScript-Regular.ttf",
+    ],
+    "devanagari": [
+        "NotoSansDevanagari-Regular.ttf", "NotoSansDevanagari-Bold.ttf",
+        "NotoSerifDevanagari-Regular.ttf",
+        "Poppins-Regular.ttf", "TiroDevanagariHindi-Regular.ttf",
+        "Laila-Regular.ttf", "Kalam-Regular.ttf",
+    ],
+    "bengali": [
+        "NotoSansBengali-Regular.ttf", "NotoSansBengali-Bold.ttf",
+        "NotoSerifBengali-Regular.ttf",
+        "TiroBangla-Regular.ttf", "HindSiliguri-Regular.ttf",
+    ],
+    "gurmukhi": [
+        "NotoSansGurmukhi-Regular.ttf", "NotoSansGurmukhi-Bold.ttf",
+        "NotoSerifGurmukhi-Regular.ttf",
+    ],
+    "gujarati": [
+        "NotoSansGujarati-Regular.ttf", "NotoSansGujarati-Bold.ttf",
+        "NotoSerifGujarati-Regular.ttf", "HindVadodara-Regular.ttf",
+    ],
+    "tamil": [
+        "NotoSansTamil-Regular.ttf", "NotoSansTamil-Bold.ttf",
+        "NotoSerifTamil-Regular.ttf", "TiroTamil-Regular.ttf",
+    ],
+    "telugu": [
+        "NotoSansTelugu-Regular.ttf", "NotoSansTelugu-Bold.ttf",
+        "NotoSerifTelugu-Regular.ttf", "TiroTelugu-Regular.ttf",
+    ],
+    "kannada": [
+        "NotoSansKannada-Regular.ttf", "NotoSansKannada-Bold.ttf",
+        "NotoSerifKannada-Regular.ttf", "TiroKannada-Regular.ttf",
+    ],
+    "malayalam": [
+        "NotoSansMalayalam-Regular.ttf", "NotoSansMalayalam-Bold.ttf",
+        "NotoSerifMalayalam-Regular.ttf", "Chilanka-Regular.ttf",
+    ],
+    "thai": [
+        "NotoSansThai-Regular.ttf", "NotoSansThai-Bold.ttf",
+        "NotoSerifThai-Regular.ttf",
+        "Kanit-Regular.ttf", "Sarabun-Regular.ttf", "Prompt-Regular.ttf",
+    ],
+    "lao": [
+        "NotoSansLao-Regular.ttf", "NotoSansLao-Bold.ttf",
+        "NotoSerifLao-Regular.ttf", "PhetsarathOT-Regular.ttf",
+    ],
 }
 
 # fc-list language codes for system font fallback
