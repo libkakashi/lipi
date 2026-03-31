@@ -444,6 +444,32 @@ def render_emoji(height: int = 32, max_width: int = 192) -> Image.Image:
     return img
 
 
+def _generate_batch(args_tuple):
+    """Worker function for parallel image generation. Must be at module level for pickling."""
+    script, count, fonts, words, h, mw, do_augment = args_tuple
+    aug = RandAugmentOCR(n_ops=2, p=0.5) if do_augment else None
+    results = []
+    attempts = 0
+    while len(results) < count and attempts < count * 5:
+        attempts += 1
+        if script == "emoji":
+            img = render_emoji(h, mw)
+        else:
+            img = render_word(random.choice(words), random.choice(fonts), h)
+        if img is None:
+            continue
+        if img.width > mw:
+            img = img.resize((mw, h), Image.BILINEAR)
+        elif img.width < mw:
+            padded = Image.new("RGB", (mw, h), (240, 240, 240))
+            padded.paste(img, (0, 0))
+            img = padded
+        if aug is not None:
+            img = aug(img)
+        results.append(rgb_to_input(img))
+    return results
+
+
 class MultiScriptDataset(Dataset):
     """Pre-generated multi-script word images with both coarse and fine labels."""
 
@@ -528,51 +554,27 @@ class MultiScriptDataset(Dataset):
                 target = samples_per_script
             tasks.append((script, target))
 
-        # Worker function for one batch of images
-        def _generate_batch(script, count, fonts, words, h, mw, do_augment):
-            aug = RandAugmentOCR(n_ops=2, p=0.5) if do_augment else None
-            results = []
-            attempts = 0
-            while len(results) < count and attempts < count * 5:
-                attempts += 1
-                if script == "emoji":
-                    img = render_emoji(h, mw)
-                else:
-                    img = render_word(random.choice(words), random.choice(fonts), h)
-                if img is None:
-                    continue
-                if img.width > mw:
-                    img = img.resize((mw, h), Image.BILINEAR)
-                elif img.width < mw:
-                    padded = Image.new("RGB", (mw, h), (240, 240, 240))
-                    padded.paste(img, (0, 0))
-                    img = padded
-                if aug is not None:
-                    img = aug(img)
-                results.append(rgb_to_input(img))
-            return results
-
-        # Parallel generation using threads (GIL released by numpy/freetype C calls)
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        # Parallel generation using processes (FreeType is not thread-safe)
+        from concurrent.futures import ProcessPoolExecutor, as_completed
         import os
 
-        n_workers = min(os.cpu_count() or 4, 32)
+        n_workers = min(os.cpu_count() or 4, 16)
         self.images = []
         self.script_labels = []
         self.group_labels = []
 
-        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        with ProcessPoolExecutor(max_workers=n_workers) as pool:
             futures = {}
             for script, target in tasks:
                 fonts = self.script_fonts[script]
                 words = SCRIPT_SAMPLES.get(script, ["placeholder"])
                 # Split into chunks for parallelism
-                chunk_size = max(100, target // n_workers)
+                chunk_size = max(200, target // n_workers)
                 remaining = target
                 while remaining > 0:
                     batch = min(chunk_size, remaining)
-                    f = pool.submit(_generate_batch, script, batch, fonts, words,
-                                    self.height, self.max_width, augment)
+                    f = pool.submit(_generate_batch,
+                                    (script, batch, fonts, words, self.height, self.max_width, augment))
                     futures[f] = script
                     remaining -= batch
 
