@@ -964,6 +964,8 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--max-width", type=int, default=192)
+    parser.add_argument("--data", type=str, default=None,
+                        help="Pre-generated data file from generate_lid_data.py (skips generation)")
     parser.add_argument("--save", type=str, default="checkpoints/lid_hierarchical.pt")
     parser.add_argument("--resume", type=str, default=None,
                         help="Resume from checkpoint path")
@@ -980,17 +982,30 @@ def main():
         device = args.device
     print(f"Device: {device}\n")
 
-    # Load word lists from files
-    load_all_script_samples()
-
-    # Generate dataset
-    dataset = MultiScriptDataset(
-        samples_per_script=args.samples_per_script,
-        height=32,
-        max_width=args.max_width,
-        balance_groups=args.balance_groups,
-        augment=args.augment,
-    )
+    # Load dataset — either from pre-generated file or generate on the fly
+    if args.data:
+        print(f"Loading pre-generated data from {args.data}...")
+        saved = torch.load(args.data, weights_only=False)
+        dataset = torch.utils.data.TensorDataset(
+            saved["images"], saved["script_labels"], saved["group_labels"],
+        )
+        # Attach metadata for the training loop
+        dataset.active_scripts = saved["active_scripts"]
+        dataset.active_groups = saved["active_groups"]
+        dataset.script_to_idx = saved["script_to_idx"]
+        dataset.group_to_idx = saved["group_to_idx"]
+        dataset.num_scripts = len(saved["active_scripts"])
+        dataset.num_groups = len(saved["active_groups"])
+        print(f"  {len(dataset)} images, {dataset.num_scripts} scripts, {dataset.num_groups} groups")
+    else:
+        load_all_script_samples()
+        dataset = MultiScriptDataset(
+            samples_per_script=args.samples_per_script,
+            height=32,
+            max_width=args.max_width,
+            balance_groups=args.balance_groups,
+            augment=args.augment,
+        )
 
     # 80/20 split
     n = len(dataset)
