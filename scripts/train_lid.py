@@ -640,7 +640,8 @@ def train_coarse(stem, lid_coarse, dataset, train_set, val_set, args, device, co
         print(f"Resumed from epoch {start_epoch - 1}, val acc: {last_val_acc:.1f}%, best: {best_val_acc:.1f}%\n")
 
     # AMP setup
-    use_amp = device.type == "cuda"
+    device_type = device if isinstance(device, str) else device.type
+    use_amp = device_type == "cuda"
     amp_dtype = torch.bfloat16 if (use_amp and torch.cuda.is_bf16_supported()) else torch.float16
     if use_amp:
         torch.backends.cudnn.benchmark = True
@@ -655,7 +656,7 @@ def train_coarse(stem, lid_coarse, dataset, train_set, val_set, args, device, co
             images = images.to(device, non_blocking=True)
             group_labels = group_labels.to(device, non_blocking=True) if isinstance(group_labels, torch.Tensor) else torch.tensor(group_labels, dtype=torch.long, device=device)
 
-            with torch.amp.autocast(device.type, enabled=use_amp, dtype=amp_dtype):
+            with torch.amp.autocast(device_type, enabled=use_amp, dtype=amp_dtype):
                 logits = forward_to_lid(images)
                 loss = F.cross_entropy(logits, group_labels)
 
