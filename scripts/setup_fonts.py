@@ -11,8 +11,8 @@ FONT_DIR = Path(__file__).parent.parent / "training_data" / "fonts"
 
 NOTO = "https://github.com/notofonts/notofonts.github.io/raw/main/fonts"
 GFONTS = "https://github.com/google/fonts/raw/main/ofl"
-CJK_SANS = "https://github.com/notofonts/noto-cjk/releases/download/Sans2.004"
-CJK_SERIF = "https://github.com/notofonts/noto-cjk/releases/download/Serif2.003"
+CJK_RAW = "https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF"
+CJK_SERIF_RAW = "https://github.com/notofonts/noto-cjk/raw/main/Serif/OTF"
 
 FONTS = {
     # (url, filename)
@@ -44,16 +44,17 @@ FONTS = {
     (f"{GFONTS}/frankruhllibre/FrankRuhlLibre%5Bwght%5D.ttf", "FrankRuhlLibre[wght].ttf"),
     (f"{GFONTS}/rubik/Rubik%5Bwght%5D.ttf", "Rubik[wght].ttf"),
     (f"{GFONTS}/secularone/SecularOne-Regular.ttf", "SecularOne-Regular.ttf"),
-    # CJK
-    (f"{CJK_SANS}/01_NotoSansCJKsc-Regular.otf", "01_NotoSansCJKsc-Regular.otf"),
-    (f"{CJK_SANS}/01_NotoSansCJKsc-Bold.otf", "01_NotoSansCJKsc-Bold.otf"),
-    (f"{CJK_SANS}/03_NotoSansCJKjp-Regular.otf", "03_NotoSansCJKjp-Regular.otf"),
-    (f"{CJK_SERIF}/01_NotoSerifCJKsc-Regular.otf", "01_NotoSerifCJKsc-Regular.otf"),
-    (f"{CJK_SERIF}/03_NotoSerifCJKjp-Regular.otf", "03_NotoSerifCJKjp-Regular.otf"),
+    # CJK (Google Fonts variable weight versions — smaller, reliable)
+    (f"{GFONTS}/notosanssc/NotoSansSC%5Bwght%5D.ttf", "NotoSansSC[wght].ttf"),
+    (f"{GFONTS}/notosansjp/NotoSansJP%5Bwght%5D.ttf", "NotoSansJP[wght].ttf"),
+    # CJK (raw repo — OTF versions)
+    (f"{CJK_RAW}/SimplifiedChinese/NotoSansCJKsc-Regular.otf", "NotoSansCJKsc-Regular.otf"),
+    (f"{CJK_RAW}/Japanese/NotoSansCJKjp-Regular.otf", "NotoSansCJKjp-Regular.otf"),
+    (f"{CJK_SERIF_RAW}/SimplifiedChinese/NotoSerifCJKsc-Regular.otf", "NotoSerifCJKsc-Regular.otf"),
     # Korean
-    (f"{CJK_SANS}/05_NotoSansCJKkr-Regular.otf", "05_NotoSansCJKkr-Regular.otf"),
-    (f"{CJK_SANS}/05_NotoSansCJKkr-Bold.otf", "05_NotoSansCJKkr-Bold.otf"),
-    (f"{CJK_SERIF}/05_NotoSerifCJKkr-Regular.otf", "05_NotoSerifCJKkr-Regular.otf"),
+    (f"{GFONTS}/notosanskr/NotoSansKR%5Bwght%5D.ttf", "NotoSansKR[wght].ttf"),
+    (f"{CJK_RAW}/Korean/NotoSansCJKkr-Regular.otf", "NotoSansCJKkr-Regular.otf"),
+    (f"{CJK_SERIF_RAW}/Korean/NotoSerifCJKkr-Regular.otf", "NotoSerifCJKkr-Regular.otf"),
     (f"{GFONTS}/nanumgothic/NanumGothic-Regular.ttf", "NanumGothic-Regular.ttf"),
     (f"{GFONTS}/nanummyeongjo/NanumMyeongjo-Regular.ttf", "NanumMyeongjo-Regular.ttf"),
     (f"{GFONTS}/nanumpenscript/NanumPenScript-Regular.ttf", "NanumPenScript-Regular.ttf"),

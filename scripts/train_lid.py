@@ -224,13 +224,13 @@ _LOCAL_FONT_MAP = {
         "FrankRuhlLibre[wght].ttf", "Rubik[wght].ttf", "SecularOne-Regular.ttf",
     ],
     "cjk": [
-        "01_NotoSansCJKsc-Regular.otf", "01_NotoSansCJKsc-Bold.otf",
-        "03_NotoSansCJKjp-Regular.otf",
-        "01_NotoSerifCJKsc-Regular.otf", "03_NotoSerifCJKjp-Regular.otf",
+        "NotoSansSC[wght].ttf", "NotoSansJP[wght].ttf",
+        "NotoSansCJKsc-Regular.otf", "NotoSansCJKjp-Regular.otf",
+        "NotoSerifCJKsc-Regular.otf",
     ],
     "korean": [
-        "05_NotoSansCJKkr-Regular.otf", "05_NotoSansCJKkr-Bold.otf",
-        "05_NotoSerifCJKkr-Regular.otf",
+        "NotoSansKR[wght].ttf", "NotoSansCJKkr-Regular.otf",
+        "NotoSerifCJKkr-Regular.otf",
         "NanumGothic-Regular.ttf", "NanumMyeongjo-Regular.ttf", "NanumPenScript-Regular.ttf",
     ],
     "devanagari": [
