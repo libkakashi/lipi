@@ -82,7 +82,37 @@ SCRIPT_TO_LANG = {
 # ---------------------------------------------------------------------------
 # Synthetic data: reuse rendering from train_lid.py
 # ---------------------------------------------------------------------------
-SCRIPT_SAMPLES = {
+WORD_LIST_DIR = Path(__file__).parent.parent / "training_data" / "word_lists"
+
+
+def load_word_list(script: str, fallback: list[str]) -> list[str]:
+    """Load word list from file if available, else use fallback.
+
+    Checks training_data/word_lists/{script}.txt first.
+    For latin, also checks english_common.txt.
+    Filters to words with 2-15 chars, deduplicates.
+    """
+    candidates = [WORD_LIST_DIR / f"{script}.txt"]
+    if script == "latin":
+        candidates.append(WORD_LIST_DIR / "english_common.txt")
+
+    for path in candidates:
+        if path.exists():
+            words = []
+            for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                w = line.strip()
+                if 2 <= len(w) <= 15 and w and not w[0].isdigit():
+                    words.append(w)
+            if len(words) >= 50:
+                words = list(set(words))
+                random.shuffle(words)
+                print(f"    Loaded {len(words)} words from {path.name}")
+                return words
+
+    return fallback
+
+
+_SCRIPT_SAMPLES_FALLBACK = {
     "latin": [
         "hello", "world", "justice", "court", "legal", "document", "appeal",
         "judge", "order", "case", "file", "law", "right", "party", "trial",
@@ -165,6 +195,15 @@ SCRIPT_SAMPLES = {
         "กรุงเทพ", "เวลา", "คน", "ประเทศ", "บ้าน", "วัน",
     ],
 }
+
+# Populated at runtime by load_script_samples()
+SCRIPT_SAMPLES: dict[str, list[str]] = {}
+
+
+def load_script_samples():
+    """Load word lists for all scripts. Uses files when available, else fallback."""
+    for script, fallback in _SCRIPT_SAMPLES_FALLBACK.items():
+        SCRIPT_SAMPLES[script] = load_word_list(script, fallback)
 
 
 def find_fonts_for_script(script: str) -> list[str]:
@@ -626,6 +665,9 @@ def main():
             print(f"ERROR: Unknown script '{s}'. Valid: {SCRIPTS}")
             sys.exit(1)
     print(f"Scripts: {selected_scripts}")
+
+    # ---- Load word lists ----
+    load_script_samples()
 
     # ---- Validate data mode ----
     if not args.synth and not args.train_dir:
