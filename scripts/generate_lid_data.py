@@ -184,18 +184,33 @@ def main():
             shard_idx += 1
             remaining -= batch
 
-    total_chunks = len(chunks)
-    print(f"  {total_chunks} chunks across {n_workers} workers\n")
+    # Skip already-generated shards (resume support)
+    pending = []
+    skipped_count = 0
+    for chunk in chunks:
+        shard_path = chunk[7]
+        if Path(shard_path).exists() and Path(shard_path).stat().st_size > 100:
+            skipped_count += chunk[1]
+        else:
+            pending.append(chunk)
 
-    done_count = 0
-    with ProcessPoolExecutor(max_workers=n_workers) as pool:
-        futures = [pool.submit(_generate_batch, chunk) for chunk in chunks]
-        for future in as_completed(futures):
-            _, script, n = future.result()
-            done_count += n
-            elapsed = time.time() - start
-            rate = done_count / elapsed if elapsed > 0 else 0
-            print(f"    total: {done_count}/{total_est} ({rate:.0f} img/s)", flush=True)
+    total_chunks = len(chunks)
+    if skipped_count > 0:
+        print(f"  Resuming: {total_chunks - len(pending)} shards exist ({skipped_count} images), {len(pending)} remaining\n")
+    else:
+        print(f"  {total_chunks} chunks across {n_workers} workers\n")
+
+    done_count = skipped_count
+    if pending:
+        # Use multiprocessing.Pool with maxtasksperchild to avoid zombie processes
+        from multiprocessing import Pool
+        with Pool(processes=n_workers, maxtasksperchild=1) as pool:
+            for result in pool.imap_unordered(_generate_batch, pending):
+                _, script, n = result
+                done_count += n
+                elapsed = time.time() - start
+                rate = done_count / elapsed if elapsed > 0 else 0
+                print(f"    total: {done_count}/{total_est} ({rate:.0f} img/s)", flush=True)
 
     elapsed = time.time() - start
     print(f"\nGenerated {done_count} images in {elapsed:.0f}s")
