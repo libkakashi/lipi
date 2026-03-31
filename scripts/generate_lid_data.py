@@ -41,6 +41,7 @@ def _generate_batch(args_tuple):
     aug = RandAugmentOCR(n_ops=2, p=0.5) if do_augment else None
     results = []
     attempts = 0
+    t0 = time.time()
     while len(results) < count and attempts < count * 5:
         attempts += 1
         if script == "emoji":
@@ -58,6 +59,13 @@ def _generate_batch(args_tuple):
         if aug is not None:
             img = aug(img)
         results.append(rgb_to_input(img))
+        if len(results) % 1000 == 0:
+            elapsed = time.time() - t0
+            rate = len(results) / elapsed if elapsed > 0 else 0
+            print(f"    [{script}] {len(results)}/{count} ({rate:.0f} img/s)")
+    elapsed = time.time() - t0
+    rate = len(results) / elapsed if elapsed > 0 else 0
+    print(f"  {script:<15} {len(results):>5} images in {elapsed:.0f}s ({rate:.0f} img/s)")
     return results
 
 
@@ -144,20 +152,29 @@ def main():
     print(f"\nGenerating {total_est} images across {len(active_scripts)} scripts, {len(active_groups)} groups...")
     start = time.time()
 
-    # Parallel generation — one process per script
-    n_workers = min(len(tasks), os.cpu_count() or 4)
+    # Parallel generation — split each script into chunks across 48 workers
+    n_workers = 48
     all_images = []
     all_script_labels = []
     all_group_labels = []
 
+    # Build chunks: split large scripts across multiple workers
+    chunks = []
+    for script, target in tasks:
+        fonts = script_fonts[script]
+        words = SCRIPT_SAMPLES.get(script, ["placeholder"])
+        # Split into chunks of ~2000 images each
+        chunk_size = max(500, target // max(1, n_workers // len(tasks)))
+        remaining = target
+        while remaining > 0:
+            batch = min(chunk_size, remaining)
+            chunks.append((script, batch, fonts, words, args.height, args.max_width, args.augment))
+            remaining -= batch
+
+    print(f"  {len(chunks)} chunks across {n_workers} workers\n")
+
     with ProcessPoolExecutor(max_workers=n_workers) as pool:
-        futures = {}
-        for script, target in tasks:
-            fonts = script_fonts[script]
-            words = SCRIPT_SAMPLES.get(script, ["placeholder"])
-            f = pool.submit(_generate_batch,
-                            (script, target, fonts, words, args.height, args.max_width, args.augment))
-            futures[f] = script
+        futures = {pool.submit(_generate_batch, chunk): chunk[0] for chunk in chunks}
 
         for future in as_completed(futures):
             script = futures[future]
@@ -167,7 +184,6 @@ def main():
                 all_images.append(t)
                 all_script_labels.append(script_to_idx[script])
                 all_group_labels.append(group_to_idx[group])
-            print(f"  {script:<15} {len(batch):>5} images  (group: {group})")
 
     elapsed = time.time() - start
     print(f"\nGenerated {len(all_images)} images in {elapsed:.0f}s")
