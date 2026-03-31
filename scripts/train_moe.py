@@ -62,19 +62,23 @@ SCRIPT_TO_LANG = {
     "latin": "en",
     "cyrillic": "en",     # Cyrillic chars not in SCRIPT_CHARSETS, use base
     "greek": "en",        # Same
-    "devanagari": "hi",
-    "bengali": "bn_as",
-    "tamil": "ta",
-    "telugu": "te",
-    "kannada": "kn",
-    "malayalam": "ml",
-    "gujarati": "gu",
-    "gurmukhi": "pa",
-    "odia": "or",
     "arabic": "ur",
+    "hebrew": "en",       # Hebrew chars not in SCRIPT_CHARSETS
     "cjk": "en",
     "korean": "en",
+    "devanagari": "hi",
+    "gurmukhi": "pa",
+    "gujarati": "gu",
+    "bengali": "bn_as",
+    "odia": "or",
+    "kannada": "kn",
+    "telugu": "te",
+    "malayalam": "ml",
+    "tamil": "ta",
     "thai": "en",
+    "lao": "en",
+    "khmer": "en",
+    "burmese": "en",
     "emoji": "en",
 }
 
@@ -194,6 +198,26 @@ _SCRIPT_SAMPLES_FALLBACK = {
         "คำพิพากษา", "คดี", "ทนายความ", "รัฐบาล", "ภาษาไทย",
         "กรุงเทพ", "เวลา", "คน", "ประเทศ", "บ้าน", "วัน",
     ],
+    "hebrew": [
+        "שלום", "משפט", "חוק", "זכות", "עורך", "דין", "שופט",
+        "ממשלה", "ישראל", "ירושלים", "עברית", "ספר", "בית",
+        "זמן", "אדם", "ארץ", "מים", "יום", "לילה", "שנה",
+    ],
+    "lao": [
+        "ສະບາຍດີ", "ກົດໝາຍ", "ສານ", "ປະເທດ", "ເມືອງ",
+        "ຄົນ", "ເຮືອນ", "ນ້ຳ", "ເວລາ", "ວຽກ", "ໂຮງຮຽນ",
+        "ຕະຫຼາດ", "ທາງ", "ພູ", "ແມ່ນ້ຳ", "ກິນ", "ດື່ມ",
+    ],
+    "khmer": [
+        "សួស្តី", "ច្បាប់", "តុលាការ", "ប្រទេស", "ទីក្រុង",
+        "មនុស្ស", "ផ្ទះ", "ទឹក", "ពេលវេលា", "ការងារ", "សាលារៀន",
+        "ផ្សារ", "ផ្លូវ", "ភ្នំ", "ទន្លេ", "ញ៉ាំ", "ផឹក",
+    ],
+    "burmese": [
+        "မင်္ဂလာပါ", "ဥပဒေ", "တရားရုံး", "နိုင်ငံ", "မြို့",
+        "လူ", "အိမ်", "ရေ", "အချိန်", "အလုပ်", "ကျောင်း",
+        "ဈေး", "လမ်း", "တောင်", "မြစ်", "စား", "သောက်",
+    ],
 }
 
 # Populated at runtime by load_script_samples()
@@ -214,7 +238,8 @@ def find_fonts_for_script(script: str) -> list[str]:
         "devanagari": "hi", "bengali": "bn", "tamil": "ta",
         "telugu": "te", "kannada": "kn", "malayalam": "ml",
         "gujarati": "gu", "gurmukhi": "pa", "odia": "or",
-        "arabic": "ar", "cjk": "zh", "korean": "ko", "thai": "th",
+        "arabic": "ar", "hebrew": "he", "cjk": "zh", "korean": "ko",
+        "thai": "th", "lao": "lo", "khmer": "km", "burmese": "my",
     }
     lang = lang_map.get(script)
     if not lang:

@@ -55,6 +55,13 @@ _SCRIPT_RANGES = {
         (0x3130, 0x318F),  # Hangul Compatibility Jamo
     ],
     "thai": [(0x0E00, 0x0E7F)],
+    "lao": [(0x0E80, 0x0EFF)],
+    "khmer": [(0x1780, 0x17FF)],
+    "burmese": [
+        (0x1000, 0x109F),   # Myanmar
+        (0xAA60, 0xAA7F),   # Myanmar Extended-A
+        (0xA9E0, 0xA9FF),   # Myanmar Extended-B
+    ],
     "emoji": [
         (0x1F600, 0x1F64F),  # Emoticons
         (0x1F300, 0x1F5FF),  # Misc Symbols and Pictographs

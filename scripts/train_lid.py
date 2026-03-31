@@ -158,6 +158,21 @@ _SCRIPT_SAMPLES_FALLBACK = {
         "זמן", "אדם", "ארץ", "מים", "יום", "לילה", "שנה",
         "עיר", "דרך", "מלך", "אמת", "צדק", "תורה", "כנסת",
     ],
+    "lao": [
+        "ສະບາຍດີ", "ກົດໝາຍ", "ສານ", "ປະເທດ", "ເມືອງ",
+        "ຄົນ", "ເຮືອນ", "ນ້ຳ", "ເວລາ", "ວຽກ", "ໂຮງຮຽນ",
+        "ຕະຫຼາດ", "ທາງ", "ພູ", "ແມ່ນ້ຳ", "ກິນ", "ດື່ມ",
+    ],
+    "khmer": [
+        "សួស្តី", "ច្បាប់", "តុលាការ", "ប្រទេស", "ទីក្រុង",
+        "មនុស្ស", "ផ្ទះ", "ទឹក", "ពេលវេលា", "ការងារ", "សាលារៀន",
+        "ផ្សារ", "ផ្លូវ", "ភ្នំ", "ទន្លេ", "ញ៉ាំ", "ផឹក",
+    ],
+    "burmese": [
+        "မင်္ဂလာပါ", "ဥပဒေ", "တရားရုံး", "နိုင်ငံ", "မြို့",
+        "လူ", "အိမ်", "ရေ", "အချိန်", "အလုပ်", "ကျောင်း",
+        "ဈေး", "လမ်း", "တောင်", "မြစ်", "စား", "သောက်",
+    ],
 }
 
 # Loaded at runtime — file-based word lists merged with fallbacks
@@ -182,7 +197,8 @@ def find_fonts_for_script(script: str) -> list[str]:
         "devanagari": "hi", "bengali": "bn", "tamil": "ta",
         "telugu": "te", "kannada": "kn", "malayalam": "ml",
         "gujarati": "gu", "gurmukhi": "pa", "odia": "or",
-        "arabic": "ar", "hebrew": "he", "cjk": "zh", "korean": "ko", "thai": "th",
+        "arabic": "ar", "hebrew": "he", "cjk": "zh", "korean": "ko",
+        "thai": "th", "lao": "lo", "khmer": "km", "burmese": "my",
     }
     lang = lang_map.get(script)
     if not lang:

@@ -3,21 +3,20 @@ Script Identification (LID).
 
 Single-stage routing based on visual character set similarity:
 
-  LID-1 (after stem): 10 group classification.
+  LID-1 (after stem): 9 group classification.
     Routes to group-specific expert MLPs + group-specific CTC heads.
     Each group has a unified charset covering all scripts in it.
 
-Groups (10):
+Groups (9):
   1. Latin + Cyrillic (~150 forms, ~3.5B speakers)
   2. Arabic (~120-150 with positional forms, ~500M)
   3. Hebrew (~30-40, ~9M)
   4. CJK (~5000-8000, ~1.5B)
-  5. North Indian Brahmic (~200-250, Devanagari/Gurmukhi/Gujarati, ~800M)
+  5. N+E Indian Brahmic (~400-500, Devanagari/Gurmukhi/Gujarati/Bengali/Odia, ~1B+)
   6. South Indian Brahmic (~250-300, Kannada/Telugu/Malayalam, ~200M)
   7. Tamil (~70-80, ~85M)
   8. SE Asian Brahmic (~270-320, Thai/Lao/Khmer/Burmese, ~150M)
-  9. Eastern Indian Brahmic (~200-250, Bengali/Assamese/Odia, ~340M)
-  10. Emoji (~4000-5000, universal)
+  9. Emoji (~4000-5000, universal)
 """
 
 import torch
@@ -39,42 +38,43 @@ SCRIPTS = [
     # Group 4: CJK
     "cjk",         # 5
     "korean",      # 6
-    # Group 5: North Indian Brahmic
+    # Group 5: N+E Indian Brahmic
     "devanagari",  # 7
     "gurmukhi",    # 8
     "gujarati",    # 9
+    "bengali",     # 10
+    "odia",        # 11
     # Group 6: South Indian Brahmic
-    "kannada",     # 10
-    "telugu",      # 11
-    "malayalam",   # 12
+    "kannada",     # 12
+    "telugu",      # 13
+    "malayalam",   # 14
     # Group 7: Tamil
-    "tamil",       # 13
+    "tamil",       # 15
     # Group 8: SE Asian Brahmic
-    "thai",        # 14
-    # Group 9: Eastern Indian Brahmic
-    "bengali",     # 15
-    "odia",        # 16
-    # Group 10: Emoji
-    "emoji",       # 17
+    "thai",        # 16
+    "lao",         # 17
+    "khmer",       # 18
+    "burmese",     # 19
+    # Group 9: Emoji
+    "emoji",       # 20
 ]
 
 SCRIPT_TO_ID = {name: i for i, name in enumerate(SCRIPTS)}
 NUM_SCRIPTS = len(SCRIPTS)
 
 
-# --- Groups (10 families) ---
+# --- Groups (9 families) ---
 
 GROUPS = [
     "latin_cyrillic",    # 0  ~150 forms
     "arabic",            # 1  ~120-150
     "hebrew",            # 2  ~30-40
     "cjk",               # 3  ~5000-8000
-    "north_indic",       # 4  ~200-250 (Devanagari, Gurmukhi, Gujarati)
+    "ne_indic",          # 4  ~400-500 (Devanagari, Gurmukhi, Gujarati, Bengali, Odia)
     "south_indic",       # 5  ~250-300 (Kannada, Telugu, Malayalam)
     "tamil",             # 6  ~70-80
     "southeast_asian",   # 7  ~270-320 (Thai, Lao, Khmer, Burmese)
-    "eastern_indic",     # 8  ~200-250 (Bengali, Assamese, Odia)
-    "emoji",             # 9  ~4000-5000
+    "emoji",             # 8  ~4000-5000
 ]
 
 GROUP_TO_ID = {name: i for i, name in enumerate(GROUPS)}
@@ -89,16 +89,19 @@ SCRIPT_TO_GROUP = {
     "hebrew": "hebrew",
     "cjk": "cjk",
     "korean": "cjk",
-    "devanagari": "north_indic",
-    "gurmukhi": "north_indic",
-    "gujarati": "north_indic",
+    "devanagari": "ne_indic",
+    "gurmukhi": "ne_indic",
+    "gujarati": "ne_indic",
+    "bengali": "ne_indic",
+    "odia": "ne_indic",
     "kannada": "south_indic",
     "telugu": "south_indic",
     "malayalam": "south_indic",
     "tamil": "tamil",
     "thai": "southeast_asian",
-    "bengali": "eastern_indic",
-    "odia": "eastern_indic",
+    "lao": "southeast_asian",
+    "khmer": "southeast_asian",
+    "burmese": "southeast_asian",
     "emoji": "emoji",
 }
 
@@ -108,11 +111,10 @@ GROUP_SCRIPTS = {
     "arabic": ["arabic"],
     "hebrew": ["hebrew"],
     "cjk": ["cjk", "korean"],
-    "north_indic": ["devanagari", "gurmukhi", "gujarati"],
+    "ne_indic": ["devanagari", "gurmukhi", "gujarati", "bengali", "odia"],
     "south_indic": ["kannada", "telugu", "malayalam"],
     "tamil": ["tamil"],
-    "southeast_asian": ["thai"],
-    "eastern_indic": ["bengali", "odia"],
+    "southeast_asian": ["thai", "lao", "khmer", "burmese"],
     "emoji": ["emoji"],
 }
 
