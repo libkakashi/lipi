@@ -754,14 +754,15 @@ def main():
                         help="Log every N batches")
 
     # Model size overrides
+    parser.add_argument("--stem-depth", type=int, default=3)
+    parser.add_argument("--shared-blocks", type=int, default=3,
+                        help="Shared SWA blocks before LID")
+    parser.add_argument("--shared-dim", type=int, default=288)
     parser.add_argument("--stage1-dim", type=int, default=288)
-    parser.add_argument("--stage1-blocks", type=int, default=8)
+    parser.add_argument("--stage1-blocks", type=int, default=5)
     parser.add_argument("--stage2-dim", type=int, default=576)
-    parser.add_argument("--stage2-blocks", type=int, default=12)
-    parser.add_argument("--stem-depth", type=int, default=3, choices=[2, 3],
-                        help="ResNet stem depth: 2 (default) or 3 (extra ResBlock)")
-    parser.add_argument("--head-hidden", type=int, default=246,
-                        help="CTC BiLSTM hidden dim (default: 246)")
+    parser.add_argument("--stage2-blocks", type=int, default=9)
+    parser.add_argument("--head-hidden", type=int, default=246)
 
     # Loss weights
     parser.add_argument("--w-ctc", type=float, default=1.0, help="CTC loss weight")
@@ -864,11 +865,11 @@ def main():
     # ---- Build model ----
     model = LipiMoEEncoder(
         stem_depth=args.stem_depth,
+        shared_dim=args.shared_dim,
+        shared_blocks=args.shared_blocks,
         stage1_dim=args.stage1_dim,
-        stage1_heads=args.stage1_dim // 32,
         stage1_blocks=args.stage1_blocks,
         stage2_dim=args.stage2_dim,
-        stage2_heads=args.stage2_dim // 32,
         stage2_blocks=args.stage2_blocks,
         vocab_size=tokenizer.vocab_size,
         head_hidden=args.head_hidden,

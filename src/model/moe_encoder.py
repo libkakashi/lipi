@@ -1,27 +1,22 @@
 """
 Lipi MoE Vision Encoder.
 
-Full hierarchical MoE architecture (lipi-r1-383M-69A):
-    Input: (B, 3, 32, W)
-    -> ColorProjection: L+a baseline + learned RGB correction → 2ch
-    -> ResNet Stem 1→64ch, stride 4×4
-    -> LID-1: coarse group classification (8 groups)
-    -> Channel projection 64→dim1
-    -> Stage 1 MoE: N × SWABlockMoE (shared attention, group-specific expert MLPs)
-    -> Height pooling 8→4
-    -> LID-2: fine script classification (18 scripts, diagnostic only)
-    -> Channel projection dim1→dim2
-    -> Stage 2 MoE: M × SWABlockMoE (shared attention, group-specific expert MLPs)
-    -> Height pooling 4→1
+Architecture:
+    Input: (B, 2, 32, W) — L+a from rgb_to_input
+    -> ColorProjection: L+a → 1ch (learned 1×1)
+    -> ResNet Stem: 1→64ch, stride 4× (32×W → 8×W/4)
+    -> Shared SWA 4×4: N blocks, universal features
+    -> LID-1: 8-group classification (routes to experts)
+    -> Expert SWA 4×4: M blocks, group-specific (expert attn + expert MLP)
+    -> Height pool 8→4
+    -> Expert SWA 4×16: K blocks, group-specific (expert attn + expert MLP)
+    -> Height pool 4→1
     -> LayerNorm
-    -> Per-script BiLSTM CTC heads
+    -> Per-script BiLSTM CTC heads (18 scripts)
 
-Stage 1 MoE: 8 group-level experts (one per script family)
-Stage 2 MoE: 8 group-level experts (script-level would be too expensive)
-CTC heads: 18 per-script heads (cheap, ~3.2M each)
-
-During training: ground-truth group/script IDs route to experts.
-During inference: LID-1/LID-2 predictions route to experts.
+Shared SWA learns universal features (edges, character boundaries, spacing).
+Expert SWA specializes per script family (RTL, stacking, ligatures, etc.).
+CTC loss backpropagates through LID, improving routing over time.
 """
 
 import torch
@@ -31,7 +26,7 @@ from torch import Tensor
 from src.data.color import ColorProjection
 from src.model.stem import ResNetStem
 from src.model.pooling import LearnedHeightPooling
-from src.model.attention import SWABlockMoE
+from src.model.attention import SWABlock, SWABlockMoE
 from src.model.lid import (
     LIDCoarse, LIDFine,
     SCRIPTS, NUM_SCRIPTS, NUM_GROUPS,
@@ -40,11 +35,7 @@ from src.model.lid import (
 
 
 class ScriptCTCHeads(nn.Module):
-    """Per-script BiLSTM CTC heads.
-
-    Routes encoder output to the correct BiLSTM head based on script_ids.
-    Each script has its own head because vocab sizes may differ.
-    """
+    """Per-script BiLSTM CTC heads."""
 
     def __init__(self, enc_dim: int, vocab_size: int, hidden_dim: int = 246,
                  num_layers: int = 2, dropout: float = 0.1):
@@ -62,18 +53,9 @@ class ScriptCTCHeads(nn.Module):
             })
 
     def forward(self, features: Tensor, script_ids: Tensor) -> Tensor:
-        """
-        Args:
-            features: (B, T, C) encoder output.
-            script_ids: (B,) script index per sample.
-
-        Returns:
-            logits: (B, T, vocab_size)
-        """
         B, T, C = features.shape
         logits = torch.zeros(B, T, self.heads[SCRIPTS[0]]["proj"].out_features,
                              device=features.device, dtype=features.dtype)
-
         for script_idx, script in enumerate(SCRIPTS):
             mask = (script_ids == script_idx)
             if not mask.any():
@@ -81,33 +63,35 @@ class ScriptCTCHeads(nn.Module):
             head = self.heads[script]
             out, _ = head["lstm"](features[mask])
             logits[mask] = head["proj"](out).to(logits.dtype)
-
         return logits
 
 
 class LipiMoEEncoder(nn.Module):
-    """Full Lipi MoE encoder with hierarchical LID routing.
-
-    Combines color projection, stem, LID classifiers, MoE stages,
-    and per-script CTC heads into a single module.
-    """
+    """Full Lipi MoE encoder with shared SWA before LID routing."""
 
     def __init__(
         self,
         stem_channels: int = 64,
         stem_depth: int = 3,
+        # Shared SWA (before LID)
+        shared_dim: int = 288,
+        shared_blocks: int = 3,
+        shared_window_h: int = 4,
+        shared_window_w: int = 4,
+        shared_mlp_ratio: int = 4,
+        # Expert SWA Stage 1 (after LID, 4×4 window)
         stage1_dim: int = 288,
-        stage1_heads: int = 9,
-        stage1_blocks: int = 8,
+        stage1_blocks: int = 5,
         stage1_window_h: int = 4,
         stage1_window_w: int = 4,
         stage1_mlp_ratio: int = 4,
+        # Expert SWA Stage 2 (4×16 window)
         stage2_dim: int = 576,
-        stage2_heads: int = 18,
-        stage2_blocks: int = 12,
+        stage2_blocks: int = 9,
         stage2_window_h: int = 4,
         stage2_window_w: int = 16,
         stage2_mlp_ratio: int = 4,
+        # Groups and scripts
         num_groups: int = NUM_GROUPS,
         num_scripts: int = NUM_SCRIPTS,
         vocab_size: int = 171,
@@ -119,22 +103,37 @@ class LipiMoEEncoder(nn.Module):
         self.num_groups = num_groups
         self.num_scripts = num_scripts
 
-        # Color projection: L+a baseline + learned correction → 2ch
+        # Color projection: L+a → 1ch
         self.color_proj = ColorProjection()
 
-        # Stem
+        # Stem: 1→64ch, downsample 4×
         self.stem = ResNetStem(out_channels=stem_channels, depth=stem_depth)
 
-        # LID-1: coarse group classifier (reads stem output)
-        self.lid_coarse = LIDCoarse(in_channels=stem_channels, num_groups=num_groups)
+        # Channel projection: stem → shared SWA dim
+        self.proj_shared = nn.Linear(stem_channels, shared_dim)
 
-        # Channel projection: stem → Stage 1
-        self.proj1 = nn.Linear(stem_channels, stage1_dim)
+        # Shared SWA blocks (universal features, feeds LID)
+        self.shared_swa = nn.ModuleList([
+            SWABlock(
+                dim=shared_dim,
+                num_heads=shared_dim // 32,
+                window_h=shared_window_h, window_w=shared_window_w,
+                shift=(i % 2 == 1), mlp_ratio=shared_mlp_ratio,
+            )
+            for i in range(shared_blocks)
+        ])
 
-        # Stage 1 MoE: group-specific expert MLPs, shared SWA
+        # LID-1: coarse group classification (after shared SWA)
+        self.lid_coarse = LIDCoarse(in_channels=shared_dim, num_groups=num_groups)
+
+        # Channel projection: shared → stage1 (identity if same dim)
+        self.proj1 = nn.Linear(shared_dim, stage1_dim) if shared_dim != stage1_dim else nn.Identity()
+
+        # Expert SWA Stage 1: group-specific, 4×4 window
         self.stage1 = nn.ModuleList([
             SWABlockMoE(
-                dim=stage1_dim, num_heads=stage1_heads,
+                dim=stage1_dim,
+                num_heads=stage1_dim // 32,
                 num_groups=num_groups,
                 window_h=stage1_window_h, window_w=stage1_window_w,
                 shift=(i % 2 == 1), mlp_ratio=stage1_mlp_ratio,
@@ -145,16 +144,17 @@ class LipiMoEEncoder(nn.Module):
         # Height pooling: 8 → 4
         self.pool1 = LearnedHeightPooling(channels=stage1_dim, h_in=8, h_out=4)
 
-        # LID-2: fine script classifier (reads Stage 1 output)
+        # LID-2: fine script classification (diagnostic, also routes CTC heads)
         self.lid_fine = LIDFine(in_dim=stage1_dim, num_scripts=num_scripts)
 
         # Channel projection: Stage 1 → Stage 2
         self.proj2 = nn.Linear(stage1_dim, stage2_dim)
 
-        # Stage 2 MoE: group-specific expert MLPs (not per-script — too expensive)
+        # Expert SWA Stage 2: group-specific, 4×16 window
         self.stage2 = nn.ModuleList([
             SWABlockMoE(
-                dim=stage2_dim, num_heads=stage2_heads,
+                dim=stage2_dim,
+                num_heads=stage2_dim // 32,
                 num_groups=num_groups,
                 window_h=stage2_window_h, window_w=stage2_window_w,
                 shift=(i % 2 == 1), mlp_ratio=stage2_mlp_ratio,
@@ -177,8 +177,7 @@ class LipiMoEEncoder(nn.Module):
 
         self.output_dim = stage2_dim
 
-        # Build script→group mapping tensor for deriving group_ids from script_ids
-        # Register as buffer so it moves with .to(device)
+        # Script→group mapping buffer
         s2g = torch.zeros(num_scripts, dtype=torch.long)
         for script, group in SCRIPT_TO_GROUP.items():
             if script in SCRIPTS:
@@ -191,51 +190,44 @@ class LipiMoEEncoder(nn.Module):
         script_ids: Tensor | None = None,
         group_ids: Tensor | None = None,
     ) -> dict:
-        """
-        Args:
-            images: (B, C_in, 32, W) — raw images (RGB if learned, L+a if fixed).
-            script_ids: (B,) ground-truth script IDs (training) or None (inference).
-            group_ids: (B,) ground-truth group IDs (training) or None (inference).
-
-        Returns:
-            dict with keys:
-                "logits": (B, T, vocab_size) CTC logits
-                "lengths": (B,) sequence lengths
-                "group_logits": (B, num_groups) LID-1 logits
-                "script_logits": (B, num_scripts) LID-2 logits
-                "group_ids": (B,) group IDs used for routing
-                "script_ids": (B,) script IDs used for routing
-        """
         B = images.shape[0]
         W = images.shape[3]
         T = W // 4
 
-        # Color projection: L+a + learned correction
+        # Color projection: L+a → 1ch
         x = self.color_proj(images)
 
-        # Stem: (B, C_in, 32, W) → (B, 64, 8, W/4)
-        stem_out = self.stem(x)
-        _, C, h, w = stem_out.shape  # h=8, w=W/4
+        # Stem: (B, 1, 32, W) → (B, 64, 8, W/4)
+        x = self.stem(x)
+        _, C, h, w = x.shape  # h=8, w=W/4
+
+        # Reshape to sequence + project to shared dim
+        x = x.permute(0, 2, 3, 1).reshape(B, h * w, C)
+        x = self.proj_shared(x)
+
+        # Shared SWA blocks (universal features)
+        for block in self.shared_swa:
+            x = block(x, h=h, w=w)
 
         # LID-1: coarse group classification
-        group_logits = self.lid_coarse(stem_out)
+        # Pool the sequence for classification
+        group_logits = self.lid_coarse.classifier(x.mean(dim=1))
         if group_ids is None:
             group_ids = group_logits.argmax(dim=-1)
 
-        # Reshape to sequence + channel projection
-        x = stem_out.permute(0, 2, 3, 1).reshape(B, h * w, C)
+        # Project to stage1 dim (identity if same)
         x = self.proj1(x)
 
-        # Stage 1 MoE
+        # Expert SWA Stage 1 (routed by group)
         for block in self.stage1:
             x = block(x, h=h, w=w, group_ids=group_ids)
 
-        # LID-2: fine script classification (before height pooling, full spatial info)
+        # LID-2: fine script classification
         script_logits = self.lid_fine(x)
         if script_ids is None:
             script_ids = script_logits.argmax(dim=-1)
 
-        # Derive group_ids from script_ids for Stage 2 routing
+        # Derive group_ids from script_ids for Stage 2
         stage2_group_ids = self._script_to_group[script_ids]
 
         # Height pooling 8→4
@@ -244,11 +236,11 @@ class LipiMoEEncoder(nn.Module):
         x = self.pool1(x)
         h = 4
 
-        # Channel projection
+        # Channel projection to Stage 2
         x = x.permute(0, 2, 3, 1).reshape(B, h * w, C1)
         x = self.proj2(x)
 
-        # Stage 2 MoE (routed by group derived from script)
+        # Expert SWA Stage 2 (routed by script-derived group)
         for block in self.stage2:
             x = block(x, h=h, w=w, group_ids=stage2_group_ids)
 
