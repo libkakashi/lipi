@@ -984,18 +984,37 @@ def main():
 
     # Load dataset — either from pre-generated file or generate on the fly
     if args.data:
-        print(f"Loading pre-generated data from {args.data}...")
-        saved = torch.load(args.data, weights_only=False)
-        dataset = torch.utils.data.TensorDataset(
-            saved["images"], saved["script_labels"], saved["group_labels"],
-        )
-        # Attach metadata for the training loop
-        dataset.active_scripts = saved["active_scripts"]
-        dataset.active_groups = saved["active_groups"]
-        dataset.script_to_idx = saved["script_to_idx"]
-        dataset.group_to_idx = saved["group_to_idx"]
-        dataset.num_scripts = len(saved["active_scripts"])
-        dataset.num_groups = len(saved["active_groups"])
+        data_path = Path(args.data)
+        if data_path.is_dir():
+            # Shard directory from generate_lid_data.py
+            print(f"Loading shards from {data_path}/...")
+            meta = torch.load(data_path / "metadata.pt", weights_only=False)
+            all_imgs, all_slabels, all_glabels = [], [], []
+            for shard_path in sorted(data_path.glob("shard_*.pt")):
+                shard = torch.load(shard_path, weights_only=False)
+                all_imgs.append(shard["images"])
+                all_slabels.append(shard["script_labels"])
+                all_glabels.append(shard["group_labels"])
+                print(f"  Loaded {shard_path.name} ({shard['images'].shape[0]} images)")
+            images = torch.cat(all_imgs)
+            script_labels = torch.cat(all_slabels)
+            group_labels = torch.cat(all_glabels)
+        else:
+            # Single .pt file
+            print(f"Loading data from {data_path}...")
+            saved = torch.load(data_path, weights_only=False)
+            meta = saved
+            images = saved["images"]
+            script_labels = saved["script_labels"]
+            group_labels = saved["group_labels"]
+
+        dataset = torch.utils.data.TensorDataset(images, script_labels, group_labels)
+        dataset.active_scripts = meta["active_scripts"]
+        dataset.active_groups = meta["active_groups"]
+        dataset.script_to_idx = meta["script_to_idx"]
+        dataset.group_to_idx = meta["group_to_idx"]
+        dataset.num_scripts = len(meta["active_scripts"])
+        dataset.num_groups = len(meta["active_groups"])
         print(f"  {len(dataset)} images, {dataset.num_scripts} scripts, {dataset.num_groups} groups")
     else:
         load_all_script_samples()

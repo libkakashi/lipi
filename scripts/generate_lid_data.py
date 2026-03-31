@@ -77,7 +77,8 @@ def main():
     parser.add_argument("--no-augment", action="store_true")
     parser.add_argument("--height", type=int, default=32)
     parser.add_argument("--max-width", type=int, default=256)
-    parser.add_argument("--out", type=str, default="data/lid_data.pt")
+    parser.add_argument("--out", type=str, default="data/lid_shards",
+                        help="Output directory for shards")
     args = parser.parse_args()
 
     if args.no_augment:
@@ -174,9 +175,7 @@ def main():
     print(f"  {len(chunks)} chunks across {n_workers} workers\n")
 
     # Save incrementally — each chunk appends to a shard dir, merge at end
-    out_path = Path(args.out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    shard_dir = out_path.parent / f".{out_path.stem}_shards"
+    shard_dir = Path(args.out)
     shard_dir.mkdir(parents=True, exist_ok=True)
     shard_idx = 0
     done_count = 0
@@ -206,25 +205,8 @@ def main():
     elapsed = time.time() - start
     print(f"\nGenerated {done_count} images in {elapsed:.0f}s")
 
-    # Merge shards into one file
-    print("Merging shards...")
-    all_images = []
-    all_script_labels = []
-    all_group_labels = []
-    for shard_path in sorted(shard_dir.glob("shard_*.pt")):
-        shard = torch.load(shard_path, weights_only=False)
-        all_images.append(shard["images"])
-        all_script_labels.append(shard["script_labels"])
-        all_group_labels.append(shard["group_labels"])
-
-    images_tensor = torch.cat(all_images)
-    script_labels_tensor = torch.cat(all_script_labels)
-    group_labels_tensor = torch.cat(all_group_labels)
-
+    # Save metadata alongside shards
     torch.save({
-        "images": images_tensor,
-        "script_labels": script_labels_tensor,
-        "group_labels": group_labels_tensor,
         "active_scripts": active_scripts,
         "active_groups": active_groups,
         "script_to_idx": script_to_idx,
@@ -233,16 +215,14 @@ def main():
         "max_width": args.max_width,
         "augmented": args.augment,
         "samples_per_script": args.samples_per_script,
-    }, out_path)
+        "total_images": done_count,
+        "num_shards": shard_idx,
+    }, shard_dir / "metadata.pt")
 
-    # Clean up shards
-    import shutil
-    shutil.rmtree(shard_dir)
-
-    size_mb = out_path.stat().st_size / 1e6
-    print(f"\nSaved to {out_path} ({size_mb:.0f} MB)")
-    print(f"  Shape: {images_tensor.shape}")
-    print(f"  Scripts: {len(active_scripts)}, Groups: {len(active_groups)}")
+    total_mb = sum(f.stat().st_size for f in shard_dir.glob("*.pt")) / 1e6
+    print(f"\nSaved {shard_idx} shards to {shard_dir}/ ({total_mb:.0f} MB)")
+    print(f"  {done_count} images, {len(active_scripts)} scripts, {len(active_groups)} groups")
+    print(f"\nTrain with: python scripts/train_lid.py --data {shard_dir}")
 
 
 if __name__ == "__main__":
