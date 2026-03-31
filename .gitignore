@@ -54,3 +54,4 @@ tmp/
 
 # Claude
 .claude/
+training_data/fonts/

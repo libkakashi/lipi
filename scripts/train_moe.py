@@ -227,33 +227,64 @@ def load_script_samples():
         SCRIPT_SAMPLES[script] = load_word_list(script, fallback)
 
 
+FONT_DIR = Path(__file__).parent.parent / "training_data" / "fonts"
+
+_LOCAL_FONT_MAP = {
+    "latin": ["NotoSans-Regular.ttf", "NotoSans-Bold.ttf"],
+    "cyrillic": ["NotoSans-Regular.ttf", "NotoSans-Bold.ttf"],
+    "greek": ["NotoSans-Regular.ttf", "NotoSans-Bold.ttf"],
+    "arabic": ["NotoSansArabic-Regular.ttf", "NotoNaskhArabic-Regular.ttf"],
+    "hebrew": ["NotoSansHebrew-Regular.ttf"],
+    "cjk": ["01_NotoSansCJKsc-Regular.otf", "03_NotoSansCJKjp-Regular.otf"],
+    "korean": ["05_NotoSansCJKkr-Regular.otf"],
+    "devanagari": ["NotoSansDevanagari-Regular.ttf"],
+    "bengali": ["NotoSansBengali-Regular.ttf"],
+    "gurmukhi": ["NotoSansGurmukhi-Regular.ttf"],
+    "gujarati": ["NotoSansGujarati-Regular.ttf"],
+    "tamil": ["NotoSansTamil-Regular.ttf"],
+    "telugu": ["NotoSansTelugu-Regular.ttf"],
+    "kannada": ["NotoSansKannada-Regular.ttf"],
+    "malayalam": ["NotoSansMalayalam-Regular.ttf"],
+    "thai": ["NotoSansThai-Regular.ttf"],
+    "lao": ["NotoSansLao-Regular.ttf"],
+}
+
+_LANG_MAP = {
+    "latin": "en", "cyrillic": "ru", "greek": "el",
+    "devanagari": "hi", "bengali": "bn", "tamil": "ta",
+    "telugu": "te", "kannada": "kn", "malayalam": "ml",
+    "gujarati": "gu", "gurmukhi": "pa",
+    "arabic": "ar", "hebrew": "he", "cjk": "zh", "korean": "ko",
+    "thai": "th", "lao": "lo",
+}
+
+
 def find_fonts_for_script(script: str) -> list[str]:
-    """Find system fonts that can render a given script."""
+    """Find fonts for a script. Checks local Noto fonts first, then system."""
     import subprocess
-    lang_map = {
-        "latin": "en", "cyrillic": "ru", "greek": "el",
-        "devanagari": "hi", "bengali": "bn", "tamil": "ta",
-        "telugu": "te", "kannada": "kn", "malayalam": "ml",
-        "gujarati": "gu", "gurmukhi": "pa",
-        "arabic": "ar", "hebrew": "he", "cjk": "zh", "korean": "ko",
-        "thai": "th", "lao": "lo",
-    }
-    lang = lang_map.get(script)
-    if not lang:
-        return []
-    try:
-        result = subprocess.run(
-            ["fc-list", f":lang={lang}", "file"],
-            capture_output=True, text=True, timeout=5,
-        )
-        fonts = []
-        for line in result.stdout.strip().split("\n"):
-            path = line.strip().rstrip(":")
-            if path and Path(path).exists():
-                fonts.append(path)
-        return fonts
-    except Exception:
-        return []
+    fonts = []
+
+    for name in _LOCAL_FONT_MAP.get(script, []):
+        path = FONT_DIR / name
+        if path.exists():
+            fonts.append(str(path))
+
+    if not fonts:
+        lang = _LANG_MAP.get(script)
+        if lang:
+            try:
+                result = subprocess.run(
+                    ["fc-list", f":lang={lang}", "file"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                for line in result.stdout.strip().split("\n"):
+                    path = line.strip().rstrip(":")
+                    if path and Path(path).exists():
+                        fonts.append(path)
+            except Exception:
+                pass
+
+    return fonts
 
 
 def font_can_render(font_path: str, text: str, size: int = 24) -> bool:
