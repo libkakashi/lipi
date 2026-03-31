@@ -487,10 +487,12 @@ class MultiScriptDataset(Dataset):
 
 
 def train_coarse(stem, lid_coarse, dataset, train_set, val_set, args, device, color_proj=None,
-                  resume_state=None):
-    """Train LID-1: stem + coarse group classifier."""
+                  resume_state=None, shared_swa=None, swa_proj=None):
+    """Train LID-1: stem [+ shared SWA] + coarse group classifier."""
+    swa_str = f" + {len(shared_swa)} shared SWA blocks" if shared_swa else ""
     print(f"\n{'='*55}")
     print(f"LID-1: COARSE GROUP CLASSIFICATION ({dataset.num_groups} groups)")
+    print(f"Pipeline: color_proj → stem{swa_str} → LID-1")
     print(f"{'='*55}\n")
     print(f"Groups: {dataset.active_groups}\n")
 
@@ -500,8 +502,26 @@ def train_coarse(stem, lid_coarse, dataset, train_set, val_set, args, device, co
     params = list(stem.parameters()) + list(lid_coarse.parameters())
     if color_proj is not None:
         params += list(color_proj.parameters())
+    if shared_swa is not None:
+        params += list(swa_proj.parameters()) + list(shared_swa.parameters())
     optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=0.01)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+
+    def forward_to_lid(images):
+        """color_proj → stem [→ shared SWA] → LID logits."""
+        x = color_proj(images) if color_proj is not None else images
+        x = stem(x)  # (B, C, H, W)
+        if shared_swa is not None:
+            B, C, h, w = x.shape
+            x = x.permute(0, 2, 3, 1).reshape(B, h * w, C)  # (B, H*W, C)
+            x = swa_proj(x)  # (B, H*W, swa_dim)
+            for block in shared_swa:
+                x = block(x, h=h, w=w)
+            # LIDCoarse expects (B, C, H, W) — pool the sequence
+            # Use mean pool over sequence → (B, swa_dim) → unsqueeze for LIDCoarse
+            pooled = x.mean(dim=1)  # (B, swa_dim)
+            return lid_coarse.classifier(pooled)  # skip LIDCoarse's own pooling
+        return lid_coarse(x)
 
     start_epoch = 1
     best_val_acc = 0.0
@@ -522,7 +542,7 @@ def train_coarse(stem, lid_coarse, dataset, train_set, val_set, args, device, co
             images = images.to(device)
             group_labels = group_labels.to(device) if isinstance(group_labels, torch.Tensor) else torch.tensor(group_labels, dtype=torch.long, device=device)
 
-            logits = lid_coarse(stem(color_proj(images) if color_proj is not None else images))
+            logits = forward_to_lid(images)
             loss = F.cross_entropy(logits, group_labels)
 
             optimizer.zero_grad()
@@ -538,6 +558,9 @@ def train_coarse(stem, lid_coarse, dataset, train_set, val_set, args, device, co
         # Validate
         stem.eval()
         lid_coarse.eval()
+        if shared_swa is not None:
+            swa_proj.eval()
+            shared_swa.eval()
         val_correct = val_total = 0
         per_group_correct = {}
         per_group_total = {}
@@ -547,7 +570,7 @@ def train_coarse(stem, lid_coarse, dataset, train_set, val_set, args, device, co
             for images, _, group_labels in val_loader:
                 images = images.to(device)
                 group_labels = group_labels.to(device) if isinstance(group_labels, torch.Tensor) else torch.tensor(group_labels, dtype=torch.long, device=device)
-                preds = lid_coarse(stem(color_proj(images) if color_proj is not None else images)).argmax(-1)
+                preds = forward_to_lid(images).argmax(-1)
                 val_correct += (preds == group_labels).sum().item()
                 val_total += images.size(0)
 
@@ -583,6 +606,9 @@ def train_coarse(stem, lid_coarse, dataset, train_set, val_set, args, device, co
         }
         if color_proj is not None:
             epoch_ckpt["color_proj"] = color_proj.state_dict()
+        if shared_swa is not None:
+            epoch_ckpt["swa_proj"] = swa_proj.state_dict()
+            epoch_ckpt["shared_swa"] = shared_swa.state_dict()
         # Save latest (overwritten each epoch) + best
         torch.save(epoch_ckpt, ckpt_dir / "lid_latest.pt")
         if val_acc >= best_val_acc:
@@ -814,27 +840,24 @@ def train_fine(stem, stage1_blocks, proj1, lid_fine, dataset, train_set, val_set
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Phase 0: Train hierarchical LID")
-    parser.add_argument("--level", type=str, default="both", choices=["coarse", "fine", "both"])
+    parser = argparse.ArgumentParser(description="Train LID-1 group classifier")
     parser.add_argument("--stem", type=str, default="resnet", choices=["convnext", "resnet"])
+    parser.add_argument("--stem-depth", type=int, default=3, choices=[2, 3],
+                        help="ResNet stem depth (default: 3)")
+    parser.add_argument("--shared-swa-blocks", type=int, default=0,
+                        help="Shared SWA blocks before LID (0=stem only, 2-3 for GPU)")
+    parser.add_argument("--swa-dim", type=int, default=288,
+                        help="Shared SWA channel dim (default: 288)")
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--samples-per-script", type=int, default=2000)
     parser.add_argument("--balance-groups", action="store_true",
                         help="Balance samples per GROUP instead of per script")
     parser.add_argument("--augment", action="store_true",
                         help="Apply RandAugmentOCR to training images")
-    parser.add_argument("--moe", action="store_true",
-                        help="Use group-specific expert MLPs in Stage 1")
-    parser.add_argument("--stem-depth", type=int, default=2, choices=[2, 3],
-                        help="ResNet stem depth: 2 (default) or 3 (extra ResBlock)")
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--max-width", type=int, default=192)
-    parser.add_argument("--stage1-dim", type=int, default=192,
-                        help="Stage 1 channel dim (192 for 12M, 288 for 56M)")
-    parser.add_argument("--stage1-blocks", type=int, default=3,
-                        help="Number of Stage 1 SWA blocks (3 for 12M, 8 for 56M)")
     parser.add_argument("--save", type=str, default="checkpoints/lid_hierarchical.pt")
     parser.add_argument("--resume", type=str, default=None,
                         help="Resume from checkpoint path")
@@ -882,74 +905,64 @@ def main():
         stem = ConvNeXtStem(in_channels=INPUT_CHANNELS, out_channels=stem_channels).to(device)
 
     stem_params = sum(p.numel() for p in stem.parameters())
-    print(f"{args.stem} stem: {stem_params:,} params")
+    print(f"{args.stem} stem (depth={args.stem_depth}): {stem_params:,} params")
+
+    # Optional shared SWA blocks before LID
+    shared_swa = None
+    swa_proj = None
+    lid_in_channels = stem_channels
+    if args.shared_swa_blocks > 0:
+        from src.model.attention import SWABlock
+
+        swa_proj = nn.Linear(stem_channels, args.swa_dim).to(device)
+        shared_swa = nn.ModuleList([
+            SWABlock(
+                dim=args.swa_dim,
+                num_heads=args.swa_dim // 32,
+                window_h=4, window_w=4,
+                shift=(i % 2 == 1), mlp_ratio=4,
+            )
+            for i in range(args.shared_swa_blocks)
+        ]).to(device)
+        lid_in_channels = args.swa_dim
+
+        swa_params = sum(p.numel() for p in swa_proj.parameters()) + sum(p.numel() for p in shared_swa.parameters())
+        print(f"Shared SWA: {swa_params:,} params ({args.shared_swa_blocks} blocks, dim={args.swa_dim})")
+
+    lid_coarse = LIDCoarse(in_channels=lid_in_channels, num_groups=dataset.num_groups).to(device)
+    print(f"LID-1 (coarse): {sum(p.numel() for p in lid_coarse.parameters()):,} params")
+
+    # Resume
+    coarse_resume = None
+    if args.resume:
+        ckpt = torch.load(args.resume, map_location=device, weights_only=False)
+        stem.load_state_dict(ckpt["stem"])
+        if "color_proj" in ckpt:
+            color_proj.load_state_dict(ckpt["color_proj"])
+        # Only load LID/SWA if architecture matches
+        try:
+            lid_coarse.load_state_dict(ckpt["lid_coarse"])
+        except (RuntimeError, KeyError):
+            print("  LID weights incompatible (architecture changed), starting fresh")
+        if shared_swa is not None and "shared_swa" in ckpt:
+            swa_proj.load_state_dict(ckpt["swa_proj"])
+            shared_swa.load_state_dict(ckpt["shared_swa"])
+        if "coarse_optimizer" in ckpt:
+            coarse_resume = {
+                "optimizer": ckpt["coarse_optimizer"],
+                "scheduler": ckpt["coarse_scheduler"],
+                "epoch": ckpt["coarse_epoch"],
+                "val_acc": ckpt.get("coarse_val_acc", 0.0),
+                "best_val_acc": ckpt.get("coarse_best_val_acc", 0.0),
+            }
+        print(f"Loaded checkpoint from {args.resume}")
 
     start = time.time()
-
-    # LID-1: Coarse
-    if args.level in ("coarse", "both"):
-        lid_coarse = LIDCoarse(in_channels=stem_channels, num_groups=dataset.num_groups).to(device)
-        print(f"LID-1 (coarse): {sum(p.numel() for p in lid_coarse.parameters()):,} params")
-
-        # Resume coarse training if checkpoint exists
-        coarse_resume = None
-        if args.resume:
-            ckpt = torch.load(args.resume, map_location=device, weights_only=False)
-            stem.load_state_dict(ckpt["stem"])
-            lid_coarse.load_state_dict(ckpt["lid_coarse"])
-            if color_proj is not None and "color_proj" in ckpt:
-                color_proj.load_state_dict(ckpt["color_proj"])
-            if "coarse_optimizer" in ckpt:
-                coarse_resume = {
-                    "optimizer": ckpt["coarse_optimizer"],
-                    "scheduler": ckpt["coarse_scheduler"],
-                    "epoch": ckpt["coarse_epoch"],
-                    "val_acc": ckpt.get("coarse_val_acc", 0.0),
-                    "best_val_acc": ckpt.get("coarse_best_val_acc", 0.0),
-                }
-            print(f"Loaded checkpoint from {args.resume}")
-
-        coarse_acc, coarse_optim_state, coarse_sched_state = train_coarse(
-            stem, lid_coarse, dataset, train_set, val_set, args, device,
-            color_proj=color_proj, resume_state=coarse_resume,
-        )
-
-    # LID-2: Fine (with Stage 1)
-    if args.level in ("fine", "both"):
-        from src.model.attention import SWABlock, SWABlockMoE
-
-        proj1 = nn.Linear(stem_channels, args.stage1_dim).to(device)
-
-        if args.moe:
-            stage1_blocks = nn.ModuleList([
-                SWABlockMoE(
-                    dim=args.stage1_dim,
-                    num_heads=args.stage1_dim // 32,
-                    num_groups=dataset.num_groups,
-                    window_h=4, window_w=4,
-                    shift=(i % 2 == 1), mlp_ratio=3,
-                )
-                for i in range(args.stage1_blocks)
-            ]).to(device)
-        else:
-            stage1_blocks = nn.ModuleList([
-                SWABlock(
-                    dim=args.stage1_dim,
-                    num_heads=args.stage1_dim // 32,
-                    window_h=4, window_w=4,
-                    shift=(i % 2 == 1), mlp_ratio=3,
-                )
-                for i in range(args.stage1_blocks)
-            ]).to(device)
-
-        lid_fine = LIDFine(in_dim=args.stage1_dim, num_scripts=dataset.num_scripts).to(device)
-
-        s1_params = sum(p.numel() for p in proj1.parameters()) + sum(p.numel() for p in stage1_blocks.parameters())
-        moe_str = f"MoE ({dataset.num_groups} experts)" if args.moe else "shared"
-        print(f"\nStage 1: {s1_params:,} params ({args.stage1_blocks} blocks, dim={args.stage1_dim}, {moe_str})")
-        print(f"LID-2 (fine): {sum(p.numel() for p in lid_fine.parameters()):,} params")
-
-        fine_acc = train_fine(stem, stage1_blocks, proj1, lid_fine, dataset, train_set, val_set, args, device, color_proj=color_proj, use_moe=args.moe)
+    coarse_acc, coarse_optim_state, coarse_sched_state = train_coarse(
+        stem, lid_coarse, dataset, train_set, val_set, args, device,
+        color_proj=color_proj, resume_state=coarse_resume,
+        shared_swa=shared_swa, swa_proj=swa_proj,
+    )
 
     elapsed = time.time() - start
 
@@ -965,30 +978,25 @@ def main():
         "script_to_idx": dataset.script_to_idx,
         "group_to_idx": dataset.group_to_idx,
         "args": vars(args),
+        "lid_coarse": lid_coarse.state_dict(),
+        "coarse_acc": coarse_acc,
+        "coarse_optimizer": coarse_optim_state,
+        "coarse_scheduler": coarse_sched_state,
+        "coarse_epoch": args.epochs,
+        "coarse_best_val_acc": coarse_acc,
     }
     if color_proj is not None:
         save_dict["color_proj"] = color_proj.state_dict()
-    if args.level in ("coarse", "both"):
-        save_dict["lid_coarse"] = lid_coarse.state_dict()
-        save_dict["coarse_acc"] = coarse_acc
-        save_dict["coarse_optimizer"] = coarse_optim_state
-        save_dict["coarse_scheduler"] = coarse_sched_state
-        save_dict["coarse_epoch"] = args.epochs
-        save_dict["coarse_best_val_acc"] = coarse_acc
-    if args.level in ("fine", "both"):
-        save_dict["proj1"] = proj1.state_dict()
-        save_dict["stage1"] = stage1_blocks.state_dict()
-        save_dict["lid_fine"] = lid_fine.state_dict()
-        save_dict["fine_acc"] = fine_acc
+    if shared_swa is not None:
+        save_dict["swa_proj"] = swa_proj.state_dict()
+        save_dict["shared_swa"] = shared_swa.state_dict()
 
     torch.save(save_dict, save_path)
 
     print(f"\n{'='*55}")
     print(f"Total time: {elapsed:.0f}s")
-    if args.level in ("coarse", "both"):
-        print(f"LID-1 (coarse, {dataset.num_groups} groups): {coarse_acc:.1f}%")
-    if args.level in ("fine", "both"):
-        print(f"LID-2 (fine, {dataset.num_scripts} scripts): {fine_acc:.1f}%")
+    swa_str = f" + {args.shared_swa_blocks} SWA blocks" if args.shared_swa_blocks > 0 else ""
+    print(f"LID-1 ({dataset.num_groups} groups, stem{swa_str}): {coarse_acc:.1f}%")
     print(f"Saved to {save_path}")
 
 
