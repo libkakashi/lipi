@@ -500,7 +500,23 @@ class MultiScriptDataset(Dataset):
             sample_text = SCRIPT_SAMPLES[script][0]
             valid_fonts = [f for f in fonts if font_can_render(f, sample_text)]
             if valid_fonts:
-                self.script_fonts[script] = valid_fonts
+                # Build weighted font list: 70% clean, 20% handwriting, 10% display
+                weighted = []
+                for f in valid_fonts:
+                    name = Path(f).name.lower()
+                    if any(k in name for k in ["caveat", "dancing", "indie", "patrick",
+                            "shadow", "kalam", "nanum_pen", "nanumpen", "chilanka",
+                            "handwrit", "cursive", "script"]):
+                        weighted.append((f, 2))   # handwriting: weight 2
+                    elif any(k in name for k in ["permanent", "amatic", "lobster",
+                            "pacifico", "special", "display"]):
+                        weighted.append((f, 1))   # display: weight 1
+                    else:
+                        weighted.append((f, 7))   # clean: weight 7
+                # Expand into sampling list
+                self.script_fonts[script] = []
+                for font, weight in weighted:
+                    self.script_fonts[script].extend([font] * weight)
                 self.active_scripts.append(script)
                 print(f"  {script:<15} {len(valid_fonts):>3} fonts")
             else:
