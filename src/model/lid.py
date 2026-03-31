@@ -1,16 +1,23 @@
 """
-Hierarchical Script Identification (LID).
+Script Identification (LID).
 
-Two-stage routing for script-specific expert selection:
+Single-stage routing based on visual character set similarity:
 
-  LID-1 (after stem): Coarse group classification (6 groups).
-    Visually maximally distinct families. Stem conv features handle this.
-    Routes to group-specific Stage 1 expert MLPs.
+  LID-1 (after stem): 10 group classification.
+    Routes to group-specific expert MLPs + group-specific CTC heads.
+    Each group has a unified charset covering all scripts in it.
 
-  LID-2 (after Stage 1): Fine script classification (17 scripts).
-    Distinguishes within-group scripts (e.g., Tamil vs Malayalam).
-    SWA features capture full character shapes needed for this.
-    Routes to script-specific Stage 2 expert MLPs + BiLSTM heads.
+Groups (10):
+  1. Latin + Cyrillic (~150 forms, ~3.5B speakers)
+  2. Arabic (~120-150 with positional forms, ~500M)
+  3. Hebrew (~30-40, ~9M)
+  4. CJK (~5000-8000, ~1.5B)
+  5. North Indian Brahmic (~200-250, Devanagari/Gurmukhi/Gujarati, ~800M)
+  6. South Indian Brahmic (~250-300, Kannada/Telugu/Malayalam, ~200M)
+  7. Tamil (~70-80, ~85M)
+  8. SE Asian Brahmic (~270-320, Thai/Lao/Khmer/Burmese, ~150M)
+  9. Eastern Indian Brahmic (~200-250, Bengali/Assamese/Odia, ~340M)
+  10. Emoji (~4000-5000, universal)
 """
 
 import torch
@@ -18,81 +25,94 @@ import torch.nn as nn
 from torch import Tensor
 
 
-# --- Fine-grained scripts (15 classes) ---
+# --- Scripts (individual writing systems) ---
 
 SCRIPTS = [
-    # latin_like
-    "latin",       # 0  English, French, Spanish, German, etc.
-    "cyrillic",    # 1  Russian, Ukrainian, etc.
-    "greek",       # 2  Greek (also covers math symbols)
-    # indic
-    "devanagari",  # 3  Hindi, Marathi, Sanskrit, Nepali
-    "bengali",     # 4  Bengali, Assamese
-    "tamil",       # 5
-    "telugu",      # 6
-    "kannada",     # 7
-    "malayalam",   # 8
+    # Group 1: Latin + Cyrillic
+    "latin",       # 0
+    "cyrillic",    # 1
+    "greek",       # 2
+    # Group 2: Arabic
+    "arabic",      # 3
+    # Group 3: Hebrew
+    "hebrew",      # 4
+    # Group 4: CJK
+    "cjk",         # 5
+    "korean",      # 6
+    # Group 5: North Indian Brahmic
+    "devanagari",  # 7
+    "gurmukhi",    # 8
     "gujarati",    # 9
-    "gurmukhi",    # 10 Punjabi
-    "odia",        # 11
-    # arabic
-    "arabic",      # 12 Arabic, Urdu, Persian, Hebrew
-    # east_asian
-    "cjk",         # 13 Chinese, Japanese Kanji
-    "korean",      # 14 Hangul
-    # southeast_asian
-    "thai",        # 15
-    # emoji
-    "emoji",       # 16 Emoji, pictographs
+    # Group 6: South Indian Brahmic
+    "kannada",     # 10
+    "telugu",      # 11
+    "malayalam",   # 12
+    # Group 7: Tamil
+    "tamil",       # 13
+    # Group 8: SE Asian Brahmic
+    "thai",        # 14
+    # Group 9: Eastern Indian Brahmic
+    "bengali",     # 15
+    "odia",        # 16
+    # Group 10: Emoji
+    "emoji",       # 17
 ]
 
 SCRIPT_TO_ID = {name: i for i, name in enumerate(SCRIPTS)}
 NUM_SCRIPTS = len(SCRIPTS)
 
 
-# --- Coarse groups (6 families) ---
+# --- Groups (10 families) ---
 
 GROUPS = [
-    "latin_like",       # 0  Latin, Cyrillic, Greek, math symbols
-    "indic",            # 1  ALL Indian scripts (Brahmi-derived)
-    "arabic",           # 2  Arabic, Hebrew, Perso-Arabic (RTL cursive)
-    "east_asian",       # 3  CJK, Korean (dense strokes, boxy)
-    "southeast_asian",  # 4  Thai, Lao, Khmer, Myanmar
-    "emoji",            # 5  Emoji, pictographs (colorful blobs)
+    "latin_cyrillic",    # 0  ~150 forms
+    "arabic",            # 1  ~120-150
+    "hebrew",            # 2  ~30-40
+    "cjk",               # 3  ~5000-8000
+    "north_indic",       # 4  ~200-250 (Devanagari, Gurmukhi, Gujarati)
+    "south_indic",       # 5  ~250-300 (Kannada, Telugu, Malayalam)
+    "tamil",             # 6  ~70-80
+    "southeast_asian",   # 7  ~270-320 (Thai, Lao, Khmer, Burmese)
+    "eastern_indic",     # 8  ~200-250 (Bengali, Assamese, Odia)
+    "emoji",             # 9  ~4000-5000
 ]
 
 GROUP_TO_ID = {name: i for i, name in enumerate(GROUPS)}
 NUM_GROUPS = len(GROUPS)
 
-# Map each script to its coarse group
+# Map each script to its group
 SCRIPT_TO_GROUP = {
-    "latin": "latin_like",
-    "cyrillic": "latin_like",
-    "greek": "latin_like",
-    "devanagari": "indic",
-    "bengali": "indic",
-    "tamil": "indic",
-    "telugu": "indic",
-    "kannada": "indic",
-    "malayalam": "indic",
-    "gujarati": "indic",
-    "gurmukhi": "indic",
-    "odia": "indic",
+    "latin": "latin_cyrillic",
+    "cyrillic": "latin_cyrillic",
+    "greek": "latin_cyrillic",
     "arabic": "arabic",
-    "cjk": "east_asian",
-    "korean": "east_asian",
+    "hebrew": "hebrew",
+    "cjk": "cjk",
+    "korean": "cjk",
+    "devanagari": "north_indic",
+    "gurmukhi": "north_indic",
+    "gujarati": "north_indic",
+    "kannada": "south_indic",
+    "telugu": "south_indic",
+    "malayalam": "south_indic",
+    "tamil": "tamil",
     "thai": "southeast_asian",
+    "bengali": "eastern_indic",
+    "odia": "eastern_indic",
     "emoji": "emoji",
 }
 
 # Which scripts belong to each group
 GROUP_SCRIPTS = {
-    "latin_like": ["latin", "cyrillic", "greek"],
-    "indic": ["devanagari", "bengali", "tamil", "telugu", "kannada",
-              "malayalam", "gujarati", "gurmukhi", "odia"],
+    "latin_cyrillic": ["latin", "cyrillic", "greek"],
     "arabic": ["arabic"],
-    "east_asian": ["cjk", "korean"],
+    "hebrew": ["hebrew"],
+    "cjk": ["cjk", "korean"],
+    "north_indic": ["devanagari", "gurmukhi", "gujarati"],
+    "south_indic": ["kannada", "telugu", "malayalam"],
+    "tamil": ["tamil"],
     "southeast_asian": ["thai"],
+    "eastern_indic": ["bengali", "odia"],
     "emoji": ["emoji"],
 }
 

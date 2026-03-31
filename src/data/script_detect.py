@@ -37,7 +37,10 @@ _SCRIPT_RANGES = {
         (0x0750, 0x077F),  # Arabic Supplement
         (0xFB50, 0xFDFF),  # Arabic Presentation Forms-A
         (0xFE70, 0xFEFF),  # Arabic Presentation Forms-B
+    ],
+    "hebrew": [
         (0x0590, 0x05FF),  # Hebrew
+        (0xFB1D, 0xFB4F),  # Hebrew Presentation Forms
     ],
     "cjk": [
         (0x4E00, 0x9FFF),   # CJK Unified Ideographs

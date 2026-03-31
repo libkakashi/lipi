@@ -46,8 +46,31 @@ from src.data.color import rgb_to_input, INPUT_CHANNELS, MODE
 from src.data.augmentation import RandAugmentOCR
 
 
-# Sample words per script
-SCRIPT_SAMPLES = {
+WORD_LIST_DIR = Path(__file__).parent.parent / "training_data" / "word_lists"
+
+
+def load_word_list(script: str, fallback: list[str]) -> list[str]:
+    """Load word list from file if available, else use fallback."""
+    candidates = [WORD_LIST_DIR / f"{script}.txt"]
+    if script == "latin":
+        candidates.append(WORD_LIST_DIR / "english_common.txt")
+
+    for path in candidates:
+        if path.exists():
+            words = []
+            for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                w = line.strip()
+                if 2 <= len(w) <= 15 and w and not w[0].isdigit():
+                    words.append(w)
+            if len(words) >= 20:
+                words = list(set(words))
+                random.shuffle(words)
+                return words
+    return fallback
+
+
+# Fallback word samples per script (used when no word list file exists)
+_SCRIPT_SAMPLES_FALLBACK = {
     "latin": [
         "hello", "world", "justice", "court", "legal", "document", "appeal",
         "judge", "order", "case", "file", "law", "right", "party", "trial",
@@ -129,7 +152,24 @@ SCRIPT_SAMPLES = {
         "คำพิพากษา", "คดี", "ทนายความ", "รัฐบาล", "ภาษาไทย",
         "กรุงเทพ", "เวลา", "คน", "ประเทศ", "บ้าน", "วัน",
     ],
+    "hebrew": [
+        "שלום", "משפט", "חוק", "זכות", "עורך", "דין", "שופט",
+        "ממשלה", "ישראל", "ירושלים", "עברית", "ספר", "בית",
+        "זמן", "אדם", "ארץ", "מים", "יום", "לילה", "שנה",
+        "עיר", "דרך", "מלך", "אמת", "צדק", "תורה", "כנסת",
+    ],
 }
+
+# Loaded at runtime — file-based word lists merged with fallbacks
+SCRIPT_SAMPLES: dict[str, list[str]] = {}
+
+
+def load_all_script_samples():
+    """Load word lists from files, falling back to hardcoded samples."""
+    for script, fallback in _SCRIPT_SAMPLES_FALLBACK.items():
+        SCRIPT_SAMPLES[script] = load_word_list(script, fallback)
+    # Emoji doesn't have words — handled separately in rendering
+    SCRIPT_SAMPLES["emoji"] = ["emoji"]
 
 
 def find_fonts_for_script(script: str) -> list[str]:
@@ -142,7 +182,7 @@ def find_fonts_for_script(script: str) -> list[str]:
         "devanagari": "hi", "bengali": "bn", "tamil": "ta",
         "telugu": "te", "kannada": "kn", "malayalam": "ml",
         "gujarati": "gu", "gurmukhi": "pa", "odia": "or",
-        "arabic": "ar", "cjk": "zh", "korean": "ko", "thai": "th",
+        "arabic": "ar", "hebrew": "he", "cjk": "zh", "korean": "ko", "thai": "th",
     }
     lang = lang_map.get(script)
     if not lang:
@@ -669,6 +709,9 @@ def main():
     else:
         device = args.device
     print(f"Device: {device}\n")
+
+    # Load word lists from files
+    load_all_script_samples()
 
     # Generate dataset
     dataset = MultiScriptDataset(

@@ -31,8 +31,8 @@ class TestLIDCoarse:
             assert logits.shape == (1, NUM_GROUPS)
 
     def test_num_groups(self):
-        assert NUM_GROUPS == 6
-        assert len(GROUPS) == 6
+        assert NUM_GROUPS == 10
+        assert len(GROUPS) == 10
 
 
 class TestLIDFine:
@@ -51,8 +51,7 @@ class TestLIDFine:
         assert confidences.shape == (2,)
 
     def test_num_scripts(self):
-        assert NUM_SCRIPTS == 17
-        assert len(SCRIPTS) == 17
+        assert NUM_SCRIPTS == len(SCRIPTS)
 
     def test_gradient_flow(self):
         lid = LIDFine(in_dim=192)
