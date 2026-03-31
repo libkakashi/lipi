@@ -6,28 +6,23 @@ def run(cmd):
     print(f"$ {cmd}")
     subprocess.run(cmd, shell=True, check=True)
 
-# Fix Pillow (needs FreeType for font rendering)
-run(f"{sys.executable} -m pip uninstall pillow pillow-simd -y")
-run(f"{sys.executable} -m pip install Pillow")
+# Install everything needed
+run(f"{sys.executable} -m pip install Pillow freetype-py numpy scipy")
 
-# Verify
+# Verify freetype
 try:
-    from PIL import ImageFont
-    f = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 12)
-    print("\nPillow FreeType: OK")
-except Exception:
-    # Try with our downloaded font
-    import importlib
-    import PIL
-    importlib.reload(PIL)
-    from PIL import ImageFont
-    from pathlib import Path
-    fonts = list(Path("training_data/fonts").glob("NotoSans-Regular*"))
-    if fonts:
-        f = ImageFont.truetype(str(fonts[0]), 12)
-        print("\nPillow FreeType: OK (using Noto)")
-    else:
-        print("\nWARNING: Pillow FreeType still broken")
+    import freetype
+    print(f"\nfreetype-py: OK (version {freetype.__freetype_version__})")
+except Exception as e:
+    print(f"\nfreetype-py: FAILED ({e})")
+    print("Try: apt install libfreetype6-dev && pip install freetype-py")
+
+# Verify PIL
+try:
+    from PIL import Image
+    print(f"Pillow: OK")
+except Exception as e:
+    print(f"Pillow: FAILED ({e})")
 
 # Verify torch CUDA
 try:

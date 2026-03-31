@@ -31,7 +31,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -322,15 +322,7 @@ def find_fonts_for_script(script: str) -> list[str]:
     return fonts
 
 
-def font_can_render(font_path: str, text: str, size: int = 24) -> bool:
-    """Check if a font produces ink for the given text."""
-    try:
-        font = ImageFont.truetype(font_path, size=size)
-        img = Image.new("L", (300, 50), 255)
-        ImageDraw.Draw(img).text((5, 5), text, fill=0, font=font)
-        return (np.array(img) < 200).sum() > len(text) * 3
-    except Exception:
-        return False
+from src.data.renderer import render_text, font_can_render
 
 
 def random_ink_color():
@@ -412,42 +404,19 @@ def random_bg_color():
 
 
 def render_word(text: str, font_path: str, height: int = 32) -> Image.Image | None:
-    """Render a word with random ink and paper colors."""
-    try:
-        font_size = random.randint(18, 26)
-        font = ImageFont.truetype(font_path, size=font_size)
+    """Render a word with random ink and paper colors using FreeType."""
+    # Pick colors with enough contrast
+    for _ in range(5):
+        bg = random_bg_color()
+        ink = random_ink_color()
+        bg_lum = 0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2]
+        ink_lum = 0.299 * ink[0] + 0.587 * ink[1] + 0.114 * ink[2]
+        if abs(bg_lum - ink_lum) > 60:
+            break
 
-        dummy = Image.new("RGB", (1, 1))
-        bbox = ImageDraw.Draw(dummy).textbbox((0, 0), text, font=font)
-        text_w = bbox[2] - bbox[0]
-        text_h = bbox[3] - bbox[1]
-        if text_w <= 0 or text_h <= 0:
-            return None
-
-        pad_x = random.randint(2, 8)
-        pad_y = random.randint(2, 6)
-        img_w = text_w + 2 * pad_x
-        img_h = text_h + 2 * pad_y
-
-        # Pick colors with enough contrast
-        for _ in range(5):
-            bg = random_bg_color()
-            ink = random_ink_color()
-            # Luminance contrast check
-            bg_lum = 0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2]
-            ink_lum = 0.299 * ink[0] + 0.587 * ink[1] + 0.114 * ink[2]
-            if abs(bg_lum - ink_lum) > 60:
-                break
-        img = Image.new("RGB", (img_w, img_h), bg)
-        ImageDraw.Draw(img).text(
-            (pad_x - bbox[0], pad_y - bbox[1]), text, fill=ink, font=font,
-        )
-
-        scale = height / img_h
-        new_w = max(4, int(img_w * scale))
-        return img.resize((new_w, height), Image.BILINEAR)
-    except Exception:
-        return None
+    font_size = random.randint(18, 26)
+    return render_text(text, font_path, font_size, ink=ink, bg=bg, height=height,
+                       pad_x=random.randint(2, 8), pad_y=random.randint(2, 6))
 
 
 def render_emoji(height: int = 32, max_width: int = 192) -> Image.Image:
