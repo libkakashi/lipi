@@ -1,169 +1,136 @@
 #!/bin/bash
-# Download diverse fonts for all 18 scripts.
-# Includes: sans-serif, serif, handwriting/cursive, display, monospace
-# Run once on any machine before training.
-
+# Download diverse fonts for all 18 scripts (parallel).
 set -e
 
 FONT_DIR="$(dirname "$0")/../training_data/fonts"
 mkdir -p "$FONT_DIR"
 cd "$FONT_DIR"
 
-echo "Downloading fonts to $FONT_DIR ..."
-
 NOTO="https://github.com/notofonts/notofonts.github.io/raw/main/fonts"
+GFONTS="https://github.com/google/fonts/raw/main/ofl"
+CJK_SANS="https://github.com/notofonts/noto-cjk/releases/download/Sans2.004"
+CJK_SERIF="https://github.com/notofonts/noto-cjk/releases/download/Serif2.003"
 
-dl() {
-    local url="$1"
-    local name="$(basename "$url")"
-    if [ ! -f "$name" ]; then
-        echo "  $name"
-        curl -sL -o "$name" "$url" || wget -q -O "$name" "$url" || echo "    FAILED: $name"
+# Build URL list
+URLS=(
+# Latin/Cyrillic/Greek — sans, serif, mono, handwriting, display
+"$NOTO/NotoSans/full/ttf/NotoSans-Regular.ttf"
+"$NOTO/NotoSans/full/ttf/NotoSans-Bold.ttf"
+"$NOTO/NotoSans/full/ttf/NotoSans-Italic.ttf"
+"$NOTO/NotoSans/full/ttf/NotoSans-Light.ttf"
+"$NOTO/NotoSerif/full/ttf/NotoSerif-Regular.ttf"
+"$NOTO/NotoSerif/full/ttf/NotoSerif-Bold.ttf"
+"$NOTO/NotoSerif/full/ttf/NotoSerif-Italic.ttf"
+"$NOTO/NotoSansMono/full/ttf/NotoSansMono-Regular.ttf"
+"$GFONTS/caveat/Caveat%5Bwght%5D.ttf"
+"$GFONTS/dancingscript/DancingScript%5Bwght%5D.ttf"
+"$GFONTS/indieflower/IndieFlower-Regular.ttf"
+"$GFONTS/patrickhand/PatrickHand-Regular.ttf"
+"$GFONTS/shadowsintolight/ShadowsIntoLight.ttf"
+"$GFONTS/permanentmarker/PermanentMarker-Regular.ttf"
+"$GFONTS/amaticsc/AmaticSC-Regular.ttf"
+"$GFONTS/lobster/Lobster-Regular.ttf"
+"$GFONTS/pacifico/Pacifico-Regular.ttf"
+"$GFONTS/comicneue/ComicNeue-Regular.ttf"
+"$GFONTS/specialelite/SpecialElite-Regular.ttf"
+# Arabic
+"$NOTO/NotoSansArabic/full/ttf/NotoSansArabic-Regular.ttf"
+"$NOTO/NotoSansArabic/full/ttf/NotoSansArabic-Bold.ttf"
+"$NOTO/NotoNaskhArabic/full/ttf/NotoNaskhArabic-Regular.ttf"
+"$NOTO/NotoNaskhArabic/full/ttf/NotoNaskhArabic-Bold.ttf"
+"$NOTO/NotoNastaliqUrdu/full/ttf/NotoNastaliqUrdu-Regular.ttf"
+"$NOTO/NotoKufiArabic/full/ttf/NotoKufiArabic-Regular.ttf"
+"$GFONTS/amiri/Amiri-Regular.ttf"
+"$GFONTS/amiri/Amiri-Bold.ttf"
+"$GFONTS/scheherazadenew/ScheherazadeNew-Regular.ttf"
+"$GFONTS/lateef/Lateef-Regular.ttf"
+# Hebrew
+"$NOTO/NotoSansHebrew/full/ttf/NotoSansHebrew-Regular.ttf"
+"$NOTO/NotoSansHebrew/full/ttf/NotoSansHebrew-Bold.ttf"
+"$NOTO/NotoSerifHebrew/full/ttf/NotoSerifHebrew-Regular.ttf"
+"$GFONTS/frankruhllibre/FrankRuhlLibre%5Bwght%5D.ttf"
+"$GFONTS/rubik/Rubik%5Bwght%5D.ttf"
+"$GFONTS/secularone/SecularOne-Regular.ttf"
+# CJK
+"$CJK_SANS/01_NotoSansCJKsc-Regular.otf"
+"$CJK_SANS/01_NotoSansCJKsc-Bold.otf"
+"$CJK_SANS/03_NotoSansCJKjp-Regular.otf"
+"$CJK_SERIF/01_NotoSerifCJKsc-Regular.otf"
+"$CJK_SERIF/03_NotoSerifCJKjp-Regular.otf"
+# Korean
+"$CJK_SANS/05_NotoSansCJKkr-Regular.otf"
+"$CJK_SANS/05_NotoSansCJKkr-Bold.otf"
+"$CJK_SERIF/05_NotoSerifCJKkr-Regular.otf"
+"$GFONTS/nanumgothic/NanumGothic-Regular.ttf"
+"$GFONTS/nanummyeongjo/NanumMyeongjo-Regular.ttf"
+"$GFONTS/nanumpenscript/NanumPenScript-Regular.ttf"
+# Devanagari
+"$NOTO/NotoSansDevanagari/full/ttf/NotoSansDevanagari-Regular.ttf"
+"$NOTO/NotoSansDevanagari/full/ttf/NotoSansDevanagari-Bold.ttf"
+"$NOTO/NotoSerifDevanagari/full/ttf/NotoSerifDevanagari-Regular.ttf"
+"$GFONTS/poppins/Poppins-Regular.ttf"
+"$GFONTS/tirodevanagarihindi/TiroDevanagariHindi-Regular.ttf"
+"$GFONTS/laila/Laila-Regular.ttf"
+"$GFONTS/kalam/Kalam-Regular.ttf"
+# Bengali
+"$NOTO/NotoSansBengali/full/ttf/NotoSansBengali-Regular.ttf"
+"$NOTO/NotoSansBengali/full/ttf/NotoSansBengali-Bold.ttf"
+"$NOTO/NotoSerifBengali/full/ttf/NotoSerifBengali-Regular.ttf"
+"$GFONTS/tirobangla/TiroBangla-Regular.ttf"
+"$GFONTS/hindsiliguri/HindSiliguri-Regular.ttf"
+# Gurmukhi
+"$NOTO/NotoSansGurmukhi/full/ttf/NotoSansGurmukhi-Regular.ttf"
+"$NOTO/NotoSansGurmukhi/full/ttf/NotoSansGurmukhi-Bold.ttf"
+"$NOTO/NotoSerifGurmukhi/full/ttf/NotoSerifGurmukhi-Regular.ttf"
+# Gujarati
+"$NOTO/NotoSansGujarati/full/ttf/NotoSansGujarati-Regular.ttf"
+"$NOTO/NotoSansGujarati/full/ttf/NotoSansGujarati-Bold.ttf"
+"$NOTO/NotoSerifGujarati/full/ttf/NotoSerifGujarati-Regular.ttf"
+"$GFONTS/hindvadodara/HindVadodara-Regular.ttf"
+# Tamil
+"$NOTO/NotoSansTamil/full/ttf/NotoSansTamil-Regular.ttf"
+"$NOTO/NotoSansTamil/full/ttf/NotoSansTamil-Bold.ttf"
+"$NOTO/NotoSerifTamil/full/ttf/NotoSerifTamil-Regular.ttf"
+"$GFONTS/tirotamil/TiroTamil-Regular.ttf"
+# Telugu
+"$NOTO/NotoSansTelugu/full/ttf/NotoSansTelugu-Regular.ttf"
+"$NOTO/NotoSansTelugu/full/ttf/NotoSansTelugu-Bold.ttf"
+"$NOTO/NotoSerifTelugu/full/ttf/NotoSerifTelugu-Regular.ttf"
+"$GFONTS/tirotelugu/TiroTelugu-Regular.ttf"
+# Kannada
+"$NOTO/NotoSansKannada/full/ttf/NotoSansKannada-Regular.ttf"
+"$NOTO/NotoSansKannada/full/ttf/NotoSansKannada-Bold.ttf"
+"$NOTO/NotoSerifKannada/full/ttf/NotoSerifKannada-Regular.ttf"
+"$GFONTS/tirokannada/TiroKannada-Regular.ttf"
+# Malayalam
+"$NOTO/NotoSansMalayalam/full/ttf/NotoSansMalayalam-Regular.ttf"
+"$NOTO/NotoSansMalayalam/full/ttf/NotoSansMalayalam-Bold.ttf"
+"$NOTO/NotoSerifMalayalam/full/ttf/NotoSerifMalayalam-Regular.ttf"
+"$GFONTS/chilanka/Chilanka-Regular.ttf"
+# Thai
+"$NOTO/NotoSansThai/full/ttf/NotoSansThai-Regular.ttf"
+"$NOTO/NotoSansThai/full/ttf/NotoSansThai-Bold.ttf"
+"$NOTO/NotoSerifThai/full/ttf/NotoSerifThai-Regular.ttf"
+"$GFONTS/kanit/Kanit-Regular.ttf"
+"$GFONTS/sarabun/Sarabun-Regular.ttf"
+"$GFONTS/prompt/Prompt-Regular.ttf"
+# Lao
+"$NOTO/NotoSansLao/full/ttf/NotoSansLao-Regular.ttf"
+"$NOTO/NotoSansLao/full/ttf/NotoSansLao-Bold.ttf"
+"$NOTO/NotoSerifLao/full/ttf/NotoSerifLao-Regular.ttf"
+"$GFONTS/phetsarathot/PhetsarathOT-Regular.ttf"
+)
+
+echo "Downloading ${#URLS[@]} fonts (parallel)..."
+
+# Download all in parallel (up to 20 at a time), skip existing
+printf '%s\n' "${URLS[@]}" | xargs -P 20 -I{} sh -c '
+    name="$(basename "{}" | sed "s/%5B/[/g; s/%5D/]/g")"
+    if [ ! -f "'"$FONT_DIR"'/$name" ]; then
+        curl -sL -o "'"$FONT_DIR"'/$name" "{}" && echo "  OK: $name" || echo "  FAIL: $name"
     fi
-}
+'
 
 echo ""
-echo "=== Latin / Cyrillic / Greek ==="
-# Sans
-dl "$NOTO/NotoSans/full/ttf/NotoSans-Regular.ttf"
-dl "$NOTO/NotoSans/full/ttf/NotoSans-Bold.ttf"
-dl "$NOTO/NotoSans/full/ttf/NotoSans-Italic.ttf"
-dl "$NOTO/NotoSans/full/ttf/NotoSans-Light.ttf"
-# Serif
-dl "$NOTO/NotoSerif/full/ttf/NotoSerif-Regular.ttf"
-dl "$NOTO/NotoSerif/full/ttf/NotoSerif-Bold.ttf"
-dl "$NOTO/NotoSerif/full/ttf/NotoSerif-Italic.ttf"
-# Mono
-dl "$NOTO/NotoSansMono/full/ttf/NotoSansMono-Regular.ttf"
-# Google Fonts - handwriting/cursive/display
-dl "https://github.com/google/fonts/raw/main/ofl/caveat/Caveat%5Bwght%5D.ttf"
-dl "https://github.com/google/fonts/raw/main/ofl/dancingscript/DancingScript%5Bwght%5D.ttf"
-dl "https://github.com/google/fonts/raw/main/ofl/indieflower/IndieFlower-Regular.ttf"
-dl "https://github.com/google/fonts/raw/main/ofl/patrickhand/PatrickHand-Regular.ttf"
-dl "https://github.com/google/fonts/raw/main/ofl/shadowsintolight/ShadowsIntoLight.ttf"
-dl "https://github.com/google/fonts/raw/main/ofl/permanentmarker/PermanentMarker-Regular.ttf"
-dl "https://github.com/google/fonts/raw/main/ofl/amaticsc/AmaticSC-Regular.ttf"
-dl "https://github.com/google/fonts/raw/main/ofl/lobster/Lobster-Regular.ttf"
-dl "https://github.com/google/fonts/raw/main/ofl/pacifico/Pacifico-Regular.ttf"
-dl "https://github.com/google/fonts/raw/main/ofl/comicneue/ComicNeue-Regular.ttf"
-dl "https://github.com/google/fonts/raw/main/ofl/specialelite/SpecialElite-Regular.ttf"
-dl "https://github.com/google/fonts/raw/main/ofl/courierprimetarget/CourierPrime-Regular.ttf"
-
-echo ""
-echo "=== Arabic ==="
-dl "$NOTO/NotoSansArabic/full/ttf/NotoSansArabic-Regular.ttf"
-dl "$NOTO/NotoSansArabic/full/ttf/NotoSansArabic-Bold.ttf"
-dl "$NOTO/NotoNaskhArabic/full/ttf/NotoNaskhArabic-Regular.ttf"
-dl "$NOTO/NotoNaskhArabic/full/ttf/NotoNaskhArabic-Bold.ttf"
-dl "$NOTO/NotoNastaliqUrdu/full/ttf/NotoNastaliqUrdu-Regular.ttf"
-dl "$NOTO/NotoKufiArabic/full/ttf/NotoKufiArabic-Regular.ttf"
-dl "https://github.com/google/fonts/raw/main/ofl/amiri/Amiri-Regular.ttf"
-dl "https://github.com/google/fonts/raw/main/ofl/amiri/Amiri-Bold.ttf"
-dl "https://github.com/google/fonts/raw/main/ofl/scheherazadenew/ScheherazadeNew-Regular.ttf"
-dl "https://github.com/google/fonts/raw/main/ofl/lateef/Lateef-Regular.ttf"
-
-echo ""
-echo "=== Hebrew ==="
-dl "$NOTO/NotoSansHebrew/full/ttf/NotoSansHebrew-Regular.ttf"
-dl "$NOTO/NotoSansHebrew/full/ttf/NotoSansHebrew-Bold.ttf"
-dl "$NOTO/NotoSerifHebrew/full/ttf/NotoSerifHebrew-Regular.ttf"
-dl "https://github.com/google/fonts/raw/main/ofl/frankruhllibre/FrankRuhlLibre%5Bwght%5D.ttf"
-dl "https://github.com/google/fonts/raw/main/ofl/rubik/Rubik%5Bwght%5D.ttf"
-dl "https://github.com/google/fonts/raw/main/ofl/secular_one/SecularOne-Regular.ttf"
-
-echo ""
-echo "=== CJK ==="
-dl "https://github.com/notofonts/noto-cjk/releases/download/Sans2.004/01_NotoSansCJKsc-Regular.otf"
-dl "https://github.com/notofonts/noto-cjk/releases/download/Sans2.004/01_NotoSansCJKsc-Bold.otf"
-dl "https://github.com/notofonts/noto-cjk/releases/download/Sans2.004/03_NotoSansCJKjp-Regular.otf"
-dl "https://github.com/notofonts/noto-cjk/releases/download/Serif2.003/01_NotoSerifCJKsc-Regular.otf"
-dl "https://github.com/notofonts/noto-cjk/releases/download/Serif2.003/03_NotoSerifCJKjp-Regular.otf"
-
-echo ""
-echo "=== Korean ==="
-dl "https://github.com/notofonts/noto-cjk/releases/download/Sans2.004/05_NotoSansCJKkr-Regular.otf"
-dl "https://github.com/notofonts/noto-cjk/releases/download/Sans2.004/05_NotoSansCJKkr-Bold.otf"
-dl "https://github.com/notofonts/noto-cjk/releases/download/Serif2.003/05_NotoSerifCJKkr-Regular.otf"
-dl "https://github.com/google/fonts/raw/main/ofl/nanumgothic/NanumGothic-Regular.ttf"
-dl "https://github.com/google/fonts/raw/main/ofl/nanummyeongjo/NanumMyeongjo-Regular.ttf"
-dl "https://github.com/google/fonts/raw/main/ofl/nanumpenscript/NanumPenScript-Regular.ttf"
-
-echo ""
-echo "=== Devanagari ==="
-dl "$NOTO/NotoSansDevanagari/full/ttf/NotoSansDevanagari-Regular.ttf"
-dl "$NOTO/NotoSansDevanagari/full/ttf/NotoSansDevanagari-Bold.ttf"
-dl "$NOTO/NotoSerifDevanagari/full/ttf/NotoSerifDevanagari-Regular.ttf"
-dl "https://github.com/google/fonts/raw/main/ofl/poppins/Poppins-Regular.ttf"
-dl "https://github.com/google/fonts/raw/main/ofl/tirodevanagarihindi/TiroDevanagariHindi-Regular.ttf"
-dl "https://github.com/google/fonts/raw/main/ofl/laila/Laila-Regular.ttf"
-dl "https://github.com/google/fonts/raw/main/ofl/kalam/Kalam-Regular.ttf"
-
-echo ""
-echo "=== Bengali ==="
-dl "$NOTO/NotoSansBengali/full/ttf/NotoSansBengali-Regular.ttf"
-dl "$NOTO/NotoSansBengali/full/ttf/NotoSansBengali-Bold.ttf"
-dl "$NOTO/NotoSerifBengali/full/ttf/NotoSerifBengali-Regular.ttf"
-dl "https://github.com/google/fonts/raw/main/ofl/tirobangla/TiroBangla-Regular.ttf"
-dl "https://github.com/google/fonts/raw/main/ofl/hindsiliguri/HindSiliguri-Regular.ttf"
-
-echo ""
-echo "=== Gurmukhi ==="
-dl "$NOTO/NotoSansGurmukhi/full/ttf/NotoSansGurmukhi-Regular.ttf"
-dl "$NOTO/NotoSansGurmukhi/full/ttf/NotoSansGurmukhi-Bold.ttf"
-dl "$NOTO/NotoSerifGurmukhi/full/ttf/NotoSerifGurmukhi-Regular.ttf"
-
-echo ""
-echo "=== Gujarati ==="
-dl "$NOTO/NotoSansGujarati/full/ttf/NotoSansGujarati-Regular.ttf"
-dl "$NOTO/NotoSansGujarati/full/ttf/NotoSansGujarati-Bold.ttf"
-dl "$NOTO/NotoSerifGujarati/full/ttf/NotoSerifGujarati-Regular.ttf"
-dl "https://github.com/google/fonts/raw/main/ofl/hindvadodara/HindVadodara-Regular.ttf"
-
-echo ""
-echo "=== Tamil ==="
-dl "$NOTO/NotoSansTamil/full/ttf/NotoSansTamil-Regular.ttf"
-dl "$NOTO/NotoSansTamil/full/ttf/NotoSansTamil-Bold.ttf"
-dl "$NOTO/NotoSerifTamil/full/ttf/NotoSerifTamil-Regular.ttf"
-dl "https://github.com/google/fonts/raw/main/ofl/tirotamil/TiroTamil-Regular.ttf"
-
-echo ""
-echo "=== Telugu ==="
-dl "$NOTO/NotoSansTelugu/full/ttf/NotoSansTelugu-Regular.ttf"
-dl "$NOTO/NotoSansTelugu/full/ttf/NotoSansTelugu-Bold.ttf"
-dl "$NOTO/NotoSerifTelugu/full/ttf/NotoSerifTelugu-Regular.ttf"
-dl "https://github.com/google/fonts/raw/main/ofl/tirotelugu/TiroTelugu-Regular.ttf"
-
-echo ""
-echo "=== Kannada ==="
-dl "$NOTO/NotoSansKannada/full/ttf/NotoSansKannada-Regular.ttf"
-dl "$NOTO/NotoSansKannada/full/ttf/NotoSansKannada-Bold.ttf"
-dl "$NOTO/NotoSerifKannada/full/ttf/NotoSerifKannada-Regular.ttf"
-dl "https://github.com/google/fonts/raw/main/ofl/tirokannada/TiroKannada-Regular.ttf"
-
-echo ""
-echo "=== Malayalam ==="
-dl "$NOTO/NotoSansMalayalam/full/ttf/NotoSansMalayalam-Regular.ttf"
-dl "$NOTO/NotoSansMalayalam/full/ttf/NotoSansMalayalam-Bold.ttf"
-dl "$NOTO/NotoSerifMalayalam/full/ttf/NotoSerifMalayalam-Regular.ttf"
-dl "https://github.com/google/fonts/raw/main/ofl/chilanka/Chilanka-Regular.ttf"
-
-echo ""
-echo "=== Thai ==="
-dl "$NOTO/NotoSansThai/full/ttf/NotoSansThai-Regular.ttf"
-dl "$NOTO/NotoSansThai/full/ttf/NotoSansThai-Bold.ttf"
-dl "$NOTO/NotoSerifThai/full/ttf/NotoSerifThai-Regular.ttf"
-dl "https://github.com/google/fonts/raw/main/ofl/kanit/Kanit-Regular.ttf"
-dl "https://github.com/google/fonts/raw/main/ofl/sarabun/Sarabun-Regular.ttf"
-dl "https://github.com/google/fonts/raw/main/ofl/prompt/Prompt-Regular.ttf"
-
-echo ""
-echo "=== Lao ==="
-dl "$NOTO/NotoSansLao/full/ttf/NotoSansLao-Regular.ttf"
-dl "$NOTO/NotoSansLao/full/ttf/NotoSansLao-Bold.ttf"
-dl "$NOTO/NotoSerifLao/full/ttf/NotoSerifLao-Regular.ttf"
-dl "https://github.com/google/fonts/raw/main/ofl/phetsarathot/PhetsarathOT-Regular.ttf"
-
-echo ""
-echo "Done."
-ls -1 "$FONT_DIR"/*.ttf "$FONT_DIR"/*.otf 2>/dev/null | wc -l | xargs -I{} echo "{} font files downloaded"
-echo "Fonts in: $FONT_DIR"
+count=$(ls -1 "$FONT_DIR"/*.ttf "$FONT_DIR"/*.otf 2>/dev/null | wc -l)
+echo "Done. $count font files in $FONT_DIR"
