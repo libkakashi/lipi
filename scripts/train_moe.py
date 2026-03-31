@@ -316,9 +316,12 @@ class SyntheticMoEDataset(Dataset):
         samples_per_script: int = 500,
         height: int = 32,
         max_width: int = 192,
+        augment: bool = True,
     ):
         self.height = height
         self.max_width = max_width
+        from src.data.augmentation import RandAugmentOCR
+        self.augmentor = RandAugmentOCR(n_ops=2, p=0.5) if augment else None
 
         print("Discovering fonts per script...")
         self.script_fonts: dict[str, list[str]] = {}
@@ -369,7 +372,11 @@ class SyntheticMoEDataset(Dataset):
                 if img.width > self.max_width:
                     img = img.resize((self.max_width, self.height), Image.BILINEAR)
 
-                # Convert to tensor (3, H, W) via rgb_to_input
+                # Augment (on RGB, before color conversion)
+                if self.augmentor is not None:
+                    img = self.augmentor(img)
+
+                # Convert to tensor via rgb_to_input
                 tensor = rgb_to_input(img)
                 self.images.append(tensor)
                 self.labels.append(word)
@@ -405,17 +412,11 @@ class LMDBMoEDataset(Dataset):
 
     def __getitem__(self, idx):
         img_arr, label = self.ds[idx]
-        # img_arr is (3, H, W) numpy from preprocess_crop (already normalized)
-        # Convert back to PIL for rgb_to_input, or use directly if already in [0,1]
-        # PARSeqLMDB preprocess_crop normalizes to [-1,1] range, but rgb_to_input
-        # expects PIL Image. We need to handle this.
-        # Actually, preprocess_crop returns CHW float32.
-        # For the MoE encoder which uses LearnedColorProjection, we need RGB [0,1].
-        # preprocess_crop normalizes to [-1,1] via (arr - 0.5) / 0.5.
-        # So we undo: arr = arr * 0.5 + 0.5 to get [0,1] range.
-        tensor = torch.from_numpy(img_arr).float()
-        tensor = tensor * 0.5 + 0.5  # [-1,1] -> [0,1]
-        tensor = tensor.clamp(0, 1)
+        # PARSeqLMDB returns (C, H, W) numpy, normalized to [-1,1].
+        # Undo normalization to get [0,1] RGB, convert to PIL, then rgb_to_input.
+        arr = (img_arr.transpose(1, 2, 0) * 0.5 + 0.5).clip(0, 1)  # (H, W, 3) in [0,1]
+        pil_img = Image.fromarray((arr * 255).astype(np.uint8))
+        tensor = rgb_to_input(pil_img)
 
         script_id = detect_script_id(label)
         group_id = detect_group_id(label)
@@ -670,13 +671,15 @@ def main():
     )
     print(f"Train: {n_train}, Val: {n_val}")
 
+    n_workers = 4 if device.type == "cuda" else 0
     train_loader = DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True,
-        collate_fn=collate_moe, num_workers=0, pin_memory=(device.type != "cpu"),
+        collate_fn=collate_moe, num_workers=n_workers,
+        pin_memory=(device.type == "cuda"),
     )
     val_loader = DataLoader(
         val_dataset, batch_size=args.batch_size, shuffle=False,
-        collate_fn=collate_moe, num_workers=0,
+        collate_fn=collate_moe, num_workers=n_workers,
     )
 
     # ---- Build model ----
