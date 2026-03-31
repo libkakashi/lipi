@@ -173,6 +173,15 @@ def main():
 
     print(f"  {len(chunks)} chunks across {n_workers} workers\n")
 
+    # Save incrementally — each chunk appends to a shard dir, merge at end
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    shard_dir = out_path.parent / f".{out_path.stem}_shards"
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    shard_idx = 0
+    done_count = 0
+    total_chunks = len(chunks)
+
     with ProcessPoolExecutor(max_workers=n_workers) as pool:
         futures = {pool.submit(_generate_batch, chunk): chunk[0] for chunk in chunks}
 
@@ -180,23 +189,38 @@ def main():
             script = futures[future]
             group = SCRIPT_TO_GROUP[script]
             batch = future.result()
-            for t in batch:
-                all_images.append(t)
-                all_script_labels.append(script_to_idx[script])
-                all_group_labels.append(group_to_idx[group])
+
+            # Save shard immediately
+            imgs = torch.stack(batch)
+            s_labels = torch.full((len(batch),), script_to_idx[script], dtype=torch.long)
+            g_labels = torch.full((len(batch),), group_to_idx[group], dtype=torch.long)
+            torch.save({"images": imgs, "script_labels": s_labels, "group_labels": g_labels},
+                       shard_dir / f"shard_{shard_idx:04d}.pt")
+            shard_idx += 1
+            done_count += len(batch)
+
+            elapsed = time.time() - start
+            rate = done_count / elapsed if elapsed > 0 else 0
+            print(f"  [{shard_idx}/{total_chunks}] +{len(batch)} {script:<12s} | total: {done_count}/{total_est} ({rate:.0f} img/s)")
 
     elapsed = time.time() - start
-    print(f"\nGenerated {len(all_images)} images in {elapsed:.0f}s")
+    print(f"\nGenerated {done_count} images in {elapsed:.0f}s")
 
-    # Stack into tensors
-    print("Stacking tensors...")
-    images_tensor = torch.stack(all_images)
-    script_labels_tensor = torch.tensor(all_script_labels, dtype=torch.long)
-    group_labels_tensor = torch.tensor(all_group_labels, dtype=torch.long)
+    # Merge shards into one file
+    print("Merging shards...")
+    all_images = []
+    all_script_labels = []
+    all_group_labels = []
+    for shard_path in sorted(shard_dir.glob("shard_*.pt")):
+        shard = torch.load(shard_path, weights_only=False)
+        all_images.append(shard["images"])
+        all_script_labels.append(shard["script_labels"])
+        all_group_labels.append(shard["group_labels"])
 
-    # Save
-    out_path = Path(args.out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    images_tensor = torch.cat(all_images)
+    script_labels_tensor = torch.cat(all_script_labels)
+    group_labels_tensor = torch.cat(all_group_labels)
+
     torch.save({
         "images": images_tensor,
         "script_labels": script_labels_tensor,
@@ -210,6 +234,10 @@ def main():
         "augmented": args.augment,
         "samples_per_script": args.samples_per_script,
     }, out_path)
+
+    # Clean up shards
+    import shutil
+    shutil.rmtree(shard_dir)
 
     size_mb = out_path.stat().st_size / 1e6
     print(f"\nSaved to {out_path} ({size_mb:.0f} MB)")
