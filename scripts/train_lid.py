@@ -639,17 +639,25 @@ def train_coarse(stem, lid_coarse, dataset, train_set, val_set, args, device, co
         best_val_acc = resume_state.get("best_val_acc", 0.0)
         print(f"Resumed from epoch {start_epoch - 1}, val acc: {last_val_acc:.1f}%, best: {best_val_acc:.1f}%\n")
 
+    # AMP setup
+    use_amp = device.type == "cuda"
+    amp_dtype = torch.bfloat16 if (use_amp and torch.cuda.is_bf16_supported()) else torch.float16
+    if use_amp:
+        torch.backends.cudnn.benchmark = True
+        print(f"AMP: {amp_dtype}, cudnn.benchmark: True")
+
     for epoch in range(start_epoch, args.epochs + 1):
         stem.train()
         lid_coarse.train()
         total_loss = correct = total = 0
 
         for images, _, group_labels in train_loader:
-            images = images.to(device)
-            group_labels = group_labels.to(device) if isinstance(group_labels, torch.Tensor) else torch.tensor(group_labels, dtype=torch.long, device=device)
+            images = images.to(device, non_blocking=True)
+            group_labels = group_labels.to(device, non_blocking=True) if isinstance(group_labels, torch.Tensor) else torch.tensor(group_labels, dtype=torch.long, device=device)
 
-            logits = forward_to_lid(images)
-            loss = F.cross_entropy(logits, group_labels)
+            with torch.amp.autocast(device.type, enabled=use_amp, dtype=amp_dtype):
+                logits = forward_to_lid(images)
+                loss = F.cross_entropy(logits, group_labels)
 
             optimizer.zero_grad()
             loss.backward()
@@ -960,6 +968,8 @@ def main():
                         help="Balance samples per GROUP instead of per script")
     parser.add_argument("--augment", action="store_true",
                         help="Apply RandAugmentOCR to training images")
+    parser.add_argument("--compile", action="store_true",
+                        help="Use torch.compile for faster training")
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--device", type=str, default="auto")
@@ -1080,6 +1090,17 @@ def main():
 
     lid_coarse = LIDCoarse(in_channels=lid_in_channels, num_groups=dataset.num_groups).to(device)
     print(f"LID-1 (coarse): {sum(p.numel() for p in lid_coarse.parameters()):,} params")
+
+    # torch.compile
+    if args.compile and hasattr(torch, "compile"):
+        print("Compiling model with torch.compile()...")
+        stem = torch.compile(stem)
+        lid_coarse = torch.compile(lid_coarse)
+        color_proj = torch.compile(color_proj)
+        if shared_swa is not None:
+            swa_proj = torch.compile(swa_proj)
+            shared_swa = torch.compile(shared_swa)
+        print("  Done.")
 
     # Resume
     coarse_resume = None
