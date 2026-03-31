@@ -989,16 +989,25 @@ def main():
             # Shard directory from generate_lid_data.py
             print(f"Loading shards from {data_path}/...")
             meta = torch.load(data_path / "metadata.pt", weights_only=False)
+            shard_files = sorted(data_path.glob("shard_*.pt"))
+            print(f"  {len(shard_files)} shards found")
+
+            from concurrent.futures import ThreadPoolExecutor
+            def _load_shard(p):
+                return torch.load(p, weights_only=False)
+
             all_imgs, all_slabels, all_glabels = [], [], []
-            for shard_path in sorted(data_path.glob("shard_*.pt")):
-                shard = torch.load(shard_path, weights_only=False)
-                all_imgs.append(shard["images"])
-                all_slabels.append(shard["script_labels"])
-                all_glabels.append(shard["group_labels"])
-                print(f"  Loaded {shard_path.name} ({shard['images'].shape[0]} images)")
+            with ThreadPoolExecutor(max_workers=16) as pool:
+                for shard in pool.map(_load_shard, shard_files):
+                    all_imgs.append(shard["images"])
+                    all_slabels.append(shard["script_labels"])
+                    all_glabels.append(shard["group_labels"])
+
+            print(f"  Concatenating...")
             images = torch.cat(all_imgs)
             script_labels = torch.cat(all_slabels)
             group_labels = torch.cat(all_glabels)
+            del all_imgs, all_slabels, all_glabels
         else:
             # Single .pt file
             print(f"Loading data from {data_path}...")
