@@ -554,11 +554,11 @@ class MultiScriptDataset(Dataset):
                 target = samples_per_script
             tasks.append((script, target))
 
-        # Parallel generation using processes (FreeType is not thread-safe)
+        # Parallel generation — one process per script, return all at once
         from concurrent.futures import ProcessPoolExecutor, as_completed
         import os
 
-        n_workers = min(os.cpu_count() or 4, 16)
+        n_workers = min(len(tasks), os.cpu_count() or 4)
         self.images = []
         self.script_labels = []
         self.group_labels = []
@@ -568,15 +568,9 @@ class MultiScriptDataset(Dataset):
             for script, target in tasks:
                 fonts = self.script_fonts[script]
                 words = SCRIPT_SAMPLES.get(script, ["placeholder"])
-                # Split into chunks for parallelism
-                chunk_size = max(200, target // n_workers)
-                remaining = target
-                while remaining > 0:
-                    batch = min(chunk_size, remaining)
-                    f = pool.submit(_generate_batch,
-                                    (script, batch, fonts, words, self.height, self.max_width, augment))
-                    futures[f] = script
-                    remaining -= batch
+                f = pool.submit(_generate_batch,
+                                (script, target, fonts, words, self.height, self.max_width, augment))
+                futures[f] = script
 
             for future in as_completed(futures):
                 script = futures[future]
@@ -586,18 +580,7 @@ class MultiScriptDataset(Dataset):
                     self.images.append(t)
                     self.script_labels.append(self.script_to_idx[script])
                     self.group_labels.append(self.group_to_idx[group])
-
-        # Print per-script counts
-        from collections import Counter
-        script_counts = Counter()
-        for idx in self.script_labels:
-            for s, i in self.script_to_idx.items():
-                if i == idx:
-                    script_counts[s] += 1
-                    break
-        for script in self.active_scripts:
-            group = SCRIPT_TO_GROUP[script]
-            print(f"  {script:<15} {script_counts[script]:>5} images  (group: {group})")
+                print(f"  {script:<15} {len(batch_tensors):>5} images  (group: {group})")
 
         self.total = len(self.images)
         print(f"Total: {self.total} images, {self.num_scripts} scripts, {self.num_groups} groups\n")
