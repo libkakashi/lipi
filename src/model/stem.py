@@ -62,23 +62,28 @@ class _ResBlock(nn.Module):
 
 
 class ResNetStem(nn.Module):
-    """Heavier stem with residual blocks — ~500K params.
+    """Heavier stem with residual blocks.
 
     Extracts richer low-level features before attention stages.
     Better for larger backbones (25M+) where the stem cost is small
     relative to total params but the feature quality matters.
 
-    Structure:
+    depth=2 (default, ~500K params):
       Conv 3→64, stride 2      (32×W → 16×W/2)
       ResBlock 64               (refine)
       Conv 64→128, stride 2     (16×W/2 → 8×W/4)
       ResBlock 128              (refine)
       Conv 128→out_channels     (project to stage 1 dim)
+
+    depth=3 (~630K params):
+      Same as depth=2, plus an extra ResBlock at out_channels.
+      Larger receptive field helps LID distinguish similar scripts.
     """
 
-    def __init__(self, in_channels: int = INPUT_CHANNELS, out_channels: int = 64):
+    def __init__(self, in_channels: int = INPUT_CHANNELS, out_channels: int = 64,
+                 depth: int = 2):
         super().__init__()
-        self.layers = nn.Sequential(
+        layers = [
             # Downsample 2× and expand channels
             nn.Conv2d(in_channels, 64, kernel_size=3, stride=2, padding=1, bias=False),
             nn.GroupNorm(1, 64),
@@ -95,7 +100,10 @@ class ResNetStem(nn.Module):
             nn.Conv2d(128, out_channels, kernel_size=1, bias=False),
             nn.GroupNorm(1, out_channels),
             nn.GELU(),
-        )
+        ]
+        if depth >= 3:
+            layers.append(_ResBlock(out_channels))
+        self.layers = nn.Sequential(*layers)
 
     def forward(self, x: Tensor) -> Tensor:
         return self.layers(x)

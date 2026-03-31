@@ -1,24 +1,24 @@
 """
 Lipi MoE Vision Encoder.
 
-Full hierarchical MoE architecture:
+Full hierarchical MoE architecture (lipi-r1-383M-69A):
     Input: (B, 3, 32, W)
-    -> LearnedColorProjection 3→1
+    -> ColorProjection: L+a baseline + learned RGB correction → 2ch
     -> ResNet Stem 1→64ch, stride 4×4
-    -> LID-1: coarse group classification (6 groups)
+    -> LID-1: coarse group classification (8 groups)
     -> Channel projection 64→dim1
     -> Stage 1 MoE: N × SWABlockMoE (shared attention, group-specific expert MLPs)
     -> Height pooling 8→4
-    -> LID-2: fine script classification (17 scripts)
+    -> LID-2: fine script classification (18 scripts, diagnostic only)
     -> Channel projection dim1→dim2
     -> Stage 2 MoE: M × SWABlockMoE (shared attention, group-specific expert MLPs)
     -> Height pooling 4→1
     -> LayerNorm
     -> Per-script BiLSTM CTC heads
 
-Stage 1 MoE: 6 group-level experts (one per script family)
-Stage 2 MoE: 6 group-level experts (script-level would be too expensive)
-CTC heads: 17 per-script heads (cheap, ~3.4M each)
+Stage 1 MoE: 8 group-level experts (one per script family)
+Stage 2 MoE: 8 group-level experts (script-level would be too expensive)
+CTC heads: 18 per-script heads (cheap, ~3.2M each)
 
 During training: ground-truth group/script IDs route to experts.
 During inference: LID-1/LID-2 predictions route to experts.
@@ -28,7 +28,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-from src.data.color import MODE, LearnedColorProjection
+from src.data.color import ColorProjection
 from src.model.stem import ResNetStem
 from src.model.pooling import LearnedHeightPooling
 from src.model.attention import SWABlockMoE
@@ -46,7 +46,7 @@ class ScriptCTCHeads(nn.Module):
     Each script has its own head because vocab sizes may differ.
     """
 
-    def __init__(self, enc_dim: int, vocab_size: int, hidden_dim: int = 256,
+    def __init__(self, enc_dim: int, vocab_size: int, hidden_dim: int = 246,
                  num_layers: int = 2, dropout: float = 0.1):
         super().__init__()
         self.heads = nn.ModuleDict()
@@ -95,6 +95,7 @@ class LipiMoEEncoder(nn.Module):
     def __init__(
         self,
         stem_channels: int = 64,
+        stem_depth: int = 3,
         stage1_dim: int = 288,
         stage1_heads: int = 9,
         stage1_blocks: int = 8,
@@ -110,7 +111,7 @@ class LipiMoEEncoder(nn.Module):
         num_groups: int = NUM_GROUPS,
         num_scripts: int = NUM_SCRIPTS,
         vocab_size: int = 171,
-        head_hidden: int = 256,
+        head_hidden: int = 246,
         head_layers: int = 2,
         head_dropout: float = 0.1,
     ):
@@ -118,14 +119,11 @@ class LipiMoEEncoder(nn.Module):
         self.num_groups = num_groups
         self.num_scripts = num_scripts
 
-        # Color projection (learned 3→1 or identity for L+a mode)
-        if MODE == "learned":
-            self.color_proj = LearnedColorProjection()
-        else:
-            self.color_proj = None
+        # Color projection: L+a baseline + learned correction → 2ch
+        self.color_proj = ColorProjection()
 
         # Stem
-        self.stem = ResNetStem(out_channels=stem_channels)
+        self.stem = ResNetStem(out_channels=stem_channels, depth=stem_depth)
 
         # LID-1: coarse group classifier (reads stem output)
         self.lid_coarse = LIDCoarse(in_channels=stem_channels, num_groups=num_groups)
@@ -212,11 +210,8 @@ class LipiMoEEncoder(nn.Module):
         W = images.shape[3]
         T = W // 4
 
-        # Color projection
-        if self.color_proj is not None:
-            x = self.color_proj(images)
-        else:
-            x = images
+        # Color projection: L+a + learned correction
+        x = self.color_proj(images)
 
         # Stem: (B, C_in, 32, W) → (B, 64, 8, W/4)
         stem_out = self.stem(x)
@@ -241,7 +236,7 @@ class LipiMoEEncoder(nn.Module):
             script_ids = script_logits.argmax(dim=-1)
 
         # Derive group_ids from script_ids for Stage 2 routing
-        stage2_group_ids = self._script_to_group.to(script_ids.device)[script_ids]
+        stage2_group_ids = self._script_to_group[script_ids]
 
         # Height pooling 8→4
         C1 = x.shape[-1]

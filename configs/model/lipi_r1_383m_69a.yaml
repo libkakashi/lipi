@@ -1,0 +1,68 @@
+# lipi-r1-383M-69A — Lipi Recognition Model v1
+# 383M total params, 69M active per request
+# Hierarchical MoE: 8 group experts, 18 script-specific CTC heads
+
+color_projection:
+  type: learned
+  hidden: 64  # 3→64→32→1, ~2.4K params
+
+stem:
+  type: resnet
+  in_channels: 1  # from color projection
+  out_channels: 64
+  depth: 3  # extra ResBlock for better LID features
+
+lid_coarse:
+  in_channels: 64
+  num_groups: 8
+  # ~17K params, MLP: 64→128→64→8
+
+stage1:
+  dim: 288
+  num_heads: 9
+  head_dim: 32
+  blocks: 8
+  window_h: 4
+  window_w: 4
+  mlp_ratio: 4
+  moe: true
+  num_experts: 8  # one per group
+  # ~46M params (8 expert MLPs per block)
+
+height_pool_1: 8 -> 4
+
+lid_fine:
+  in_dim: 288
+  num_scripts: 18
+  # ~30K params, MLP: 288→96→18 (diagnostic only, not used in production)
+
+stage2:
+  dim: 576
+  num_heads: 18
+  head_dim: 32
+  blocks: 12
+  window_h: 4
+  window_w: 16
+  mlp_ratio: 4
+  moe: true
+  num_experts: 8  # group-level
+  # ~276M params
+
+height_pool_2: 4 -> 1
+
+ctc_heads:
+  type: bilstm
+  hidden_dim: 246
+  num_layers: 2
+  dropout: 0.1
+  num_scripts: 18
+  # ~56M total, ~3.2M per script
+
+training:
+  loss_weights:
+    ctc: 1.0
+    lid_coarse: 0.1
+
+deployment:
+  total_params: 383M
+  active_params: 69M  # per request

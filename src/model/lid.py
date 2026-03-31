@@ -3,20 +3,19 @@ Script Identification (LID).
 
 Single-stage routing based on visual character set similarity:
 
-  LID-1 (after stem): 9 group classification.
+  LID-1 (after stem): 8 group classification.
     Routes to group-specific expert MLPs + group-specific CTC heads.
     Each group has a unified charset covering all scripts in it.
 
-Groups (9):
+Groups (8):
   1. Latin + Cyrillic (~150 forms, ~3.5B speakers)
   2. Arabic (~120-150 with positional forms, ~500M)
   3. Hebrew (~30-40, ~9M)
   4. CJK (~5000-8000, ~1.5B)
-  5. N+E Indian Brahmic (~400-500, Devanagari/Gurmukhi/Gujarati/Bengali/Odia, ~1B+)
-  6. South Indian Brahmic (~250-300, Kannada/Telugu/Malayalam, ~200M)
-  7. Tamil (~70-80, ~85M)
-  8. SE Asian Brahmic (~270-320, Thai/Lao/Khmer/Burmese, ~150M)
-  9. Emoji (~4000-5000, universal)
+  5. N+E Indian Brahmic (~400-500, Devanagari/Gurmukhi/Gujarati/Bengali, ~1B+)
+  6. South Indian Brahmic (~320-380, Kannada/Telugu/Malayalam/Tamil, ~285M)
+  7. SE Asian Brahmic (~270-320, Thai/Lao, ~90M)
+  8. Emoji (~4000-5000, universal)
 """
 
 import torch
@@ -31,7 +30,7 @@ SCRIPTS = [
     "latin",       # 0
     "cyrillic",    # 1
     "greek",       # 2
-    # Group 2: Arabic
+    # Group 2: Arabic (incl. Urdu, Persian extensions)
     "arabic",      # 3
     # Group 3: Hebrew
     "hebrew",      # 4
@@ -43,38 +42,33 @@ SCRIPTS = [
     "gurmukhi",    # 8
     "gujarati",    # 9
     "bengali",     # 10
-    "odia",        # 11
-    # Group 6: South Indian Brahmic
-    "kannada",     # 12
-    "telugu",      # 13
-    "malayalam",   # 14
-    # Group 7: Tamil
-    "tamil",       # 15
-    # Group 8: SE Asian Brahmic
-    "thai",        # 16
-    "lao",         # 17
-    "khmer",       # 18
-    "burmese",     # 19
-    # Group 9: Emoji
-    "emoji",       # 20
+    # Group 6: South Indian Brahmic (incl. Tamil)
+    "kannada",     # 11
+    "telugu",      # 12
+    "malayalam",   # 13
+    "tamil",       # 14
+    # Group 7: SE Asian Brahmic
+    "thai",        # 15
+    "lao",         # 16
+    # Group 8: Emoji
+    "emoji",       # 17
 ]
 
 SCRIPT_TO_ID = {name: i for i, name in enumerate(SCRIPTS)}
 NUM_SCRIPTS = len(SCRIPTS)
 
 
-# --- Groups (9 families) ---
+# --- Groups (8 families) ---
 
 GROUPS = [
     "latin_cyrillic",    # 0  ~150 forms
     "arabic",            # 1  ~120-150
     "hebrew",            # 2  ~30-40
     "cjk",               # 3  ~5000-8000
-    "ne_indic",          # 4  ~400-500 (Devanagari, Gurmukhi, Gujarati, Bengali, Odia)
-    "south_indic",       # 5  ~250-300 (Kannada, Telugu, Malayalam)
-    "tamil",             # 6  ~70-80
-    "southeast_asian",   # 7  ~270-320 (Thai, Lao, Khmer, Burmese)
-    "emoji",             # 8  ~4000-5000
+    "ne_indic",          # 4  ~400-500 (Devanagari, Gurmukhi, Gujarati, Bengali)
+    "south_indic",       # 5  ~320-380 (Kannada, Telugu, Malayalam, Tamil)
+    "southeast_asian",   # 6  ~270-320 (Thai, Lao)
+    "emoji",             # 7  ~4000-5000
 ]
 
 GROUP_TO_ID = {name: i for i, name in enumerate(GROUPS)}
@@ -93,15 +87,12 @@ SCRIPT_TO_GROUP = {
     "gurmukhi": "ne_indic",
     "gujarati": "ne_indic",
     "bengali": "ne_indic",
-    "odia": "ne_indic",
     "kannada": "south_indic",
     "telugu": "south_indic",
     "malayalam": "south_indic",
-    "tamil": "tamil",
+    "tamil": "south_indic",
     "thai": "southeast_asian",
     "lao": "southeast_asian",
-    "khmer": "southeast_asian",
-    "burmese": "southeast_asian",
     "emoji": "emoji",
 }
 
@@ -111,10 +102,9 @@ GROUP_SCRIPTS = {
     "arabic": ["arabic"],
     "hebrew": ["hebrew"],
     "cjk": ["cjk", "korean"],
-    "ne_indic": ["devanagari", "gurmukhi", "gujarati", "bengali", "odia"],
-    "south_indic": ["kannada", "telugu", "malayalam"],
-    "tamil": ["tamil"],
-    "southeast_asian": ["thai", "lao", "khmer", "burmese"],
+    "ne_indic": ["devanagari", "gurmukhi", "gujarati", "bengali"],
+    "south_indic": ["kannada", "telugu", "malayalam", "tamil"],
+    "southeast_asian": ["thai", "lao"],
     "emoji": ["emoji"],
 }
 
@@ -127,14 +117,14 @@ def script_to_group_id(script: str) -> int:
 class LIDCoarse(nn.Module):
     """LID-1: Coarse group classifier on stem features.
 
-    Global average pool + MLP. Separates 6 visually distinct families.
+    Global average pool + MLP. Separates 8 visually distinct families.
     Hidden dim scales with input — enough capacity to disentangle script
     identity from the rich visual features in stem output.
     """
 
     def __init__(self, in_channels: int = 64, num_groups: int = NUM_GROUPS):
         super().__init__()
-        hidden = in_channels
+        hidden = in_channels * 2  # 128 for default 64-ch stem
         self.classifier = nn.Sequential(
             nn.Linear(in_channels, hidden),
             nn.ReLU(),

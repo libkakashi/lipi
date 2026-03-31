@@ -70,15 +70,12 @@ SCRIPT_TO_LANG = {
     "gurmukhi": "pa",
     "gujarati": "gu",
     "bengali": "bn_as",
-    "odia": "or",
     "kannada": "kn",
     "telugu": "te",
     "malayalam": "ml",
     "tamil": "ta",
     "thai": "en",
     "lao": "en",
-    "khmer": "en",
-    "burmese": "en",
     "emoji": "en",
 }
 
@@ -89,30 +86,45 @@ SCRIPT_TO_LANG = {
 WORD_LIST_DIR = Path(__file__).parent.parent / "training_data" / "word_lists"
 
 
+# Extra language word lists that belong to each script
+_SCRIPT_EXTRA_FILES = {
+    "latin": ["english_common.txt", "french.txt", "german.txt", "spanish.txt",
+              "turkish.txt", "vietnamese.txt", "italian.txt", "portuguese.txt",
+              "polish.txt", "dutch.txt", "romanian.txt", "czech.txt",
+              "hungarian.txt", "swedish.txt", "norwegian.txt", "danish.txt",
+              "finnish.txt", "croatian.txt", "indonesian.txt", "malay.txt",
+              "swahili.txt"],
+    "cyrillic": ["ukrainian.txt"],
+    "devanagari": ["marathi.txt"],
+    "arabic": ["persian.txt", "urdu.txt"],
+    "cjk": ["japanese.txt"],
+}
+
+
 def load_word_list(script: str, fallback: list[str]) -> list[str]:
-    """Load word list from file if available, else use fallback.
+    """Load and merge all word list files for a script."""
+    files = [WORD_LIST_DIR / f"{script}.txt"]
+    for extra in _SCRIPT_EXTRA_FILES.get(script, []):
+        files.append(WORD_LIST_DIR / extra)
 
-    Checks training_data/word_lists/{script}.txt first.
-    For latin, also checks english_common.txt.
-    Filters to words with 2-15 chars, deduplicates.
-    """
-    candidates = [WORD_LIST_DIR / f"{script}.txt"]
-    if script == "latin":
-        candidates.append(WORD_LIST_DIR / "english_common.txt")
-
-    for path in candidates:
+    words = []
+    loaded_files = []
+    for path in files:
         if path.exists():
-            words = []
+            count_before = len(words)
             for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
                 w = line.strip()
                 if 2 <= len(w) <= 15 and w and not w[0].isdigit():
                     words.append(w)
-            if len(words) >= 50:
-                words = list(set(words))
-                random.shuffle(words)
-                print(f"    Loaded {len(words)} words from {path.name}")
-                return words
+            if len(words) > count_before:
+                loaded_files.append(f"{path.name}({len(words) - count_before})")
 
+    if words:
+        words = list(set(words))
+        random.shuffle(words)
+        if loaded_files:
+            print(f"    {script}: {len(words)} unique words from {', '.join(loaded_files)}")
+        return words
     return fallback
 
 
@@ -173,11 +185,6 @@ _SCRIPT_SAMPLES_FALLBACK = {
         "ਫੈਸਲਾ", "ਕੇਸ", "ਵਕੀਲ", "ਸਰਕਾਰ", "ਪੰਜਾਬੀ",
         "ਚੰਡੀਗੜ੍ਹ", "ਸਮਾਂ", "ਬੰਦਾ", "ਦੇਸ਼", "ਘਰ", "ਦਿਨ",
     ],
-    "odia": [
-        "ନମସ୍କାର", "ନ୍ୟାୟ", "ଅଦାଲତ", "ଆଇନ", "ଅଧିକାର",
-        "ରାୟ", "ମାମଲା", "ଓକିଲ", "ସରକାର", "ଓଡ଼ିଆ",
-        "ଭୁବନେଶ୍ୱର", "ସମୟ", "ମଣିଷ", "ଦେଶ", "ଘର", "ଦିନ",
-    ],
     "arabic": [
         "مرحبا", "عدالة", "محكمة", "قانون", "حق", "حكم",
         "قضية", "محامي", "حكومة", "عربي", "القاهرة", "وقت",
@@ -208,16 +215,6 @@ _SCRIPT_SAMPLES_FALLBACK = {
         "ຄົນ", "ເຮືອນ", "ນ້ຳ", "ເວລາ", "ວຽກ", "ໂຮງຮຽນ",
         "ຕະຫຼາດ", "ທາງ", "ພູ", "ແມ່ນ້ຳ", "ກິນ", "ດື່ມ",
     ],
-    "khmer": [
-        "សួស្តី", "ច្បាប់", "តុលាការ", "ប្រទេស", "ទីក្រុង",
-        "មនុស្ស", "ផ្ទះ", "ទឹក", "ពេលវេលា", "ការងារ", "សាលារៀន",
-        "ផ្សារ", "ផ្លូវ", "ភ្នំ", "ទន្លេ", "ញ៉ាំ", "ផឹក",
-    ],
-    "burmese": [
-        "မင်္ဂလာပါ", "ဥပဒေ", "တရားရုံး", "နိုင်ငံ", "မြို့",
-        "လူ", "အိမ်", "ရေ", "အချိန်", "အလုပ်", "ကျောင်း",
-        "ဈေး", "လမ်း", "တောင်", "မြစ်", "စား", "သောက်",
-    ],
 }
 
 # Populated at runtime by load_script_samples()
@@ -237,9 +234,9 @@ def find_fonts_for_script(script: str) -> list[str]:
         "latin": "en", "cyrillic": "ru", "greek": "el",
         "devanagari": "hi", "bengali": "bn", "tamil": "ta",
         "telugu": "te", "kannada": "kn", "malayalam": "ml",
-        "gujarati": "gu", "gurmukhi": "pa", "odia": "or",
+        "gujarati": "gu", "gurmukhi": "pa",
         "arabic": "ar", "hebrew": "he", "cjk": "zh", "korean": "ko",
-        "thai": "th", "lao": "lo", "khmer": "km", "burmese": "my",
+        "thai": "th", "lao": "lo",
     }
     lang = lang_map.get(script)
     if not lang:
@@ -640,9 +637,15 @@ def main():
     parser.add_argument("--train_dir", type=str, nargs="*", default=None,
                         help="LMDB training data directories")
     parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--grad-accum", type=int, default=1,
+                        help="Gradient accumulation steps (effective batch = batch-size * grad-accum)")
     parser.add_argument("--max-width", type=int, default=192)
+    parser.add_argument("--num-workers", type=int, default=-1,
+                        help="DataLoader workers (-1 = auto based on CPU cores)")
+    parser.add_argument("--compile", action="store_true",
+                        help="Use torch.compile() for faster training (requires PyTorch 2.0+)")
     parser.add_argument("--device", type=str, default="auto",
                         help="Device: auto, cuda, mps, cpu")
     parser.add_argument("--save-dir", type=str, default="checkpoints/moe")
@@ -660,6 +663,10 @@ def main():
     parser.add_argument("--stage1-blocks", type=int, default=8)
     parser.add_argument("--stage2-dim", type=int, default=576)
     parser.add_argument("--stage2-blocks", type=int, default=12)
+    parser.add_argument("--stem-depth", type=int, default=3, choices=[2, 3],
+                        help="ResNet stem depth: 2 (default) or 3 (extra ResBlock)")
+    parser.add_argument("--head-hidden", type=int, default=246,
+                        help="CTC BiLSTM hidden dim (default: 246)")
 
     # Loss weights
     parser.add_argument("--w-ctc", type=float, default=1.0, help="CTC loss weight")
@@ -738,19 +745,30 @@ def main():
     )
     print(f"Train: {n_train}, Val: {n_val}")
 
-    n_workers = 4 if device.type == "cuda" else 0
+    if args.num_workers < 0:
+        import os
+        n_workers = min(os.cpu_count() or 4, 16) if device.type == "cuda" else 0
+    else:
+        n_workers = args.num_workers
+    is_cuda = device.type == "cuda"
     train_loader = DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True,
         collate_fn=collate_moe, num_workers=n_workers,
-        pin_memory=(device.type == "cuda"),
+        pin_memory=is_cuda,
+        persistent_workers=n_workers > 0,
+        prefetch_factor=4 if n_workers > 0 else None,
     )
     val_loader = DataLoader(
         val_dataset, batch_size=args.batch_size, shuffle=False,
         collate_fn=collate_moe, num_workers=n_workers,
+        pin_memory=is_cuda,
+        persistent_workers=n_workers > 0,
+        prefetch_factor=4 if n_workers > 0 else None,
     )
 
     # ---- Build model ----
     model = LipiMoEEncoder(
+        stem_depth=args.stem_depth,
         stage1_dim=args.stage1_dim,
         stage1_heads=args.stage1_dim // 32,
         stage1_blocks=args.stage1_blocks,
@@ -758,6 +776,7 @@ def main():
         stage2_heads=args.stage2_dim // 32,
         stage2_blocks=args.stage2_blocks,
         vocab_size=tokenizer.vocab_size,
+        head_hidden=args.head_hidden,
     ).to(device)
 
     total_params = sum(p.numel() for p in model.parameters())
@@ -770,13 +789,21 @@ def main():
     use_amp = device.type in ("cuda", "mps")
     if device.type == "cuda":
         amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-        scaler = torch.amp.GradScaler("cuda", enabled=True)
+        # GradScaler only needed for fp16, not bf16
+        use_scaler = amp_dtype == torch.float16
+        scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
     elif device.type == "mps":
         amp_dtype = torch.float16
         scaler = torch.amp.GradScaler(enabled=False)
     else:
         amp_dtype = torch.float32
         scaler = torch.amp.GradScaler(enabled=False)
+
+    # ---- torch.compile ----
+    if args.compile and hasattr(torch, "compile"):
+        print("Compiling model with torch.compile()...")
+        model = torch.compile(model)
+        print("  Done.")
 
     # ---- Scheduler ----
     steps_per_epoch = len(train_loader)
@@ -815,10 +842,13 @@ def main():
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
+    eff_batch = args.batch_size * args.grad_accum
     print(f"\n{'=' * 60}")
-    print(f"TRAINING: epochs {start_epoch}-{args.epochs}, lr={args.lr}, "
-          f"batch={args.batch_size}")
-    print(f"Losses: CTC x{args.w_ctc} + LID1 x{args.w_lid1} + LID2 x{args.w_lid2}")
+    print(f"TRAINING: epochs {start_epoch}-{args.epochs}, lr={args.lr}")
+    print(f"  Batch: {args.batch_size} x {args.grad_accum} accum = {eff_batch} effective")
+    print(f"  Workers: {n_workers}, AMP: {amp_dtype}, Scaler: {scaler.is_enabled()}")
+    print(f"  Compile: {args.compile and hasattr(torch, 'compile')}")
+    print(f"  Losses: CTC x{args.w_ctc} + LID1 x{args.w_lid1} + LID2 x{args.w_lid2}")
     print(f"{'=' * 60}")
 
     start_time = time.time()
@@ -880,16 +910,23 @@ def main():
                     + args.w_lid1 * lid1_loss.float()
                     + args.w_lid2 * lid2_loss.float())
 
-            # Backward + optimize
-            optimizer.zero_grad()
+            # Scale loss for gradient accumulation
+            if args.grad_accum > 1:
+                loss = loss / args.grad_accum
+
+            # Backward
             scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-            old_scale = scaler.get_scale()
-            scaler.step(optimizer)
-            scaler.update()
-            if scaler.get_scale() >= old_scale:
-                scheduler.step()
+
+            # Optimizer step every grad_accum batches
+            if (batch_idx + 1) % args.grad_accum == 0 or (batch_idx + 1) == len(train_loader):
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                old_scale = scaler.get_scale()
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
+                if scaler.get_scale() >= old_scale:
+                    scheduler.step()
 
             # Track losses
             epoch_ctc_loss += loss_ctc.item()

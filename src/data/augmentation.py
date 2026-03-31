@@ -1,322 +1,535 @@
 """
 Training Augmentations for OCR.
 
-RandAugment-style augmentation pipeline with OCR-specific transforms.
-All transforms preserve text readability while adding visual diversity.
+Simulates real-world conditions for text in the wild:
+  - Documents: scans, photocopies, aged paper, folds
+  - Phone captures: perspective, blur, shadows, fingers
+  - Signs & banners: outdoor lighting, weather
+  - Handwriting: ink variation, smudges
+
+RandAugment-style: randomly applies N transforms per image.
+Each op is designed to degrade but never destroy readability.
 """
 
 import io
+import math
 import random
 
 import numpy as np
-from PIL import Image, ImageFilter, ImageEnhance
+from PIL import Image, ImageFilter, ImageEnhance, ImageDraw
 from typing import Callable
 
 
-def jpeg_compress(img: Image.Image, quality_range: tuple = (30, 90)) -> Image.Image:
-    """Apply JPEG compression artifacts."""
-    quality = random.randint(*quality_range)
+# =========================================================================
+# Image quality
+# =========================================================================
+
+def jpeg_compress(img: Image.Image) -> Image.Image:
+    """JPEG artifacts — scanned/shared documents."""
+    quality = random.randint(20, 80)
     buffer = io.BytesIO()
     img.save(buffer, format="JPEG", quality=quality)
     buffer.seek(0)
     return Image.open(buffer).convert("RGB")
 
 
-def gaussian_blur(img: Image.Image, sigma_range: tuple = (0.5, 2.0)) -> Image.Image:
-    """Apply Gaussian blur."""
-    sigma = random.uniform(*sigma_range)
-    return img.filter(ImageFilter.GaussianBlur(radius=sigma))
+def blur(img: Image.Image) -> Image.Image:
+    """Gaussian or motion blur — out of focus, camera shake."""
+    if random.random() < 0.6:
+        # Gaussian
+        sigma = random.uniform(0.3, 1.8)
+        return img.filter(ImageFilter.GaussianBlur(radius=sigma))
+    else:
+        # Motion blur (horizontal or vertical)
+        size = random.choice([3, 5])
+        kernel = [0] * (size * size)
+        mid = size // 2
+        horizontal = random.random() < 0.7
+        for i in range(size):
+            if horizontal:
+                kernel[mid * size + i] = 1
+            else:
+                kernel[i * size + mid] = 1
+        return img.filter(ImageFilter.Kernel(size=(size, size), kernel=kernel, scale=size, offset=0))
 
 
-def salt_pepper_noise(img: Image.Image, amount: float = 0.02) -> Image.Image:
-    """Add salt and pepper noise."""
-    arr = np.array(img)
-    # Salt
-    num_salt = int(amount * arr.size / 2)
-    coords = tuple(np.random.randint(0, d, num_salt) for d in arr.shape[:2])
-    arr[coords[0], coords[1]] = 255
-    # Pepper
-    coords = tuple(np.random.randint(0, d, num_salt) for d in arr.shape[:2])
-    arr[coords[0], coords[1]] = 0
-    return Image.fromarray(arr)
-
-
-def brightness_jitter(img: Image.Image, factor_range: tuple = (0.7, 1.3)) -> Image.Image:
-    """Adjust brightness."""
-    factor = random.uniform(*factor_range)
-    return ImageEnhance.Brightness(img).enhance(factor)
-
-
-def contrast_jitter(img: Image.Image, factor_range: tuple = (0.7, 1.3)) -> Image.Image:
-    """Adjust contrast."""
-    factor = random.uniform(*factor_range)
-    return ImageEnhance.Contrast(img).enhance(factor)
-
-
-def rotation(img: Image.Image, max_angle: float = 3.0) -> Image.Image:
-    """Slight rotation."""
-    angle = random.uniform(-max_angle, max_angle)
-    return img.rotate(angle, resample=Image.BILINEAR, expand=False, fillcolor=(255, 255, 255))
-
-
-def perspective_warp(img: Image.Image, strength: float = 0.05) -> Image.Image:
-    """Simulate camera angle perspective distortion."""
+def low_resolution(img: Image.Image) -> Image.Image:
+    """Low res — distant photo, thumbnail, cheap camera."""
     w, h = img.size
-    s = strength
+    scale = random.uniform(0.4, 0.75)
+    small = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.BILINEAR)
+    return small.resize((w, h), Image.BILINEAR)
 
-    # Random perspective corners
+
+def photocopy(img: Image.Image) -> Image.Image:
+    """Photocopy degradation — contrast boost + speckle noise."""
+    arr = np.array(img, dtype=np.float32)
+    # Boost contrast
+    mean = arr.mean()
+    arr = mean + (arr - mean) * random.uniform(1.1, 1.3)
+    # Speckle
+    noise = np.random.normal(0, random.uniform(3, 8), arr.shape)
+    arr = arr + noise
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+
+
+# =========================================================================
+# Lighting & exposure
+# =========================================================================
+
+def exposure_jitter(img: Image.Image) -> Image.Image:
+    """Brightness + contrast variation — auto-exposure, different lighting."""
+    img = ImageEnhance.Brightness(img).enhance(random.uniform(0.6, 1.4))
+    img = ImageEnhance.Contrast(img).enhance(random.uniform(0.6, 1.4))
+    return img
+
+
+def uneven_lighting(img: Image.Image) -> Image.Image:
+    """Shadow gradient or spotlight — desk lamp, window, overhead light."""
+    arr = np.array(img, dtype=np.float32)
+    h, w = arr.shape[:2]
+    strength = random.uniform(0.4, 0.75)
+
+    style = random.choice(["gradient", "radial"])
+    if style == "gradient":
+        direction = random.choice(["left", "right", "top", "bottom"])
+        if direction in ("left", "right"):
+            g = np.linspace(strength, 1.0, w) if direction == "left" else np.linspace(1.0, strength, w)
+            mask = g[np.newaxis, :]
+        else:
+            g = np.linspace(strength, 1.0, h) if direction == "top" else np.linspace(1.0, strength, h)
+            mask = g[:, np.newaxis]
+        arr = arr * mask[:, :, np.newaxis] if mask.ndim == 2 else arr * np.expand_dims(mask, -1)
+    else:
+        # Radial spotlight
+        cx = random.uniform(0.15, 0.85) * w
+        cy = random.uniform(0.15, 0.85) * h
+        radius = random.uniform(0.4, 0.9) * max(w, h)
+        y_coords, x_coords = np.mgrid[0:h, 0:w]
+        dist = np.sqrt((x_coords - cx) ** 2 + (y_coords - cy) ** 2)
+        light = 1.0 - (1.0 - strength) * np.clip(dist / radius, 0, 1)
+        arr = arr * light[:, :, np.newaxis]
+
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+
+
+def glare(img: Image.Image) -> Image.Image:
+    """Flash or surface reflection — phone flash, laminated surface.
+
+    Kept mild — brightens an area but text remains readable.
+    """
+    arr = np.array(img, dtype=np.float32)
+    h, w = arr.shape[:2]
+    cx = random.uniform(0.2, 0.8) * w
+    cy = random.uniform(0.2, 0.8) * h
+    radius = random.uniform(0.15, 0.4) * max(w, h)
+    intensity = random.uniform(0.15, 0.35)  # mild — never wash out text
+    y_coords, x_coords = np.mgrid[0:h, 0:w]
+    dist = np.sqrt((x_coords - cx) ** 2 + (y_coords - cy) ** 2)
+    glow = intensity * np.exp(-0.5 * (dist / radius) ** 2)
+    arr = arr + glow[:, :, np.newaxis] * 255
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+
+
+def striped_shadow(img: Image.Image) -> Image.Image:
+    """Shadows from blinds or fingers — parallel dark bands."""
+    arr = np.array(img, dtype=np.float32)
+    h, w = arr.shape[:2]
+    num_stripes = random.randint(2, 5)
+    stripe_width = random.uniform(0.04, 0.1) * h
+    darkness = random.uniform(0.5, 0.75)
+
+    dim = h
+    for _ in range(num_stripes):
+        pos = random.uniform(0, dim)
+        coords = np.arange(dim)
+        stripe = np.exp(-0.5 * ((coords - pos) / stripe_width) ** 2)
+        mask = 1.0 - (1.0 - darkness) * stripe
+        arr = arr * mask[:, np.newaxis, np.newaxis]
+
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+
+
+# =========================================================================
+# Geometric distortion
+# =========================================================================
+
+def rotation(img: Image.Image) -> Image.Image:
+    """Slight tilt — not-quite-straight scan or photo."""
+    angle = random.uniform(-4, 4)
+    bg = tuple(random.randint(220, 255) for _ in range(3))
+    return img.rotate(angle, resample=Image.BILINEAR, expand=False, fillcolor=bg)
+
+
+def perspective_warp(img: Image.Image) -> Image.Image:
+    """Camera angle — phone held at angle to surface."""
+    w, h = img.size
+    s = random.uniform(0.03, 0.07)
     tl = (random.uniform(0, s * w), random.uniform(0, s * h))
     tr = (w - random.uniform(0, s * w), random.uniform(0, s * h))
     br = (w - random.uniform(0, s * w), h - random.uniform(0, s * h))
     bl = (random.uniform(0, s * w), h - random.uniform(0, s * h))
-
-    coeffs = _find_perspective_coeffs(
-        [(0, 0), (w, 0), (w, h), (0, h)],
-        [tl, tr, br, bl],
-    )
+    coeffs = _find_perspective_coeffs([(0, 0), (w, 0), (w, h), (0, h)], [tl, tr, br, bl])
     return img.transform((w, h), Image.PERSPECTIVE, coeffs, Image.BILINEAR)
 
 
 def _find_perspective_coeffs(src, dst):
-    """Compute perspective transform coefficients."""
     matrix = []
     for s, d in zip(src, dst):
         matrix.append([d[0], d[1], 1, 0, 0, 0, -s[0]*d[0], -s[0]*d[1]])
         matrix.append([0, 0, 0, d[0], d[1], 1, -s[1]*d[0], -s[1]*d[1]])
     A = np.array(matrix, dtype=np.float64)
     B = np.array([s for pair in src for s in pair], dtype=np.float64)
-    res = np.linalg.lstsq(A, B, rcond=None)[0]
-    return tuple(res.tolist())
+    return tuple(np.linalg.lstsq(A, B, rcond=None)[0].tolist())
 
 
-def shadow_gradient(img: Image.Image, direction: str = "random") -> Image.Image:
-    """Apply uneven lighting / shadow gradient."""
-    w, h = img.size
-    arr = np.array(img, dtype=np.float32)
-
-    if direction == "random":
-        direction = random.choice(["left", "right", "top", "bottom"])
-
-    gradient = np.ones((h, w), dtype=np.float32)
-    strength = random.uniform(0.3, 0.7)
-
-    if direction == "left":
-        gradient *= np.linspace(strength, 1.0, w)[np.newaxis, :]
-    elif direction == "right":
-        gradient *= np.linspace(1.0, strength, w)[np.newaxis, :]
-    elif direction == "top":
-        gradient *= np.linspace(strength, 1.0, h)[:, np.newaxis]
-    elif direction == "bottom":
-        gradient *= np.linspace(1.0, strength, h)[:, np.newaxis]
-
-    arr = arr * gradient[:, :, np.newaxis]
-    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
-
-
-def downsample_upsample(img: Image.Image, scale_range: tuple = (0.5, 0.8)) -> Image.Image:
-    """Simulate low resolution by downsampling then upsampling."""
-    w, h = img.size
-    scale = random.uniform(*scale_range)
-    small = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.BILINEAR)
-    return small.resize((w, h), Image.BILINEAR)
-
-
-def motion_blur(img: Image.Image) -> Image.Image:
-    """Horizontal motion blur — simulates camera shake or scanner movement."""
-    size = random.choice([3, 5])
-    kernel = [0] * (size * size)
-    mid = size // 2
-    for i in range(size):
-        kernel[mid * size + i] = 1
-    return img.filter(ImageFilter.Kernel(size=(size, size), kernel=kernel, scale=size, offset=0))
-
-
-def elastic_distortion(img: Image.Image) -> Image.Image:
-    """Simulate ink bleed, paper warping, character deformation."""
-    from scipy.ndimage import gaussian_filter as gf, map_coordinates as mc
-
-    arr = np.array(img, dtype=np.float32)
-    h, w = arr.shape[:2]
-
-    strength = random.uniform(1.0, 3.0)
-    dx = gf(np.random.randn(h, w) * strength, sigma=3)
-    dy = gf(np.random.randn(h, w) * strength, sigma=3)
-
-    x, y = np.meshgrid(np.arange(w), np.arange(h))
-    x_new = np.clip(x + dx, 0, w - 1).astype(np.float32)
-    y_new = np.clip(y + dy, 0, h - 1).astype(np.float32)
-
-    result = np.zeros_like(arr)
-    for c in range(3):
-        result[:, :, c] = mc(arr[:, :, c], [y_new, x_new], order=1, mode='reflect')
-
-    return Image.fromarray(result.astype(np.uint8))
-
-
-def random_erasing(img: Image.Image) -> Image.Image:
-    """Random rectangular cutout — simulates occlusion, stains, tape."""
+def wave_distortion(img: Image.Image) -> Image.Image:
+    """Paper curl, book spine, or baseline wobble — mild wave."""
     arr = np.array(img)
     h, w = arr.shape[:2]
-    if h < 6 or w < 6:
-        return img
-
-    for _ in range(random.randint(1, 3)):
-        rh = random.randint(2, max(3, h // 3))
-        rw = random.randint(2, max(3, w // 6))
-        if h - rh <= 0 or w - rw <= 0:
-            continue
-        ry = random.randint(0, h - rh)
-        rx = random.randint(0, w - rw)
-        fill = random.randint(180, 255)
-        arr[ry:ry+rh, rx:rx+rw] = fill
-
-    return Image.fromarray(arr)
-
-
-def color_jitter(img: Image.Image) -> Image.Image:
-    """Shift hue/saturation — simulates yellowed paper, colored ink, scanner color drift."""
-    # Convert to HSV, jitter, convert back
-    arr = np.array(img, dtype=np.float32)
-
-    # Tint towards yellow/brown (old paper) or blue (photocopy)
-    tint = random.choice(['yellow', 'blue', 'none'])
-    if tint == 'yellow':
-        arr[:, :, 0] = np.clip(arr[:, :, 0] * random.uniform(1.0, 1.1), 0, 255)  # boost red
-        arr[:, :, 1] = np.clip(arr[:, :, 1] * random.uniform(0.95, 1.05), 0, 255)  # slight green
-        arr[:, :, 2] = np.clip(arr[:, :, 2] * random.uniform(0.85, 0.95), 0, 255)  # reduce blue
-    elif tint == 'blue':
-        arr[:, :, 0] = np.clip(arr[:, :, 0] * random.uniform(0.9, 0.95), 0, 255)
-        arr[:, :, 2] = np.clip(arr[:, :, 2] * random.uniform(1.0, 1.1), 0, 255)
-
-    return Image.fromarray(arr.astype(np.uint8))
-
-
-def erosion_dilation(img: Image.Image) -> Image.Image:
-    """Make text thinner or thicker — simulates ink weight variation."""
-    if random.random() < 0.5:
-        # Erosion (thinner text)
-        return img.filter(ImageFilter.MinFilter(size=3))
-    else:
-        # Dilation (thicker text)
-        return img.filter(ImageFilter.MaxFilter(size=3))
-
-
-def paper_texture(img: Image.Image) -> Image.Image:
-    """Add paper grain noise — simulates scanned paper texture."""
-    arr = np.array(img, dtype=np.float32)
-    intensity = random.uniform(3, 15)
-    noise = np.random.normal(0, intensity, arr.shape)
-    arr = np.clip(arr + noise, 0, 255)
-    return Image.fromarray(arr.astype(np.uint8))
-
-
-# All available augmentation transforms
-AUGMENT_OPS: list[Callable] = [
-    # Basic image quality
-    jpeg_compress,
-    gaussian_blur,
-    salt_pepper_noise,
-    brightness_jitter,
-    contrast_jitter,
-    downsample_upsample,
-    # Geometric
-    rotation,
-    perspective_warp,
-    # Real-world degradation
-    shadow_gradient,
-    motion_blur,
-    color_jitter,
-    paper_texture,
-    erosion_dilation,
-    random_erasing,
-]
-
-def paper_warp(img: Image.Image) -> Image.Image:
-    """Simulate paper curling/warping — no scipy needed.
-
-    Uses a sinusoidal displacement to create a wavy distortion,
-    like a page that's not flat on the scanner.
-    """
-    arr = np.array(img)
-    h, w = arr.shape[:2]
-
-    # Horizontal wave (paper curling left-right)
-    amplitude = random.uniform(1.0, 3.0)
-    frequency = random.uniform(1.0, 3.0)
-    phase = random.uniform(0, 2 * np.pi)
+    amplitude = random.uniform(0.5, 2.0)
+    frequency = random.uniform(0.5, 2.5)
+    phase = random.uniform(0, 2 * math.pi)
+    vertical = random.random() < 0.5
 
     result = np.zeros_like(arr)
-    for y in range(h):
-        shift = int(amplitude * np.sin(2 * np.pi * frequency * y / h + phase))
+    if vertical:
         for x in range(w):
-            src_x = min(max(x + shift, 0), w - 1)
-            result[y, x] = arr[y, src_x]
+            shift = int(amplitude * math.sin(2 * math.pi * frequency * x / w + phase))
+            for y in range(h):
+                src_y = min(max(y + shift, 0), h - 1)
+                result[y, x] = arr[src_y, x]
+    else:
+        for y in range(h):
+            shift = int(amplitude * math.sin(2 * math.pi * frequency * y / h + phase))
+            for x in range(w):
+                src_x = min(max(x + shift, 0), w - 1)
+                result[y, x] = arr[y, src_x]
 
     return Image.fromarray(result)
 
 
-def spot_light(img: Image.Image) -> Image.Image:
-    """Simulate a spotlight or desk lamp on part of the image.
+# =========================================================================
+# Document degradation
+# =========================================================================
 
-    Creates a radial brightness falloff from a random point,
-    like a phone flashlight or desk lamp illuminating unevenly.
+def bleed_through(img: Image.Image) -> Image.Image:
+    """Reverse-side text showing through thin paper."""
+    arr = np.array(img, dtype=np.float32)
+    ghost = np.flip(arr, axis=1).copy()
+    alpha = random.uniform(0.05, 0.15)
+    arr = arr * (1 - alpha) + ghost * alpha
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+
+
+def fold_crease(img: Image.Image) -> Image.Image:
+    """Fold line — dark line across the paper."""
+    arr = np.array(img, dtype=np.float32)
+    h, w = arr.shape[:2]
+    horizontal = random.random() < 0.6
+    if horizontal:
+        pos = random.uniform(0.2, 0.8) * h
+        width = random.uniform(1, 2.5)
+        darkness = random.uniform(0.4, 0.7)
+        coords = np.arange(h, dtype=np.float32)
+        mask = 1.0 - (1.0 - darkness) * np.exp(-0.5 * ((coords - pos) / width) ** 2)
+        arr = arr * mask[:, np.newaxis, np.newaxis]
+    else:
+        pos = random.uniform(0.2, 0.8) * w
+        width = random.uniform(1, 2.5)
+        darkness = random.uniform(0.4, 0.7)
+        coords = np.arange(w, dtype=np.float32)
+        mask = 1.0 - (1.0 - darkness) * np.exp(-0.5 * ((coords - pos) / width) ** 2)
+        arr = arr * mask[np.newaxis, :, np.newaxis]
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+
+
+def aged_document(img: Image.Image) -> Image.Image:
+    """Aged paper with yellowing, fading, and grain.
+
+    Combines color tint + edge fading + paper texture.
+    Text stays readable — just looks old.
     """
     arr = np.array(img, dtype=np.float32)
     h, w = arr.shape[:2]
 
-    # Random light source position
-    cx = random.uniform(0.1, 0.9) * w
-    cy = random.uniform(0.1, 0.9) * h
-    radius = random.uniform(0.3, 0.8) * max(w, h)
+    # Yellow tint
+    tint = random.uniform(0.05, 0.15)
+    arr[:, :, 0] *= 1 + tint * 0.3
+    arr[:, :, 1] *= 1 + tint * 0.15
+    arr[:, :, 2] *= 1 - tint * 0.3
 
-    y_coords, x_coords = np.mgrid[0:h, 0:w]
-    dist = np.sqrt((x_coords - cx) ** 2 + (y_coords - cy) ** 2)
+    # Slight edge fade
+    y_coords, x_coords = np.mgrid[0:h, 0:w].astype(np.float32)
+    edge_dist = np.minimum(
+        np.minimum(x_coords, w - 1 - x_coords) / w,
+        np.minimum(y_coords, h - 1 - y_coords) / h,
+    )
+    fade = 1.0 - random.uniform(0.03, 0.1) * (1.0 - np.clip(edge_dist * 4, 0, 1))
+    arr = arr * fade[:, :, np.newaxis]
 
-    # Bright at center, dim at edges
-    light = 1.0 - 0.5 * np.clip(dist / radius, 0, 1)
-    arr = arr * light[:, :, np.newaxis]
+    # Paper grain
+    grain = np.random.normal(0, random.uniform(2, 6), arr.shape)
+    arr = arr + grain
 
     return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
 
 
-def flash_glare(img: Image.Image) -> Image.Image:
-    """Simulate phone camera flash washing out part of the text.
-
-    Creates a bright white spot that fades outward — common artifact
-    when photographing documents with flash.
-    """
+def scanner_edge(img: Image.Image) -> Image.Image:
+    """Dark edge from flatbed scanner — page not flush with glass."""
     arr = np.array(img, dtype=np.float32)
     h, w = arr.shape[:2]
+    edge = random.choice(["left", "right", "top", "bottom"])
+    width = random.uniform(0.05, 0.12)
+    darkness = random.uniform(0.3, 0.55)
 
-    # Random glare position (usually off-center)
-    cx = random.uniform(0.2, 0.8) * w
-    cy = random.uniform(0.2, 0.8) * h
-    radius = random.uniform(0.15, 0.4) * max(w, h)
-    intensity = random.uniform(0.3, 0.7)
+    if edge in ("left", "right"):
+        coords = np.arange(w, dtype=np.float32) / w
+        if edge == "right":
+            coords = 1 - coords
+        mask = darkness + (1 - darkness) * np.clip(coords / width, 0, 1)
+        arr = arr * mask[np.newaxis, :, np.newaxis]
+    else:
+        coords = np.arange(h, dtype=np.float32) / h
+        if edge == "bottom":
+            coords = 1 - coords
+        mask = darkness + (1 - darkness) * np.clip(coords / width, 0, 1)
+        arr = arr * mask[:, np.newaxis, np.newaxis]
 
-    y_coords, x_coords = np.mgrid[0:h, 0:w]
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+
+
+def water_stain(img: Image.Image) -> Image.Image:
+    """Water or coffee ring stain — semi-transparent."""
+    arr = np.array(img, dtype=np.float32)
+    h, w = arr.shape[:2]
+    cx = random.uniform(0.1, 0.9) * w
+    cy = random.uniform(0.1, 0.9) * h
+    radius = random.uniform(0.1, 0.3) * max(w, h)
+    ring_width = radius * random.uniform(0.2, 0.4)
+
+    y_coords, x_coords = np.mgrid[0:h, 0:w].astype(np.float32)
     dist = np.sqrt((x_coords - cx) ** 2 + (y_coords - cy) ** 2)
+    ring = np.exp(-0.5 * ((dist - radius) / ring_width) ** 2)
 
-    # Gaussian glare
-    glare = intensity * np.exp(-0.5 * (dist / radius) ** 2)
-    arr = arr + glare[:, :, np.newaxis] * 255
+    stain_color = random.choice([
+        np.array([200, 180, 120]),  # coffee
+        np.array([180, 170, 150]),  # water
+    ])
+    intensity = random.uniform(0.08, 0.2)
+    for c in range(3):
+        arr[:, :, c] = arr[:, :, c] * (1 - ring * intensity) + stain_color[c] * ring * intensity
 
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+
+
+# =========================================================================
+# Ink & stroke variation
+# =========================================================================
+
+def stroke_variation(img: Image.Image) -> Image.Image:
+    """Thinner or thicker strokes — pen pressure, ink amount, bleed."""
+    if random.random() < 0.4:
+        return img.filter(ImageFilter.MinFilter(size=3))  # thinner
+    else:
+        # Thicken via dilation, optionally blended for ink bleed effect
+        dilated = img.filter(ImageFilter.MaxFilter(size=3))
+        if random.random() < 0.5:
+            return dilated
+        # Blend for subtle ink bleed
+        alpha = random.uniform(0.3, 0.6)
+        arr = np.array(img, dtype=np.float32) * (1 - alpha) + np.array(dilated, dtype=np.float32) * alpha
+        return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+
+
+def smudge(img: Image.Image) -> Image.Image:
+    """Ink smudge — localized blur from finger or wet ink."""
+    arr = np.array(img, dtype=np.float32)
+    h, w = arr.shape[:2]
+    cx = random.uniform(0.15, 0.85) * w
+    cy = random.uniform(0.15, 0.85) * h
+    radius = random.uniform(0.08, 0.2) * max(w, h)
+
+    y_coords, x_coords = np.mgrid[0:h, 0:w].astype(np.float32)
+    dist = np.sqrt((x_coords - cx) ** 2 + (y_coords - cy) ** 2)
+    mask = np.clip(1.0 - dist / radius, 0, 1)
+
+    blurred = np.array(img.filter(ImageFilter.GaussianBlur(radius=2)), dtype=np.float32)
+    arr = arr * (1 - mask[:, :, np.newaxis]) + blurred * mask[:, :, np.newaxis]
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+
+
+# =========================================================================
+# Noise & color
+# =========================================================================
+
+def noise(img: Image.Image) -> Image.Image:
+    """Gaussian or salt-pepper noise — sensor noise, paper grain."""
+    arr = np.array(img, dtype=np.float32)
+    if random.random() < 0.6:
+        # Gaussian (paper grain)
+        intensity = random.uniform(3, 12)
+        arr = arr + np.random.normal(0, intensity, arr.shape)
+    else:
+        # Salt & pepper (sensor)
+        arr_int = arr.astype(np.uint8)
+        amount = random.uniform(0.005, 0.02)
+        num = int(amount * arr_int.size / 2)
+        coords = tuple(np.random.randint(0, d, num) for d in arr_int.shape[:2])
+        arr_int[coords[0], coords[1]] = 255
+        coords = tuple(np.random.randint(0, d, num) for d in arr_int.shape[:2])
+        arr_int[coords[0], coords[1]] = 0
+        return Image.fromarray(arr_int)
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+
+
+def color_jitter(img: Image.Image) -> Image.Image:
+    """Color cast — scanner drift, aged paper, monitor color."""
+    arr = np.array(img, dtype=np.float32)
+    tint = random.choice(['yellow', 'blue', 'warm', 'cool'])
+    s = random.uniform(0.03, 0.1)
+    if tint == 'yellow':
+        arr[:, :, 0] *= 1 + s
+        arr[:, :, 2] *= 1 - s
+    elif tint == 'blue':
+        arr[:, :, 2] *= 1 + s
+        arr[:, :, 0] *= 1 - s * 0.5
+    elif tint == 'warm':
+        arr[:, :, 0] *= 1 + s
+        arr[:, :, 1] *= 1 + s * 0.3
+    elif tint == 'cool':
+        arr[:, :, 1] *= 1 + s * 0.3
+        arr[:, :, 2] *= 1 + s
     return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
 
 
 def to_grayscale(img: Image.Image) -> Image.Image:
-    """Convert to grayscale and back to RGB.
-
-    Forces the model to recognize text by shape alone, not color.
-    The standard luminance formula (0.299R + 0.587G + 0.114B) works
-    for 99% of cases. Red-on-green edge cases are rare in real OCR.
-    """
+    """Grayscale — B&W scanner, photocopy."""
     return img.convert("L").convert("RGB")
 
 
-AUGMENT_OPS.extend([paper_warp, spot_light, flash_glare, to_grayscale])
+# =========================================================================
+# Occlusion
+# =========================================================================
 
-# elastic_distortion needs scipy — add only if available
+def occlusion(img: Image.Image) -> Image.Image:
+    """Partial occlusion — finger, tape, sticker, stamp.
+
+    Rectangular or elliptical, semi-transparent.
+    """
+    arr = np.array(img, dtype=np.float32)
+    h, w = arr.shape[:2]
+    if h < 6 or w < 6:
+        return img
+
+    shape = random.choice(["rect", "ellipse"])
+    color = random.choice([
+        np.array([200, 180, 160]),  # finger
+        np.array([200, 50, 50]),    # red stamp
+        np.array([240, 240, 240]),  # white label
+        np.array([50, 50, 50]),     # dark smudge
+    ])
+    opacity = random.uniform(0.15, 0.45)
+
+    if shape == "rect":
+        rh = random.randint(2, max(3, h // 3))
+        rw = random.randint(2, max(3, w // 5))
+        ry = random.randint(0, max(1, h - rh))
+        rx = random.randint(0, max(1, w - rw))
+        for c in range(3):
+            arr[ry:ry+rh, rx:rx+rw, c] = arr[ry:ry+rh, rx:rx+rw, c] * (1 - opacity) + color[c] * opacity
+    else:
+        cx = random.uniform(0.1, 0.9) * w
+        cy = random.uniform(0.1, 0.9) * h
+        rx = random.uniform(0.05, 0.15) * w
+        ry = random.uniform(0.05, 0.25) * h
+        y_coords, x_coords = np.mgrid[0:h, 0:w].astype(np.float32)
+        dist = ((x_coords - cx) / max(rx, 1)) ** 2 + ((y_coords - cy) / max(ry, 1)) ** 2
+        mask = np.clip(1.0 - dist, 0, 1)
+        for c in range(3):
+            arr[:, :, c] = arr[:, :, c] * (1 - mask * opacity) + color[c] * mask * opacity
+
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+
+
+# =========================================================================
+# Outdoor / weather
+# =========================================================================
+
+def weather_damage(img: Image.Image) -> Image.Image:
+    """Sun fading on outdoor signs — mild bleaching from one direction."""
+    arr = np.array(img, dtype=np.float32)
+    h, w = arr.shape[:2]
+    fade_strength = random.uniform(0.05, 0.15)
+    fade_dir = random.choice(["top", "left"])
+    if fade_dir == "top":
+        gradient = np.linspace(1 - fade_strength, 1, h)[:, np.newaxis, np.newaxis]
+    else:
+        gradient = np.linspace(1 - fade_strength, 1, w)[np.newaxis, :, np.newaxis]
+    arr = arr * gradient + (255 - arr) * (1 - gradient) * 0.3
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+
+
+# =========================================================================
+# Elastic distortion (requires scipy)
+# =========================================================================
+
+def elastic_distortion(img: Image.Image) -> Image.Image:
+    """Mild elastic warp — paper warping, flexible surface."""
+    from scipy.ndimage import gaussian_filter as gf, map_coordinates as mc
+    arr = np.array(img, dtype=np.float32)
+    h, w = arr.shape[:2]
+    strength = random.uniform(0.5, 2.0)
+    dx = gf(np.random.randn(h, w) * strength, sigma=3)
+    dy = gf(np.random.randn(h, w) * strength, sigma=3)
+    x, y = np.meshgrid(np.arange(w), np.arange(h))
+    x_new = np.clip(x + dx, 0, w - 1).astype(np.float32)
+    y_new = np.clip(y + dy, 0, h - 1).astype(np.float32)
+    result = np.zeros_like(arr)
+    for c in range(3):
+        result[:, :, c] = mc(arr[:, :, c], [y_new, x_new], order=1, mode='reflect')
+    return Image.fromarray(result.astype(np.uint8))
+
+
+# =========================================================================
+# Op registry — 20 ops, no redundancy
+# =========================================================================
+
+AUGMENT_OPS: list[Callable] = [
+    # Quality (4)
+    jpeg_compress,
+    blur,
+    low_resolution,
+    photocopy,
+    # Lighting (4)
+    exposure_jitter,
+    uneven_lighting,
+    glare,
+    striped_shadow,
+    # Geometric (3)
+    rotation,
+    perspective_warp,
+    wave_distortion,
+    # Document (5)
+    bleed_through,
+    fold_crease,
+    aged_document,
+    scanner_edge,
+    water_stain,
+    # Ink (2)
+    stroke_variation,
+    smudge,
+    # Noise & color (3)
+    noise,
+    color_jitter,
+    to_grayscale,
+    # Occlusion (1)
+    occlusion,
+    # Outdoor (1)
+    weather_damage,
+]
+
+# elastic_distortion needs scipy
 try:
     import scipy.ndimage  # noqa: F401
     AUGMENT_OPS.append(elastic_distortion)
@@ -325,35 +538,20 @@ except ImportError:
 
 
 class RandAugmentOCR:
-    """RandAugment-style augmentation for OCR training.
+    """RandAugment-style augmentation for OCR.
 
-    Randomly applies N transforms from the pool, each with
-    random intensity within its configured range.
+    Randomly applies N ops per image. Each op degrades
+    realistically but preserves text readability.
     """
 
     def __init__(self, n_ops: int = 2, p: float = 0.5):
-        """
-        Args:
-            n_ops: Number of augmentation ops to apply per image.
-            p: Probability of applying augmentation at all.
-        """
         self.n_ops = n_ops
         self.p = p
 
     def __call__(self, img: Image.Image) -> Image.Image:
-        """Apply random augmentations.
-
-        Args:
-            img: PIL Image (RGB).
-
-        Returns:
-            Augmented PIL Image.
-        """
         if random.random() > self.p:
             return img
-
         ops = random.sample(AUGMENT_OPS, min(self.n_ops, len(AUGMENT_OPS)))
         for op in ops:
             img = op(img)
-
         return img

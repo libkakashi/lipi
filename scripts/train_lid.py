@@ -3,8 +3,8 @@
 Phase 0: Train and validate hierarchical LID.
 
 Tests two levels of script identification:
-  LID-1 (stem only): Coarse grouping into 7 families
-  LID-2 (stem + Stage 1 SWA): Fine-grained 16-script classification
+  LID-1 (stem only): Coarse grouping into 8 groups
+  LID-2 (stem + Stage 1 SWA): Fine-grained 18-script classification
 
 Generates multi-script synthetic word crops on-the-fly using system fonts.
 Runs on CPU/MPS in minutes.
@@ -42,30 +42,46 @@ from src.model.lid import (
     GROUPS, GROUP_TO_ID, NUM_GROUPS,
     SCRIPT_TO_GROUP, GROUP_SCRIPTS, script_to_group_id,
 )
-from src.data.color import rgb_to_input, INPUT_CHANNELS, MODE
+from src.data.color import rgb_to_input, INPUT_CHANNELS, ColorProjection
 from src.data.augmentation import RandAugmentOCR
 
 
 WORD_LIST_DIR = Path(__file__).parent.parent / "training_data" / "word_lists"
 
 
-def load_word_list(script: str, fallback: list[str]) -> list[str]:
-    """Load word list from file if available, else use fallback."""
-    candidates = [WORD_LIST_DIR / f"{script}.txt"]
-    if script == "latin":
-        candidates.append(WORD_LIST_DIR / "english_common.txt")
+# Extra language word lists that belong to each script
+_SCRIPT_EXTRA_FILES = {
+    "latin": ["english_common.txt", "french.txt", "german.txt", "spanish.txt",
+              "turkish.txt", "vietnamese.txt", "italian.txt", "portuguese.txt",
+              "polish.txt", "dutch.txt", "romanian.txt", "czech.txt",
+              "hungarian.txt", "swedish.txt", "norwegian.txt", "danish.txt",
+              "finnish.txt", "croatian.txt", "indonesian.txt", "malay.txt",
+              "swahili.txt"],
+    "cyrillic": ["ukrainian.txt"],
+    "devanagari": ["marathi.txt"],
+    "arabic": ["persian.txt", "urdu.txt"],
+    "cjk": ["japanese.txt"],
+}
 
-    for path in candidates:
+
+def load_word_list(script: str, fallback: list[str]) -> list[str]:
+    """Load and merge all word list files for a script."""
+    files = [WORD_LIST_DIR / f"{script}.txt"]
+    for extra in _SCRIPT_EXTRA_FILES.get(script, []):
+        files.append(WORD_LIST_DIR / extra)
+
+    words = []
+    for path in files:
         if path.exists():
-            words = []
             for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
                 w = line.strip()
                 if 2 <= len(w) <= 15 and w and not w[0].isdigit():
                     words.append(w)
-            if len(words) >= 20:
-                words = list(set(words))
-                random.shuffle(words)
-                return words
+
+    if words:
+        words = list(set(words))
+        random.shuffle(words)
+        return words
     return fallback
 
 
@@ -127,11 +143,6 @@ _SCRIPT_SAMPLES_FALLBACK = {
         "ਫੈਸਲਾ", "ਕੇਸ", "ਵਕੀਲ", "ਸਰਕਾਰ", "ਪੰਜਾਬੀ",
         "ਚੰਡੀਗੜ੍ਹ", "ਸਮਾਂ", "ਬੰਦਾ", "ਦੇਸ਼", "ਘਰ", "ਦਿਨ",
     ],
-    "odia": [
-        "ନମସ୍କାର", "ନ୍ୟାୟ", "ଅଦାଲତ", "ଆଇନ", "ଅଧିକାର",
-        "ରାୟ", "ମାମଲା", "ଓକିଲ", "ସରକାର", "ଓଡ଼ିଆ",
-        "ଭୁବନେଶ୍ୱର", "ସମୟ", "ମଣିଷ", "ଦେଶ", "ଘର", "ଦିନ",
-    ],
     "arabic": [
         "مرحبا", "عدالة", "محكمة", "قانون", "حق", "حكم",
         "قضية", "محامي", "حكومة", "عربي", "القاهرة", "وقت",
@@ -163,16 +174,6 @@ _SCRIPT_SAMPLES_FALLBACK = {
         "ຄົນ", "ເຮືອນ", "ນ້ຳ", "ເວລາ", "ວຽກ", "ໂຮງຮຽນ",
         "ຕະຫຼາດ", "ທາງ", "ພູ", "ແມ່ນ້ຳ", "ກິນ", "ດື່ມ",
     ],
-    "khmer": [
-        "សួស្តី", "ច្បាប់", "តុលាការ", "ប្រទេស", "ទីក្រុង",
-        "មនុស្ស", "ផ្ទះ", "ទឹក", "ពេលវេលា", "ការងារ", "សាលារៀន",
-        "ផ្សារ", "ផ្លូវ", "ភ្នំ", "ទន្លេ", "ញ៉ាំ", "ផឹក",
-    ],
-    "burmese": [
-        "မင်္ဂလာပါ", "ဥပဒေ", "တရားရုံး", "နိုင်ငံ", "မြို့",
-        "လူ", "အိမ်", "ရေ", "အချိန်", "အလုပ်", "ကျောင်း",
-        "ဈေး", "လမ်း", "တောင်", "မြစ်", "စား", "သောက်",
-    ],
 }
 
 # Loaded at runtime — file-based word lists merged with fallbacks
@@ -196,9 +197,9 @@ def find_fonts_for_script(script: str) -> list[str]:
         "latin": "en", "cyrillic": "ru", "greek": "el",
         "devanagari": "hi", "bengali": "bn", "tamil": "ta",
         "telugu": "te", "kannada": "kn", "malayalam": "ml",
-        "gujarati": "gu", "gurmukhi": "pa", "odia": "or",
+        "gujarati": "gu", "gurmukhi": "pa",
         "arabic": "ar", "hebrew": "he", "cjk": "zh", "korean": "ko",
-        "thai": "th", "lao": "lo", "khmer": "km", "burmese": "my",
+        "thai": "th", "lao": "lo",
     }
     lang = lang_map.get(script)
     if not lang:
@@ -230,43 +231,79 @@ def font_can_render(font_path: str, text: str, size: int = 24) -> bool:
 
 
 def random_ink_color():
-    """Random text color — realistic document ink colors."""
+    """Random text color — documents, signs, banners, screens, neon."""
     style = random.choice([
-        "black", "black", "black", "black",  # 40% black
-        "dark_gray", "dark_gray",             # 20% gray
-        "blue_ink",                            # 10% blue
-        "red", "red",                          # 20% red (stamps, highlights)
-        "dark_green",                          # 10% green
+        # Documents (50%)
+        "black", "black", "black",
+        "dark_gray",
+        "blue_ink",
+        # Signs & banners (25%)
+        "white_text",          # white text on dark bg
+        "yellow_text",         # yellow on dark (road signs, banners)
+        "bright_red",          # warning signs, sale banners
+        "bright_blue",         # info signs, digital
+        "neon_green",          # digital displays, neon signs
+        # Wild (25%)
+        "orange",
+        "purple",
+        "teal",
+        "magenta",
+        "random_bright",       # fully random saturated color
     ])
     colors = {
-        "black": (random.randint(0, 40), random.randint(0, 40), random.randint(0, 40)),
+        "black": (random.randint(0, 40),) * 3,
         "dark_gray": (random.randint(50, 90),) * 3,
         "blue_ink": (random.randint(0, 40), random.randint(0, 50), random.randint(130, 210)),
-        "red": (random.randint(160, 230), random.randint(0, 50), random.randint(0, 50)),
-        "dark_green": (random.randint(0, 50), random.randint(90, 150), random.randint(0, 50)),
+        "white_text": (random.randint(220, 255),) * 3,
+        "yellow_text": (random.randint(220, 255), random.randint(200, 240), random.randint(0, 60)),
+        "bright_red": (random.randint(200, 255), random.randint(0, 60), random.randint(0, 60)),
+        "bright_blue": (random.randint(0, 60), random.randint(80, 160), random.randint(200, 255)),
+        "neon_green": (random.randint(0, 80), random.randint(200, 255), random.randint(0, 80)),
+        "orange": (random.randint(220, 255), random.randint(120, 180), random.randint(0, 50)),
+        "purple": (random.randint(120, 180), random.randint(0, 60), random.randint(180, 240)),
+        "teal": (random.randint(0, 60), random.randint(180, 230), random.randint(180, 230)),
+        "magenta": (random.randint(220, 255), random.randint(0, 80), random.randint(180, 240)),
+        "random_bright": (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)),
     }
     return colors[style]
 
 
 def random_bg_color():
-    """Random background — paper colors."""
+    """Random background — paper, signs, screens, posters, walls."""
     style = random.choice([
-        "white", "white", "white",   # 30% white
-        "offwhite", "offwhite",       # 20% off-white
-        "cream",                       # 10% cream/yellow
-        "light_blue",                  # 10% light blue form
-        "light_pink",                  # 10% pink
-        "gray",                        # 10% gray
-        "light_green",                 # 10% light green
+        # Paper/document (40%)
+        "white", "white",
+        "offwhite",
+        "cream",
+        # Colored surfaces (30%)
+        "dark_bg",             # dark sign/banner background
+        "dark_blue",           # blue banner, slide
+        "dark_red",            # red banner
+        "dark_green",          # green chalkboard
+        "brown",               # wood, cardboard
+        # Misc (30%)
+        "light_blue",
+        "light_pink",
+        "light_green",
+        "gray",
+        "yellow",              # post-it note, caution sign
+        "random_pastel",       # random light color
     ])
     colors = {
         "white": (random.randint(240, 255),) * 3,
         "offwhite": (random.randint(230, 250), random.randint(228, 248), random.randint(220, 240)),
         "cream": (random.randint(240, 255), random.randint(235, 250), random.randint(200, 225)),
+        "dark_bg": (random.randint(10, 50),) * 3,
+        "dark_blue": (random.randint(10, 40), random.randint(20, 60), random.randint(80, 140)),
+        "dark_red": (random.randint(100, 160), random.randint(10, 40), random.randint(10, 40)),
+        "dark_green": (random.randint(10, 40), random.randint(60, 110), random.randint(10, 40)),
+        "brown": (random.randint(120, 170), random.randint(80, 120), random.randint(40, 70)),
         "light_blue": (random.randint(220, 240), random.randint(230, 248), random.randint(245, 255)),
         "light_pink": (random.randint(245, 255), random.randint(220, 235), random.randint(225, 240)),
-        "gray": (random.randint(200, 225),) * 3,
         "light_green": (random.randint(225, 242), random.randint(245, 255), random.randint(225, 242)),
+        "gray": (random.randint(180, 220),) * 3,
+        "yellow": (random.randint(245, 255), random.randint(240, 255), random.randint(140, 190)),
+        "random_pastel": (random.randint(180, 240), random.randint(180, 240), random.randint(180, 240)),
     }
     return colors[style]
 
@@ -289,8 +326,15 @@ def render_word(text: str, font_path: str, height: int = 32) -> Image.Image | No
         img_w = text_w + 2 * pad_x
         img_h = text_h + 2 * pad_y
 
-        bg = random_bg_color()
-        ink = random_ink_color()
+        # Pick colors with enough contrast
+        for _ in range(5):
+            bg = random_bg_color()
+            ink = random_ink_color()
+            # Luminance contrast check
+            bg_lum = 0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2]
+            ink_lum = 0.299 * ink[0] + 0.587 * ink[1] + 0.114 * ink[2]
+            if abs(bg_lum - ink_lum) > 60:
+                break
         img = Image.new("RGB", (img_w, img_h), bg)
         ImageDraw.Draw(img).text(
             (pad_x - bbox[0], pad_y - bbox[1]), text, fill=ink, font=font,
@@ -442,7 +486,8 @@ class MultiScriptDataset(Dataset):
         return self.images[idx], self.script_labels[idx], self.group_labels[idx]
 
 
-def train_coarse(stem, lid_coarse, dataset, train_set, val_set, args, device, color_proj=None):
+def train_coarse(stem, lid_coarse, dataset, train_set, val_set, args, device, color_proj=None,
+                  resume_state=None):
     """Train LID-1: stem + coarse group classifier."""
     print(f"\n{'='*55}")
     print(f"LID-1: COARSE GROUP CLASSIFICATION ({dataset.num_groups} groups)")
@@ -458,8 +503,17 @@ def train_coarse(stem, lid_coarse, dataset, train_set, val_set, args, device, co
     optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=0.01)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
+    start_epoch = 1
     best_val_acc = 0.0
-    for epoch in range(1, args.epochs + 1):
+    if resume_state:
+        optimizer.load_state_dict(resume_state["optimizer"])
+        scheduler.load_state_dict(resume_state["scheduler"])
+        start_epoch = resume_state["epoch"] + 1
+        last_val_acc = resume_state.get("val_acc", 0.0)
+        best_val_acc = resume_state.get("best_val_acc", 0.0)
+        print(f"Resumed from epoch {start_epoch - 1}, val acc: {last_val_acc:.1f}%, best: {best_val_acc:.1f}%\n")
+
+    for epoch in range(start_epoch, args.epochs + 1):
         stem.train()
         lid_coarse.train()
         total_loss = correct = total = 0
@@ -488,6 +542,7 @@ def train_coarse(stem, lid_coarse, dataset, train_set, val_set, args, device, co
         per_group_correct = {}
         per_group_total = {}
 
+        confusion = [[0] * dataset.num_groups for _ in range(dataset.num_groups)]
         with torch.no_grad():
             for images, _, group_labels in val_loader:
                 images = images.to(device)
@@ -497,6 +552,7 @@ def train_coarse(stem, lid_coarse, dataset, train_set, val_set, args, device, co
                 val_total += images.size(0)
 
                 for p, l in zip(preds.cpu().tolist(), group_labels.cpu().tolist()):
+                    confusion[l][p] += 1
                     g = dataset.active_groups[l]
                     per_group_total[g] = per_group_total.get(g, 0) + 1
                     if p == l:
@@ -510,6 +566,58 @@ def train_coarse(stem, lid_coarse, dataset, train_set, val_set, args, device, co
               f"loss={total_loss/total:.4f}  train={100*correct/total:.1f}%  "
               f"val={val_acc:.1f}%")
 
+        # Per-epoch checkpoint
+        ckpt_dir = Path(args.save).parent
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        epoch_ckpt = {
+            "stem": stem.state_dict(),
+            "lid_coarse": lid_coarse.state_dict(),
+            "coarse_optimizer": optimizer.state_dict(),
+            "coarse_scheduler": scheduler.state_dict(),
+            "coarse_epoch": epoch,
+            "coarse_val_acc": val_acc,
+            "coarse_best_val_acc": best_val_acc,
+            "stem_type": args.stem,
+            "stem_depth": args.stem_depth,
+            "args": vars(args),
+        }
+        if color_proj is not None:
+            epoch_ckpt["color_proj"] = color_proj.state_dict()
+        # Save latest (overwritten each epoch) + best
+        torch.save(epoch_ckpt, ckpt_dir / "lid_latest.pt")
+        if val_acc >= best_val_acc:
+            torch.save(epoch_ckpt, ckpt_dir / "lid_best.pt")
+
+        # Per-epoch confusion matrix
+        short_names = [g[:8] for g in dataset.active_groups]
+        for i, g in enumerate(dataset.active_groups):
+            row = confusion[i]
+            row_total = sum(row)
+            errs = []
+            for j, count in enumerate(row):
+                if count > 0 and i != j:
+                    pct = 100 * count / row_total if row_total else 0
+                    if pct >= 2:
+                        errs.append(f"{short_names[j]}:{pct:.0f}%")
+            if errs:
+                acc = 100 * row[i] / row_total if row_total else 0
+                print(f"    {short_names[i]:>8} {acc:.0f}% ok | confused with {', '.join(errs)}")
+
+        # Color projection diagnostic
+        if color_proj is not None:
+            color_proj.eval()
+            test_inputs = {
+                "L=0,a=.5": [0.0, 0.5], "L=1,a=.5": [1.0, 0.5],
+                "L=.5,a=.5": [0.5, 0.5], "L=.5,a=.7": [0.5, 0.7], "L=.5,a=.3": [0.5, 0.3],
+            }
+            parts = []
+            with torch.no_grad():
+                for name, la in test_inputs.items():
+                    t = torch.tensor(la, dtype=torch.float32).reshape(1,2,1,1).to(device)
+                    out = color_proj(t).squeeze()
+                    parts.append(f"{name}→{out.item():.2f}")
+            print(f"    color_proj: {' | '.join(parts)}")
+
     print(f"\nBest coarse val accuracy: {best_val_acc:.1f}%")
     print(f"\nPer-group accuracy (final):")
     for g in dataset.active_groups:
@@ -519,21 +627,43 @@ def train_coarse(stem, lid_coarse, dataset, train_set, val_set, args, device, co
         scripts_in_group = [s for s in dataset.active_scripts if SCRIPT_TO_GROUP[s] == g]
         print(f"  {g:<20} {acc:>6.1f}%  ({sc}/{st})  scripts: {scripts_in_group}")
 
-    # Print what the projection does to known colors
+    # Confusion matrix
+    short_names = [g[:8] for g in dataset.active_groups]
+    print(f"\nConfusion matrix (rows=true, cols=predicted):")
+    header = "          " + "".join(f"{s:>9}" for s in short_names)
+    print(header)
+    for i, g in enumerate(dataset.active_groups):
+        row = confusion[i]
+        row_total = sum(row)
+        cells = []
+        for j, count in enumerate(row):
+            if count == 0:
+                cells.append(f"{'·':>9}")
+            elif i == j:
+                cells.append(f"{count:>9}")
+            else:
+                pct = 100 * count / row_total if row_total else 0
+                cells.append(f"{count:>5}{pct:3.0f}%")
+        print(f"{short_names[i]:>9} " + "".join(cells))
+
+    # Print what the projection does to known L+a values
     if color_proj is not None:
         color_proj.eval()
-        test_colors = {
-            "black": [0,0,0], "white": [1,1,1],
-            "red": [1,0,0], "green": [0,1,0], "blue": [0,0,1],
+        test_inputs = {
+            "black (L=0,a=.5)": [0.0, 0.5],
+            "white (L=1,a=.5)": [1.0, 0.5],
+            "gray  (L=.5,a=.5)": [0.5, 0.5],
+            "red   (L=.5,a=.7)": [0.5, 0.7],
+            "green (L=.5,a=.3)": [0.5, 0.3],
         }
-        print(f"\nLearned projection outputs:")
+        print(f"\nColor projection outputs (L+a → 1ch):")
         with torch.no_grad():
-            for name, rgb in test_colors.items():
-                t = torch.tensor(rgb, dtype=torch.float32).reshape(1,3,1,1).to(device)
+            for name, la in test_inputs.items():
+                t = torch.tensor(la, dtype=torch.float32).reshape(1,2,1,1).to(device)
                 out = color_proj(t).squeeze()
-                print(f"  {name:<6} → {out.item():.3f}")
+                print(f"  {name:<20} → {out.item():.3f}")
 
-    return best_val_acc
+    return best_val_acc, optimizer.state_dict(), scheduler.state_dict()
 
 
 def train_fine(stem, stage1_blocks, proj1, lid_fine, dataset, train_set, val_set, args, device, color_proj=None, use_moe=False):
@@ -616,6 +746,7 @@ def train_fine(stem, stage1_blocks, proj1, lid_fine, dataset, train_set, val_set
         per_script_correct = {}
         per_script_total = {}
 
+        confusion = [[0] * dataset.num_scripts for _ in range(dataset.num_scripts)]
         with torch.no_grad():
             for images, script_labels, group_labels in val_loader:
                 images = images.to(device)
@@ -638,6 +769,7 @@ def train_fine(stem, stage1_blocks, proj1, lid_fine, dataset, train_set, val_set
                 val_total += images.size(0)
 
                 for p, l in zip(preds.cpu().tolist(), script_labels.cpu().tolist()):
+                    confusion[l][p] += 1
                     s = dataset.active_scripts[l]
                     per_script_total[s] = per_script_total.get(s, 0) + 1
                     if p == l:
@@ -659,35 +791,24 @@ def train_fine(stem, stage1_blocks, proj1, lid_fine, dataset, train_set, val_set
         acc = 100 * sc / st if st > 0 else 0
         print(f"  {s:<15} {acc:>6.1f}%  ({sc}/{st})  group: {SCRIPT_TO_GROUP[s]}")
 
-    # Confusion
-    print(f"\nConfusion pairs:")
-    confusion = {}
-    with torch.no_grad():
-        for images, script_labels, group_labels in val_loader:
-            images = images.to(device)
-            script_labels = script_labels.to(device) if isinstance(script_labels, torch.Tensor) else torch.tensor(script_labels, dtype=torch.long, device=device)
-            group_labels = group_labels.to(device) if isinstance(group_labels, torch.Tensor) else torch.tensor(group_labels, dtype=torch.long, device=device)
-            inp = color_proj(images) if color_proj is not None else images
-            x = stem(inp)
-            B, C, h, w = x.shape
-            x = x.permute(0, 2, 3, 1).reshape(B, h * w, C)
-            x = proj1(x)
-            for block in stage1_blocks:
-                if use_moe:
-                    x = block(x, h=h, w=w, group_ids=group_labels)
-                else:
-                    x = block(x, h=h, w=w)
-            preds = lid_fine(x).argmax(-1)
-            for p, l in zip(preds.cpu().tolist(), script_labels.cpu().tolist()):
-                if p != l:
-                    key = f"{dataset.active_scripts[l]} -> {dataset.active_scripts[p]}"
-                    confusion[key] = confusion.get(key, 0) + 1
-
-    if confusion:
-        for pair, count in sorted(confusion.items(), key=lambda x: -x[1])[:10]:
-            print(f"  {pair}: {count}")
-    else:
-        print("  None!")
+    # Confusion matrix
+    short_names = [s[:6] for s in dataset.active_scripts]
+    print(f"\nConfusion matrix (rows=true, cols=predicted):")
+    header = "          " + "".join(f"{s:>7}" for s in short_names)
+    print(header)
+    for i, s in enumerate(dataset.active_scripts):
+        row = confusion[i]
+        row_total = sum(row)
+        cells = []
+        for j, count in enumerate(row):
+            if count == 0:
+                cells.append(f"{'·':>7}")
+            elif i == j:
+                cells.append(f"{count:>7}")
+            else:
+                pct = 100 * count / row_total if row_total else 0
+                cells.append(f"{count:>3}{pct:3.0f}%")
+        print(f"{short_names[i]:>9} " + "".join(cells))
 
     return best_val_acc
 
@@ -704,6 +825,8 @@ def main():
                         help="Apply RandAugmentOCR to training images")
     parser.add_argument("--moe", action="store_true",
                         help="Use group-specific expert MLPs in Stage 1")
+    parser.add_argument("--stem-depth", type=int, default=2, choices=[2, 3],
+                        help="ResNet stem depth: 2 (default) or 3 (extra ResBlock)")
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--device", type=str, default="auto")
@@ -713,6 +836,8 @@ def main():
     parser.add_argument("--stage1-blocks", type=int, default=3,
                         help="Number of Stage 1 SWA blocks (3 for 12M, 8 for 56M)")
     parser.add_argument("--save", type=str, default="checkpoints/lid_hierarchical.pt")
+    parser.add_argument("--resume", type=str, default=None,
+                        help="Resume from checkpoint path")
     args = parser.parse_args()
 
     if args.device == "auto":
@@ -745,17 +870,14 @@ def main():
     train_set, val_set = torch.utils.data.random_split(dataset, [n_train, n_val])
     print(f"Train: {n_train}, Val: {n_val}\n")
 
-    if MODE == "learned":
-        from src.data.color import LearnedColorProjection
-        color_proj = LearnedColorProjection().to(device)
-        proj_params = sum(p.numel() for p in color_proj.parameters())
-        print(f"Learned color projection: {proj_params} params (3→1)")
-    else:
-        color_proj = None  # L+a applied in dataset
+    color_proj = ColorProjection().to(device)
+    proj_params = sum(p.numel() for p in color_proj.parameters())
+    print(f"Color projection: L+a + learned correction, {proj_params} params")
 
     stem_channels = 64
     if args.stem == "resnet":
-        stem = ResNetStem(in_channels=INPUT_CHANNELS, out_channels=stem_channels).to(device)
+        stem = ResNetStem(in_channels=INPUT_CHANNELS, out_channels=stem_channels,
+                          depth=args.stem_depth).to(device)
     else:
         stem = ConvNeXtStem(in_channels=INPUT_CHANNELS, out_channels=stem_channels).to(device)
 
@@ -768,7 +890,29 @@ def main():
     if args.level in ("coarse", "both"):
         lid_coarse = LIDCoarse(in_channels=stem_channels, num_groups=dataset.num_groups).to(device)
         print(f"LID-1 (coarse): {sum(p.numel() for p in lid_coarse.parameters()):,} params")
-        coarse_acc = train_coarse(stem, lid_coarse, dataset, train_set, val_set, args, device, color_proj=color_proj)
+
+        # Resume coarse training if checkpoint exists
+        coarse_resume = None
+        if args.resume:
+            ckpt = torch.load(args.resume, map_location=device, weights_only=False)
+            stem.load_state_dict(ckpt["stem"])
+            lid_coarse.load_state_dict(ckpt["lid_coarse"])
+            if color_proj is not None and "color_proj" in ckpt:
+                color_proj.load_state_dict(ckpt["color_proj"])
+            if "coarse_optimizer" in ckpt:
+                coarse_resume = {
+                    "optimizer": ckpt["coarse_optimizer"],
+                    "scheduler": ckpt["coarse_scheduler"],
+                    "epoch": ckpt["coarse_epoch"],
+                    "val_acc": ckpt.get("coarse_val_acc", 0.0),
+                    "best_val_acc": ckpt.get("coarse_best_val_acc", 0.0),
+                }
+            print(f"Loaded checkpoint from {args.resume}")
+
+        coarse_acc, coarse_optim_state, coarse_sched_state = train_coarse(
+            stem, lid_coarse, dataset, train_set, val_set, args, device,
+            color_proj=color_proj, resume_state=coarse_resume,
+        )
 
     # LID-2: Fine (with Stage 1)
     if args.level in ("fine", "both"):
@@ -815,14 +959,22 @@ def main():
     save_dict = {
         "stem": stem.state_dict(),
         "stem_type": args.stem,
+        "stem_depth": args.stem_depth,
         "active_scripts": dataset.active_scripts,
         "active_groups": dataset.active_groups,
         "script_to_idx": dataset.script_to_idx,
         "group_to_idx": dataset.group_to_idx,
+        "args": vars(args),
     }
+    if color_proj is not None:
+        save_dict["color_proj"] = color_proj.state_dict()
     if args.level in ("coarse", "both"):
         save_dict["lid_coarse"] = lid_coarse.state_dict()
         save_dict["coarse_acc"] = coarse_acc
+        save_dict["coarse_optimizer"] = coarse_optim_state
+        save_dict["coarse_scheduler"] = coarse_sched_state
+        save_dict["coarse_epoch"] = args.epochs
+        save_dict["coarse_best_val_acc"] = coarse_acc
     if args.level in ("fine", "both"):
         save_dict["proj1"] = proj1.state_dict()
         save_dict["stage1"] = stage1_blocks.state_dict()
