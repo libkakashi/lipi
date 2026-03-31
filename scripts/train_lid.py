@@ -508,61 +508,94 @@ class MultiScriptDataset(Dataset):
         self.group_to_idx = {g: i for i, g in enumerate(self.active_groups)}
         self.num_groups = len(self.active_groups)
 
-        # Pre-generate images
-        # If balance_groups: each GROUP gets samples_per_script images total,
-        # split evenly across its scripts. This prevents 9-script indic from
-        # overwhelming 1-script thai.
-        self.images = []
-        self.script_labels = []
-        self.group_labels = []
-
+        # Pre-generate images (parallelized across CPU cores)
         if balance_groups:
             samples_per_group = samples_per_script
-            print(f"\nGenerating {self.num_groups * samples_per_group} images (balanced per group)...")
+            total_est = self.num_groups * samples_per_group
         else:
-            print(f"\nGenerating {self.num_scripts * samples_per_script} images...")
+            total_est = self.num_scripts * samples_per_script
 
+        print(f"\nGenerating {total_est} images ({'balanced per group' if balance_groups else 'per script'})...")
+
+        # Build task list: (script, target_count)
+        tasks = []
         for script in self.active_scripts:
-            fonts = self.script_fonts[script]
             group = SCRIPT_TO_GROUP[script]
-
             if balance_groups:
                 scripts_in_group = [s for s in self.active_scripts if SCRIPT_TO_GROUP[s] == group]
                 target = samples_per_group // len(scripts_in_group)
             else:
                 target = samples_per_script
+            tasks.append((script, target))
 
-            generated = 0
+        # Worker function for one batch of images
+        def _generate_batch(script, count, fonts, words, h, mw, do_augment):
+            aug = RandAugmentOCR(n_ops=2, p=0.5) if do_augment else None
+            results = []
             attempts = 0
-            while generated < target and attempts < target * 5:
+            while len(results) < count and attempts < count * 5:
                 attempts += 1
-
                 if script == "emoji":
-                    img = render_emoji(self.height, self.max_width)
+                    img = render_emoji(h, mw)
                 else:
-                    words = SCRIPT_SAMPLES[script]
-                    img = render_word(random.choice(words), random.choice(fonts), self.height)
+                    img = render_word(random.choice(words), random.choice(fonts), h)
                 if img is None:
                     continue
-
-                if img.width > self.max_width:
-                    img = img.resize((self.max_width, self.height), Image.BILINEAR)
-                elif img.width < self.max_width:
-                    padded = Image.new("RGB", (self.max_width, self.height), (240, 240, 240))
+                if img.width > mw:
+                    img = img.resize((mw, h), Image.BILINEAR)
+                elif img.width < mw:
+                    padded = Image.new("RGB", (mw, h), (240, 240, 240))
                     padded.paste(img, (0, 0))
                     img = padded
+                if aug is not None:
+                    img = aug(img)
+                results.append(rgb_to_input(img))
+            return results
 
-                # Augment (on RGB, before color conversion)
-                if self.augmentor is not None:
-                    img = self.augmentor(img)
+        # Parallel generation using threads (GIL released by numpy/freetype C calls)
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import os
 
-                # Convert RGB → model input channels
-                self.images.append(rgb_to_input(img))
-                self.script_labels.append(self.script_to_idx[script])
-                self.group_labels.append(self.group_to_idx[group])
-                generated += 1
+        n_workers = min(os.cpu_count() or 4, 32)
+        self.images = []
+        self.script_labels = []
+        self.group_labels = []
 
-            print(f"  {script:<15} {generated:>5} images  (group: {group}, target: {target})")
+        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+            futures = {}
+            for script, target in tasks:
+                fonts = self.script_fonts[script]
+                words = SCRIPT_SAMPLES.get(script, ["placeholder"])
+                # Split into chunks for parallelism
+                chunk_size = max(100, target // n_workers)
+                remaining = target
+                while remaining > 0:
+                    batch = min(chunk_size, remaining)
+                    f = pool.submit(_generate_batch, script, batch, fonts, words,
+                                    self.height, self.max_width, augment)
+                    futures[f] = script
+                    remaining -= batch
+
+            for future in as_completed(futures):
+                script = futures[future]
+                group = SCRIPT_TO_GROUP[script]
+                batch_tensors = future.result()
+                for t in batch_tensors:
+                    self.images.append(t)
+                    self.script_labels.append(self.script_to_idx[script])
+                    self.group_labels.append(self.group_to_idx[group])
+
+        # Print per-script counts
+        from collections import Counter
+        script_counts = Counter()
+        for idx in self.script_labels:
+            for s, i in self.script_to_idx.items():
+                if i == idx:
+                    script_counts[s] += 1
+                    break
+        for script in self.active_scripts:
+            group = SCRIPT_TO_GROUP[script]
+            print(f"  {script:<15} {script_counts[script]:>5} images  (group: {group})")
 
         self.total = len(self.images)
         print(f"Total: {self.total} images, {self.num_scripts} scripts, {self.num_groups} groups\n")
