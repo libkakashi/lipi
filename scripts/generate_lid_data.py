@@ -36,8 +36,8 @@ from scripts.train_lid import (
 
 
 def _generate_batch(args_tuple):
-    """Generate all images for one script."""
-    script, count, fonts, words, h, mw, do_augment = args_tuple
+    """Generate images and save directly to disk. Returns (shard_path, script, count)."""
+    script, count, fonts, words, h, mw, do_augment, shard_path, script_idx, group_idx = args_tuple
     aug = RandAugmentOCR(n_ops=2, p=0.5) if do_augment else None
     results = []
     attempts = 0
@@ -62,11 +62,21 @@ def _generate_batch(args_tuple):
         if len(results) % 1000 == 0:
             elapsed = time.time() - t0
             rate = len(results) / elapsed if elapsed > 0 else 0
-            print(f"    [{script}] {len(results)}/{count} ({rate:.0f} img/s)")
+            print(f"    [{script}] {len(results)}/{count} ({rate:.0f} img/s)", flush=True)
+
+    # Save to disk immediately, free memory
+    n = len(results)
+    torch.save({
+        "images": torch.stack(results),
+        "script_labels": torch.full((n,), script_idx, dtype=torch.long),
+        "group_labels": torch.full((n,), group_idx, dtype=torch.long),
+    }, shard_path)
+    del results
+
     elapsed = time.time() - t0
-    rate = len(results) / elapsed if elapsed > 0 else 0
-    print(f"  {script:<15} {len(results):>5} images in {elapsed:.0f}s ({rate:.0f} img/s)")
-    return results
+    rate = n / elapsed if elapsed > 0 else 0
+    print(f"  {script:<15} {n:>5} images in {elapsed:.0f}s ({rate:.0f} img/s) -> {Path(shard_path).name}", flush=True)
+    return shard_path, script, n
 
 
 def main():
@@ -153,54 +163,39 @@ def main():
     print(f"\nGenerating {total_est} images across {len(active_scripts)} scripts, {len(active_groups)} groups...")
     start = time.time()
 
-    # Parallel generation — split each script into chunks across 48 workers
+    # Each worker saves its shard directly to disk — no memory buildup
     n_workers = 48
-    all_images = []
-    all_script_labels = []
-    all_group_labels = []
+    shard_dir = Path(args.out)
+    shard_dir.mkdir(parents=True, exist_ok=True)
 
-    # Build chunks: split large scripts across multiple workers
     chunks = []
+    shard_idx = 0
     for script, target in tasks:
         fonts = script_fonts[script]
         words = SCRIPT_SAMPLES.get(script, ["placeholder"])
-        # Split into chunks of ~2000 images each
+        group = SCRIPT_TO_GROUP[script]
         chunk_size = max(500, target // max(1, n_workers // len(tasks)))
         remaining = target
         while remaining > 0:
             batch = min(chunk_size, remaining)
-            chunks.append((script, batch, fonts, words, args.height, args.max_width, args.augment))
+            shard_path = str(shard_dir / f"shard_{shard_idx:04d}.pt")
+            chunks.append((script, batch, fonts, words, args.height, args.max_width,
+                          args.augment, shard_path, script_to_idx[script], group_to_idx[group]))
+            shard_idx += 1
             remaining -= batch
 
-    print(f"  {len(chunks)} chunks across {n_workers} workers\n")
-
-    # Save incrementally — each chunk appends to a shard dir, merge at end
-    shard_dir = Path(args.out)
-    shard_dir.mkdir(parents=True, exist_ok=True)
-    shard_idx = 0
-    done_count = 0
     total_chunks = len(chunks)
+    print(f"  {total_chunks} chunks across {n_workers} workers\n")
 
+    done_count = 0
     with ProcessPoolExecutor(max_workers=n_workers) as pool:
-        futures = {pool.submit(_generate_batch, chunk): chunk[0] for chunk in chunks}
-
+        futures = [pool.submit(_generate_batch, chunk) for chunk in chunks]
         for future in as_completed(futures):
-            script = futures[future]
-            group = SCRIPT_TO_GROUP[script]
-            batch = future.result()
-
-            # Save shard immediately
-            imgs = torch.stack(batch)
-            s_labels = torch.full((len(batch),), script_to_idx[script], dtype=torch.long)
-            g_labels = torch.full((len(batch),), group_to_idx[group], dtype=torch.long)
-            torch.save({"images": imgs, "script_labels": s_labels, "group_labels": g_labels},
-                       shard_dir / f"shard_{shard_idx:04d}.pt")
-            shard_idx += 1
-            done_count += len(batch)
-
+            _, script, n = future.result()
+            done_count += n
             elapsed = time.time() - start
             rate = done_count / elapsed if elapsed > 0 else 0
-            print(f"  [{shard_idx}/{total_chunks}] +{len(batch)} {script:<12s} | total: {done_count}/{total_est} ({rate:.0f} img/s)")
+            print(f"    total: {done_count}/{total_est} ({rate:.0f} img/s)", flush=True)
 
     elapsed = time.time() - start
     print(f"\nGenerated {done_count} images in {elapsed:.0f}s")
