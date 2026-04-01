@@ -745,10 +745,10 @@ def main():
                   f"ctc={metrics['ctc']:.4f} lid1={metrics['lid1']:.4f}  "
                   f"time={elapsed:.0f}s")
 
-        # Save
+        # Save (move to CPU to avoid OOM from temporary copies)
         ckpt_path = save_dir / f"moe_epoch{epoch}.pt"
         torch.save({
-            "model": model.state_dict(),
+            "model": {k: v.cpu() for k, v in model.state_dict().items()},
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
             "scaler": scaler.state_dict(),
