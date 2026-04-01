@@ -126,8 +126,8 @@ class LipiMoEEncoder(nn.Module):
         stem_depth: int = 3,
         # Shared SWA
         shared_dim: int = 288,
-        shared_blocks_4x4: int = 6,
-        shared_blocks_4x16: int = 3,
+        shared_blocks_4x4: int = 8,
+        shared_blocks_4x16: int = 4,
         shared_mlp_ratio: int = 4,
         # Expert SWA Stage 1
         stage1_dim: int = 288,
@@ -273,8 +273,8 @@ class LipiMoEEncoder(nn.Module):
         for block in self.shared_swa_4x16:
             x = block(x, h=h, w=w)
 
-        # LID-1
-        group_logits = self.lid_coarse.classifier(x.mean(dim=1))
+        # LID-1 (with learned attention pooling)
+        group_logits = self.lid_coarse.forward_seq(x)
         if group_ids is None:
             group_ids = group_logits.argmax(dim=-1)
 

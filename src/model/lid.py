@@ -121,16 +121,23 @@ def script_to_group_id(script: str) -> int:
 
 
 class LIDCoarse(nn.Module):
-    """LID-1: Coarse group classifier on stem features.
+    """LID-1: Coarse group classifier with learned attention pooling.
 
-    Global average pool + MLP. Separates 10 visually distinct families.
-    Hidden dim scales with input — enough capacity to disentangle script
-    identity from the rich visual features in stem output.
+    Instead of mean-pooling, learns which token positions are most
+    informative for script identification. A single distinctive character
+    (like Ж or ψ) can dominate the classification.
     """
 
-    def __init__(self, in_channels: int = 64, num_groups: int = NUM_GROUPS):
+    def __init__(self, in_channels: int = 288, num_groups: int = NUM_GROUPS):
         super().__init__()
-        hidden = in_channels * 2  # 128 for default 64-ch stem
+        # Learned attention pooling: which tokens matter for classification?
+        self.pool_attn = nn.Sequential(
+            nn.Linear(in_channels, 64),
+            nn.Tanh(),
+            nn.Linear(64, 1),
+        )
+        # Classifier MLP
+        hidden = in_channels * 2
         self.classifier = nn.Sequential(
             nn.Linear(in_channels, hidden),
             nn.ReLU(),
@@ -139,19 +146,22 @@ class LIDCoarse(nn.Module):
             nn.Linear(hidden // 2, num_groups),
         )
 
-    def forward(self, stem_features: Tensor) -> Tensor:
-        """
-        Args:
-            stem_features: (B, C, H, W) from stem output.
-        Returns:
-            logits: (B, num_groups)
-        """
-        pooled = stem_features.mean(dim=[2, 3])
+    def forward_seq(self, x: Tensor) -> Tensor:
+        """Classify from sequence features (B, T, C) — used by moe_encoder."""
+        attn_scores = self.pool_attn(x)                    # (B, T, 1)
+        attn_weights = torch.softmax(attn_scores, dim=1)   # (B, T, 1)
+        pooled = (x * attn_weights).sum(dim=1)             # (B, C)
         return self.classifier(pooled)
 
-    def predict(self, stem_features: Tensor) -> tuple[Tensor, Tensor]:
+    def forward(self, features: Tensor) -> Tensor:
+        """Classify from spatial features (B, C, H, W) — used by train_lid."""
+        B, C, H, W = features.shape
+        x = features.permute(0, 2, 3, 1).reshape(B, H * W, C)
+        return self.forward_seq(x)
+
+    def predict(self, features: Tensor) -> tuple[Tensor, Tensor]:
         """Predict group with confidence."""
-        logits = self.forward(stem_features)
+        logits = self.forward(features)
         probs = torch.softmax(logits, dim=-1)
         confidences, group_ids = probs.max(dim=-1)
         return group_ids, confidences

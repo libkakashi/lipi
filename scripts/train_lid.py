@@ -622,14 +622,11 @@ def train_coarse(stem, lid_coarse, dataset, train_set, val_set, args, device, co
         x = stem(x)  # (B, C, H, W)
         if shared_swa is not None:
             B, C, h, w = x.shape
-            x = x.permute(0, 2, 3, 1).reshape(B, h * w, C)  # (B, H*W, C)
-            x = swa_proj(x)  # (B, H*W, swa_dim)
+            x = x.permute(0, 2, 3, 1).reshape(B, h * w, C)
+            x = swa_proj(x)
             for block in shared_swa:
                 x = block(x, h=h, w=w)
-            # LIDCoarse expects (B, C, H, W) — pool the sequence
-            # Use mean pool over sequence → (B, swa_dim) → unsqueeze for LIDCoarse
-            pooled = x.mean(dim=1)  # (B, swa_dim)
-            return lid_coarse.classifier(pooled)  # skip LIDCoarse's own pooling
+            return lid_coarse.forward_seq(x)  # attention pooling + classify
         return lid_coarse(x)
 
     start_epoch = 1

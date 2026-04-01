@@ -398,8 +398,8 @@ def main():
     # Model
     parser.add_argument("--stem-depth", type=int, default=3)
     parser.add_argument("--shared-dim", type=int, default=288)
-    parser.add_argument("--shared-blocks-4x4", type=int, default=6)
-    parser.add_argument("--shared-blocks-4x16", type=int, default=3)
+    parser.add_argument("--shared-blocks-4x4", type=int, default=8)
+    parser.add_argument("--shared-blocks-4x16", type=int, default=4)
     parser.add_argument("--stage1-dim", type=int, default=288)
     parser.add_argument("--stage1-blocks", type=int, default=12)
     parser.add_argument("--stage2-dim", type=int, default=576)
