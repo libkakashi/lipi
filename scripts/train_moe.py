@@ -193,23 +193,71 @@ def collate_moe(batch):
 # Training
 # ---------------------------------------------------------------------------
 
+class CUDAPrefetcher:
+    """Overlap CPU→GPU data transfer with GPU computation using a separate stream."""
+
+    def __init__(self, loader, device):
+        self.loader = loader
+        self.device = device
+        self.stream = torch.cuda.Stream()
+
+    def __iter__(self):
+        self.iter = iter(self.loader)
+        self._preload()
+        return self
+
+    def _preload(self):
+        try:
+            self.next_batch = next(self.iter)
+        except StopIteration:
+            self.next_batch = None
+            return
+        with torch.cuda.stream(self.stream):
+            self.next_batch = tuple(
+                x.to(self.device, non_blocking=True) if isinstance(x, torch.Tensor) else x
+                for x in self.next_batch
+            )
+
+    def __next__(self):
+        torch.cuda.current_stream().wait_stream(self.stream)
+        batch = self.next_batch
+        if batch is None:
+            raise StopIteration
+        self._preload()
+        return batch
+
+    def __len__(self):
+        return len(self.loader)
+
+
 def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
                     group_tokenizers, ce_loss_fn, device, device_type, use_amp,
                     amp_dtype, epoch, total_epochs, grad_accum, log_interval):
     model.train()
-    ctc_loss_sum = lid1_loss_sum = total_loss_sum = 0.0
     n_batches = 0
 
-    for batch_idx, (imgs, targets, tgt_lens, gids, sids, _labels) in enumerate(train_loader):
-        imgs = imgs.to(device, non_blocking=True)
-        targets = targets.to(device, non_blocking=True)
-        tgt_lens = tgt_lens.to(device, non_blocking=True)
-        gids = gids.to(device, non_blocking=True)
-        sids = sids.to(device, non_blocking=True)
+    # Accumulate losses on GPU — avoid .item() sync every batch
+    ctc_loss_accum = torch.zeros(1, device=device)
+    lid1_loss_accum = torch.zeros(1, device=device)
+    total_loss_accum = torch.zeros(1, device=device)
+    log_ctc = torch.zeros(1, device=device)
+    log_lid1 = torch.zeros(1, device=device)
+    log_total = torch.zeros(1, device=device)
+    log_count = 0
 
-        # Skip empty labels
-        if (tgt_lens == 0).any():
-            continue
+    use_prefetch = device_type == "cuda"
+    loader = CUDAPrefetcher(train_loader, device) if use_prefetch else train_loader
+
+    for batch_idx, batch in enumerate(loader):
+        if use_prefetch:
+            imgs, targets, tgt_lens, gids, sids, _labels = batch
+        else:
+            imgs, targets, tgt_lens, gids, sids, _labels = batch
+            imgs = imgs.to(device, non_blocking=True)
+            targets = targets.to(device, non_blocking=True)
+            tgt_lens = tgt_lens.to(device, non_blocking=True)
+            gids = gids.to(device, non_blocking=True)
+            sids = sids.to(device, non_blocking=True)
 
         # Forward with LID-predicted routing
         with torch.amp.autocast(device_type, enabled=use_amp, dtype=amp_dtype):
@@ -219,37 +267,32 @@ def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
             pred_gids = out["group_ids"]
             lid1_loss = ce_loss_fn(out["group_logits"], gids)
 
-        # CTC constraint
-        if (tgt_lens > enc_lengths).any():
-            continue
+        # Build valid mask: LID-1 correct AND CTC length constraint met.
+        # All ops stay on GPU — no .any()/.item() sync.
+        valid = (pred_gids == gids) & (tgt_lens <= enc_lengths) & (tgt_lens > 0)
 
-        # CTC + LID-2 only where LID-1 routed correctly.
-        # Wrong routing → script_ids mismatch → skip to avoid garbage gradients.
-        lid1_correct_mask = (pred_gids == gids)
-        ctc_loss = torch.tensor(0.0, device=device)
-        lid2_loss = torch.tensor(0.0, device=device)
-
-        if lid1_correct_mask.any():
-            # CTC loss (float32 for numerical stability)
-            log_probs = logits[lid1_correct_mask].float().log_softmax(dim=-1).permute(1, 0, 2)
-            ctc_loss = F.ctc_loss(
-                log_probs, targets[lid1_correct_mask],
-                enc_lengths[lid1_correct_mask], tgt_lens[lid1_correct_mask],
+        # CTC loss on valid samples only.
+        # If valid is all-False, indexing gives empty tensors — guard with shape check
+        # (reads .shape from Python, no GPU sync).
+        valid_logits = logits[valid]
+        ctc_loss = torch.zeros(1, device=device)
+        if valid_logits.shape[0] > 0:
+            log_probs = valid_logits.float().log_softmax(dim=-1).permute(1, 0, 2)
+            ctc_raw = F.ctc_loss(
+                log_probs, targets[valid],
+                enc_lengths[valid], tgt_lens[valid],
                 blank=0, reduction="mean", zero_infinity=True,
             )
-            if torch.isinf(ctc_loss) or torch.isnan(ctc_loss):
-                ctc_loss = torch.tensor(0.0, device=device)
+            # Replace inf/nan without GPU sync: clamp is all-GPU
+            ctc_loss = torch.clamp(ctc_raw, min=0.0, max=100.0)
 
-            # LID-2 loss per multi-script group
-            for _g, script_logits, group_mask in out["script_logits_per_group"]:
-                # script_logits has shape (N_in_group, n_scripts)
-                # Only use samples that are BOTH in this group AND correctly routed
-                correctly_routed_in_group = lid1_correct_mask[group_mask]
-                if correctly_routed_in_group.any():
-                    lid2_loss = lid2_loss + ce_loss_fn(
-                        script_logits[correctly_routed_in_group],
-                        sids[group_mask][correctly_routed_in_group],
-                    )
+        # LID-2 loss per multi-script group (stays on GPU)
+        lid2_loss = torch.zeros(1, device=device)
+        for _g, script_logits, group_mask in out["script_logits_per_group"]:
+            routed_ok = valid[group_mask]
+            sl = script_logits[routed_ok]
+            if sl.shape[0] > 0:
+                lid2_loss = lid2_loss + ce_loss_fn(sl, sids[group_mask][routed_ok])
 
         loss = ctc_loss + lid1_loss.float() + lid2_loss.float()
 
@@ -264,31 +307,45 @@ def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
             old_scale = scaler.get_scale()
             scaler.step(optimizer)
             scaler.update()
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             if scaler.get_scale() >= old_scale:
                 scheduler.step()
 
-        ctc_loss_sum += ctc_loss.item()
-        lid1_loss_sum += lid1_loss.item()
-        total_loss_sum += loss.item() * (grad_accum if grad_accum > 1 else 1)
+        # Accumulate on GPU — no sync
+        mult = float(grad_accum) if grad_accum > 1 else 1.0
+        ctc_loss_accum += ctc_loss.detach()
+        lid1_loss_accum += lid1_loss.detach()
+        total_loss_accum += loss.detach() * mult
+        log_ctc += ctc_loss.detach()
+        log_lid1 += lid1_loss.detach()
+        log_total += loss.detach() * mult
         n_batches += 1
+        log_count += 1
 
+        # Only sync to CPU at log intervals
         if n_batches % log_interval == 0:
+            avg_ctc = log_ctc.item() / log_count
+            avg_lid1 = log_lid1.item() / log_count
+            avg_total = log_total.item() / log_count
             lr = scheduler.get_last_lr()[0]
             steps = len(train_loader)
             print(f"  [{epoch}/{total_epochs}] batch {batch_idx+1}/{steps}  "
-                  f"loss={loss.item()*(grad_accum if grad_accum>1 else 1):.4f} "
-                  f"(ctc={ctc_loss.item():.4f} lid1={lid1_loss.item():.4f})  "
+                  f"loss={avg_total:.4f} "
+                  f"(ctc={avg_ctc:.4f} lid1={avg_lid1:.4f})  "
                   f"lr={lr:.2e}")
+            log_ctc.zero_()
+            log_lid1.zero_()
+            log_total.zero_()
+            log_count = 0
 
     if n_batches == 0:
         print(f"Epoch {epoch}: no valid batches")
         return {}
 
     return {
-        "ctc": ctc_loss_sum / n_batches,
-        "lid1": lid1_loss_sum / n_batches,
-        "total": total_loss_sum / n_batches,
+        "ctc": ctc_loss_accum.item() / n_batches,
+        "lid1": lid1_loss_accum.item() / n_batches,
+        "total": total_loss_accum.item() / n_batches,
     }
 
 
@@ -504,6 +561,21 @@ def main():
             target_tensor[i, :len(ids)] = torch.tensor(ids, dtype=torch.long)
     print(f"  Max label length: {max_len}")
 
+    # Pre-filter: remove samples with empty labels or labels too long for CTC.
+    # This eliminates GPU→CPU sync points in the training loop.
+    max_enc_len = images.shape[3] // 4  # width // stride
+    valid = (target_len_tensor > 0) & (target_len_tensor <= max_enc_len)
+    n_filtered = (~valid).sum().item()
+    if n_filtered > 0:
+        keep = valid.nonzero(as_tuple=True)[0]
+        images = images[keep]
+        target_tensor = target_tensor[keep]
+        target_len_tensor = target_len_tensor[keep]
+        group_ids = group_ids[keep]
+        local_script_ids = local_script_ids[keep]
+        labels = [labels[i] for i in keep.tolist()]
+        print(f"  Filtered {n_filtered} samples (empty or too long for CTC)")
+
     # Dataset + split
     dataset = MoEDataset(images, target_tensor, target_len_tensor, group_ids, local_script_ids, labels)
     n_total = len(dataset)
@@ -513,11 +585,16 @@ def main():
         dataset, [n_train, n_val], generator=torch.Generator().manual_seed(42))
     print(f"Train: {n_train}, Val: {n_val}")
 
-    # DataLoaders (data in RAM — no workers needed)
+    # DataLoaders — num_workers=2 overlaps collation with GPU work
+    use_workers = device_type == "cuda"
     train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True,
-                              collate_fn=collate_moe, pin_memory=(device_type == "cuda"))
+                              collate_fn=collate_moe, pin_memory=(device_type == "cuda"),
+                              num_workers=2 if use_workers else 0,
+                              persistent_workers=use_workers)
     val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False,
-                            collate_fn=collate_moe, pin_memory=(device_type == "cuda"))
+                            collate_fn=collate_moe, pin_memory=(device_type == "cuda"),
+                            num_workers=2 if use_workers else 0,
+                            persistent_workers=use_workers)
 
     # Model
     model = LipiMoEEncoder(
@@ -537,6 +614,12 @@ def main():
 
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Model: {total_params / 1e6:.1f}M params ({n_groups} groups)")
+
+    # torch.compile — fuses kernels, reduces launch overhead
+    if device_type == "cuda":
+        print("Compiling model with torch.compile...")
+        model = torch.compile(model)
+        print("  Done.")
 
     # Optimizer
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
