@@ -332,8 +332,13 @@ def evaluate(model, val_loader, group_tokenizers, active_groups, device, device_
         for i, (label, pred_g, true_g) in enumerate(zip(labels, pred_gids_cpu, gids_cpu)):
             if pred_g >= n_groups:
                 continue
-            # Use first script tokenizer in the predicted group (for decoding)
-            tok = group_tokenizers[pred_g][0]
+            # Only decode when LID-1 is correct — wrong routing → wrong CTC head → invalid tokens
+            if pred_g != true_g:
+                ctc_total += 1
+                g_word_total[true_g] += 1
+                total_chars += len(str(label).strip())
+                continue
+            tok = group_tokenizers[true_g][0]
             # Collapse repeats + remove blanks
             seq = preds[i].tolist()
             chars = []
