@@ -870,6 +870,22 @@ def main():
         print(f"  Total: {len(full_dataset)} samples")
         active_scripts = selected_scripts
 
+    # ---- Determine active groups from scripts ----
+    active_groups = []
+    seen_groups = set()
+    for s in active_scripts:
+        g = SCRIPT_TO_GROUP.get(s)
+        if g and g not in seen_groups:
+            active_groups.append(g)
+            seen_groups.add(g)
+    n_groups = len(active_groups)
+    global_to_local = {}
+    for local_id, group_name in enumerate(active_groups):
+        global_id = GROUP_TO_ID[group_name]
+        global_to_local[global_id] = local_id
+    print(f"Active groups: {n_groups} -> {active_groups}")
+    print(f"  Group ID remap: {global_to_local}")
+
     # ---- Build tokenizer (after dataset so we can include shard labels) ----
     tokenizer = build_multi_script_tokenizer(selected_scripts, extra_words=shard_labels)
     print(f"Vocab size: {tokenizer.vocab_size}")
@@ -969,23 +985,6 @@ def main():
     )
 
     # ---- Build model ----
-    # Determine active groups from scripts + remap group IDs to 0..N-1
-    active_groups = []
-    seen_groups = set()
-    for s in active_scripts:
-        g = SCRIPT_TO_GROUP.get(s)
-        if g and g not in seen_groups:
-            active_groups.append(g)
-            seen_groups.add(g)
-    n_groups = len(active_groups)
-    # Build remap: global group_id -> local group_id (0..N-1)
-    global_to_local = {}
-    for local_id, group_name in enumerate(active_groups):
-        global_id = GROUP_TO_ID[group_name]
-        global_to_local[global_id] = local_id
-    print(f"Active groups: {n_groups} -> {active_groups}")
-    print(f"  Group ID remap: {global_to_local}")
-
     model = LipiMoEEncoder(
         stem_depth=args.stem_depth,
         shared_dim=args.shared_dim,
