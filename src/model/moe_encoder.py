@@ -24,7 +24,7 @@ from torch import Tensor
 from src.data.color import ColorProjection
 from src.model.stem import ResNetStem
 from src.model.pooling import LearnedHeightPooling
-from src.model.attention import SWABlock, SWABlockMoE
+from src.model.attention import SWABlock, FullyExpertSWABlock
 from src.model.lid import (
     LIDCoarse,
     SCRIPTS, NUM_SCRIPTS, NUM_GROUPS,
@@ -130,9 +130,9 @@ class LipiMoEEncoder(nn.Module):
         # Channel projection: shared → stage1
         self.proj1 = nn.Linear(shared_dim, stage1_dim) if shared_dim != stage1_dim else nn.Identity()
 
-        # Expert SWA Stage 1: group-specific, 4×4 window
+        # Expert SWA Stage 1: fully expert, 4×4 window
         self.stage1 = nn.ModuleList([
-            SWABlockMoE(
+            FullyExpertSWABlock(
                 dim=stage1_dim,
                 num_heads=stage1_dim // 32,
                 num_groups=num_groups,
@@ -148,9 +148,9 @@ class LipiMoEEncoder(nn.Module):
         # Channel projection: Stage 1 → Stage 2
         self.proj2 = nn.Linear(stage1_dim, stage2_dim)
 
-        # Expert SWA Stage 2: group-specific, 4×16 window
+        # Expert SWA Stage 2: fully expert, 4×16 window
         self.stage2 = nn.ModuleList([
-            SWABlockMoE(
+            FullyExpertSWABlock(
                 dim=stage2_dim,
                 num_heads=stage2_dim // 32,
                 num_groups=num_groups,

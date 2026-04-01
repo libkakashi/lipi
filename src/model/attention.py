@@ -372,6 +372,59 @@ class SWABlockMoE(nn.Module):
         return x
 
 
+class FullyExpertSWABlock(nn.Module):
+    """Fully expert SWA block — per-group attention + per-group MLP.
+
+    Every component is specialized per group. No shared params except LayerNorms.
+    Used after LID routing where full script specialization is needed.
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        num_groups: int,
+        window_h: int = 4,
+        window_w: int = 4,
+        shift: bool = False,
+        mlp_ratio: int = 4,
+    ):
+        super().__init__()
+        self.num_groups = num_groups
+        self.norm1 = nn.LayerNorm(dim)
+        self.expert_attns = nn.ModuleList([
+            ShiftedWindowAttention(dim, num_heads, window_h, window_w, shift)
+            for _ in range(num_groups)
+        ])
+        self.norm2 = nn.LayerNorm(dim)
+        self.expert_mlps = nn.ModuleList([
+            MLP(dim, mlp_ratio) for _ in range(num_groups)
+        ])
+
+    def forward(self, x: Tensor, h: int, w: int, group_ids: Tensor) -> Tensor:
+        # Expert attention
+        normed = self.norm1(x)
+        attn_out = torch.zeros_like(x)
+        for g in range(self.num_groups):
+            mask = (group_ids == g)
+            if mask.any():
+                result = self.expert_attns[g](normed[mask], h, w)
+                attn_out[mask] = result.to(attn_out.dtype)
+        x = x + attn_out
+
+        # Expert MLP
+        normed = self.norm2(x)
+        mlp_out = torch.zeros_like(x)
+        for g in range(self.num_groups):
+            mask = (group_ids == g)
+            if mask.any():
+                result = self.expert_mlps[g](normed[mask])
+                mlp_out[mask] = result.to(mlp_out.dtype)
+        x = x + mlp_out
+
+        return x
+
+
 class GlobalBlock(nn.Module):
     """Global self-attention block with pre-norm residual.
 
