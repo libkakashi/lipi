@@ -260,6 +260,7 @@ class LipiMoEEncoder(nn.Module):
         images: Tensor,
         group_ids: Tensor | None = None,
         script_ids: Tensor | None = None,
+        detach_shared: bool = False,
     ) -> dict:
         B = images.shape[0]
         W = images.shape[3]
@@ -286,6 +287,15 @@ class LipiMoEEncoder(nn.Module):
         group_logits = self.lid_coarse.forward_seq(x)
         if group_ids is None:
             group_ids = group_logits.argmax(dim=-1)
+
+        # Optionally detach shared features before expert path: LID gradient
+        # drives the shared backbone, CTC gradient drives expert blocks only.
+        # Without this, CTC gradient overwhelms LID at the shared backbone
+        # (optimizes for char recognition, not script discrimination).
+        # Used during GT routing; disabled during predicted routing so CTC
+        # co-trains LID through the backbone.
+        if detach_shared:
+            x = x.detach()
 
         # Project to stage1
         x = self.proj1(x)

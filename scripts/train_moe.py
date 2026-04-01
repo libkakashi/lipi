@@ -265,11 +265,14 @@ def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
 
         with torch.amp.autocast(device_type, enabled=use_amp, dtype=amp_dtype):
             if use_gt:
-                # GT routing: experts + CTC heads get correct groups
-                out = model(imgs, group_ids=gids, script_ids=sids)
+                # GT routing: experts + CTC heads get correct groups.
+                # detach_shared stops CTC gradient from overwhelming LID
+                # at the shared backbone level.
+                out = model(imgs, group_ids=gids, script_ids=sids, detach_shared=True)
             else:
-                # Predicted routing: LID-1 decides, realistic inference path
-                out = model(imgs, group_ids=None, script_ids=None)
+                # Predicted routing: LID-1 decides, realistic inference path.
+                # CTC gradient flows through backbone → co-trains LID.
+                out = model(imgs, group_ids=None, script_ids=None, detach_shared=False)
             logits = out["logits"]
             enc_lengths = out["lengths"]
             lid1_loss = ce_loss_fn(out["group_logits"], gids)
