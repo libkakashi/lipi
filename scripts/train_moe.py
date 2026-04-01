@@ -957,7 +957,7 @@ def main():
     )
     val_loader = DataLoader(
         val_dataset, batch_size=args.batch_size, shuffle=False,
-        collate_fn=collate_moe, num_workers=n_workers,
+        collate_fn=collate, num_workers=n_workers,
         pin_memory=is_cuda,
         persistent_workers=n_workers > 0,
         prefetch_factor=4 if n_workers > 0 else None,
@@ -1094,6 +1094,10 @@ def main():
                 # LID-1 loss (inside autocast)
                 lid1_loss = ce_loss_fn(out["group_logits"], batch_gids)
 
+            # Skip if any target is longer than encoder output (CTC constraint)
+            if (target_lengths > enc_lengths).any():
+                continue
+
             # CTC loss (outside autocast for float32 stability)
             log_probs = logits.float().log_softmax(dim=-1).permute(1, 0, 2)  # (T, B, V)
             loss_ctc = F.ctc_loss(
@@ -1178,7 +1182,7 @@ def main():
                 if _pre_encoded:
                     imgs, targets, tgt_lens, gids, labels = batch
                 else:
-                    imgs, labels, _, gids, _ = batch
+                    imgs, labels, sids, gids, widths = batch
                 imgs = imgs.to(device, non_blocking=True)
                 gids = gids.to(device, non_blocking=True)
 
@@ -1192,10 +1196,8 @@ def main():
                 # CTC accuracy (greedy decode)
                 decoded = ctc_greedy_decode(out["logits"].float().cpu(), tokenizer)
                 for dec, label in zip(decoded, labels):
-                    if isinstance(label, torch.Tensor):
-                        continue  # shouldn't happen now but safety
                     ctc_total += 1
-                    if dec.strip().lower() == label.strip().lower():
+                    if dec.strip().lower() == str(label).strip().lower():
                         ctc_correct += 1
 
         lid_acc = 100 * lid_correct / max(lid_total, 1)

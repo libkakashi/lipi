@@ -424,51 +424,28 @@ class FullyExpertSWABlock(nn.Module):
 
     def forward(self, x: Tensor, h: int, w: int, group_ids: Tensor) -> Tensor:
         B = x.shape[0]
-        use_streams = x.is_cuda and self.num_groups > 1
 
         sorted_idx, bounds = self._get_group_boundaries(group_ids, B)
         x_sorted = x[sorted_idx]
 
-        # Expert attention — parallel via CUDA streams
+        # Expert attention (sequential — CUDA streams break autograd)
         normed = self.norm1(x_sorted)
         attn_out = torch.empty_like(x_sorted)
-
-        if use_streams:
-            streams = [torch.cuda.Stream() for _ in range(self.num_groups)]
-            for g in range(self.num_groups):
-                s, e = bounds[g]
-                if s < e:
-                    with torch.cuda.stream(streams[g]):
-                        attn_out[s:e] = self.expert_attns[g](normed[s:e], h, w).to(attn_out.dtype)
-            torch.cuda.synchronize()
-        else:
-            for g in range(self.num_groups):
-                s, e = bounds[g]
-                if s < e:
-                    attn_out[s:e] = self.expert_attns[g](normed[s:e], h, w).to(attn_out.dtype)
-
+        for g in range(self.num_groups):
+            s, e = bounds[g]
+            if s < e:
+                attn_out[s:e] = self.expert_attns[g](normed[s:e], h, w).to(attn_out.dtype)
         x_sorted = x_sorted + attn_out
 
-        # Expert MLP — parallel via CUDA streams
+        # Expert MLP
         normed = self.norm2(x_sorted)
         mlp_out = torch.empty_like(x_sorted)
-
-        if use_streams:
-            for g in range(self.num_groups):
-                s, e = bounds[g]
-                if s < e:
-                    with torch.cuda.stream(streams[g]):
-                        mlp_out[s:e] = self.expert_mlps[g](normed[s:e]).to(mlp_out.dtype)
-            torch.cuda.synchronize()
-        else:
-            for g in range(self.num_groups):
-                s, e = bounds[g]
-                if s < e:
-                    mlp_out[s:e] = self.expert_mlps[g](normed[s:e]).to(mlp_out.dtype)
-
+        for g in range(self.num_groups):
+            s, e = bounds[g]
+            if s < e:
+                mlp_out[s:e] = self.expert_mlps[g](normed[s:e]).to(mlp_out.dtype)
         x_sorted = x_sorted + mlp_out
 
-        # Unsort back to original order
         return x_sorted[sorted_idx.argsort()]
 
 
