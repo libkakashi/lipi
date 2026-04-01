@@ -37,8 +37,63 @@ from scripts.train_lid import (
 )
 
 
+def _get_script_chars(script: str, words: list[str]) -> list[str]:
+    """Get all unique characters from a script's word list."""
+    chars = set()
+    for word in words:
+        for ch in word:
+            if ch.strip() and ord(ch) > 32:
+                chars.add(ch)
+    return sorted(chars)
+
+
+def _generate_char_batch(args_tuple):
+    """Generate single-character images. One image per character, repeated with variations."""
+    script, chars, reps_per_char, fonts, h, mw, do_augment, shard_path = args_tuple
+    aug = RandAugmentOCR(n_ops=2, p=0.5) if do_augment else None
+
+    images = []
+    labels = []
+    t0 = time.time()
+
+    for ch in chars:
+        for _ in range(reps_per_char):
+            img = render_word(ch, random.choice(fonts), h)
+            if img is None:
+                continue
+            if img.width > mw:
+                img = img.resize((mw, h), Image.BILINEAR)
+            elif img.width < mw:
+                padded = Image.new("RGB", (mw, h), (240, 240, 240))
+                padded.paste(img, (0, 0))
+                img = padded
+            if aug is not None:
+                img = aug(img)
+            images.append(rgb_to_input(img))
+            labels.append(ch)
+
+    if not images:
+        return shard_path, script, 0
+
+    n = len(images)
+    script_id = SCRIPT_TO_ID[script]
+    group_id = GROUP_TO_ID[SCRIPT_TO_GROUP[script]]
+    torch.save({
+        "images": torch.stack(images),
+        "labels": labels,
+        "script_ids": torch.full((n,), script_id, dtype=torch.long),
+        "group_ids": torch.full((n,), group_id, dtype=torch.long),
+    }, shard_path)
+    del images, labels
+
+    elapsed = time.time() - t0
+    rate = n / elapsed if elapsed > 0 else 0
+    print(f"  {script:<15} {n:>5} char images ({len(chars)} unique chars × {reps_per_char} reps) in {elapsed:.0f}s", flush=True)
+    return shard_path, script, n
+
+
 def _generate_batch(args_tuple):
-    """Generate images for one chunk. Saves shard to disk directly."""
+    """Generate word images for one chunk. Saves shard to disk directly."""
     script, count, fonts, words, h, mw, do_augment, shard_path = args_tuple
     aug = RandAugmentOCR(n_ops=2, p=0.5) if do_augment else None
 
@@ -107,6 +162,10 @@ def main():
     parser.add_argument("--no-augment", action="store_true")
     parser.add_argument("--height", type=int, default=32)
     parser.add_argument("--max-width", type=int, default=192)
+    parser.add_argument("--include-chars", action="store_true",
+                        help="Also generate single-character images for all unique chars")
+    parser.add_argument("--char-reps", type=int, default=3,
+                        help="Augmentation repetitions per character (default: 3)")
     parser.add_argument("--out", type=str, default="data/shards")
     parser.add_argument("--workers", type=int, default=48)
     args = parser.parse_args()
@@ -207,6 +266,47 @@ def main():
                 done += n
                 elapsed = time.time() - start
                 print(f"    total: {done}/{total_est} ({done/elapsed:.0f} img/s)", flush=True)
+
+    # === Single-character images ===
+    if args.include_chars:
+        print(f"\n{'='*60}")
+        print(f"Generating single-character images ({args.char_reps} reps per char)")
+        print(f"{'='*60}")
+
+        char_chunks = []
+        for script in valid_scripts:
+            if script == "emoji":
+                continue
+            fonts = script_fonts[script]
+            words = SCRIPT_SAMPLES.get(script, [])
+            chars = _get_script_chars(script, words)
+            if not chars:
+                continue
+
+            # Split into chunks of ~500 chars for parallelism
+            chunk_size = max(200, len(chars) // max(1, args.workers // len(valid_scripts)))
+            for ci in range(0, len(chars), chunk_size):
+                char_subset = chars[ci:ci + chunk_size]
+                shard_path = str(shard_dir / f"char_shard_{shard_idx:04d}.pt")
+                if Path(shard_path).exists() and Path(shard_path).stat().st_size > 100:
+                    shard_idx += 1
+                    continue
+                char_chunks.append((script, char_subset, args.char_reps, fonts,
+                                    args.height, args.max_width, args.augment, shard_path))
+                shard_idx += 1
+
+        if char_chunks:
+            print(f"  {len(char_chunks)} char chunks across {min(args.workers, len(char_chunks))} workers\n")
+            char_start = time.time()
+            char_done = 0
+            with Pool(processes=min(args.workers, len(char_chunks)), maxtasksperchild=1) as pool:
+                for result in pool.imap_unordered(_generate_char_batch, char_chunks):
+                    _, script, n = result
+                    char_done += n
+            char_elapsed = time.time() - char_start
+            print(f"\n  Total: {char_done} char images in {char_elapsed:.0f}s")
+        else:
+            print("  All char shards exist.")
 
     # Save metadata
     active_groups = []
