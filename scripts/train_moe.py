@@ -233,7 +233,7 @@ def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
 
 
 @torch.no_grad()
-def evaluate(model, val_loader, group_tokenizers, active_groups, device, device_type, use_amp, amp_dtype):
+def evaluate(model, val_loader, group_tokenizers, active_groups, device, device_type, use_amp, amp_dtype, max_batches=50):
     model.eval()
     n_groups = len(group_tokenizers)
     lid_correct = lid_total = ctc_correct = ctc_total = total_chars = correct_chars = 0
@@ -245,7 +245,9 @@ def evaluate(model, val_loader, group_tokenizers, active_groups, device, device_
     g_char_correct = [0] * n_groups
     g_char_total = [0] * n_groups
 
-    for batch in val_loader:
+    for batch_idx, batch in enumerate(val_loader):
+        if batch_idx >= max_batches:
+            break
         imgs, targets, tgt_lens, gids, labels = batch
         imgs = imgs.to(device, non_blocking=True)
         gids = gids.to(device, non_blocking=True)
@@ -264,16 +266,23 @@ def evaluate(model, val_loader, group_tokenizers, active_groups, device, device_
                 g_lid_total[g] += mask.sum().item()
                 g_lid_correct[g] += (pred_gids[mask] == g).sum().item()
 
-        # CTC decode per sample
-        logits_cpu = out["logits"].float().cpu()
-        pred_gids_cpu = pred_gids.cpu()
-        gids_cpu = gids.cpu()
-        for i, (label, pred_g, true_g) in enumerate(zip(labels, pred_gids_cpu.tolist(), gids_cpu.tolist())):
-            if pred_g >= len(group_tokenizers):
+        # Batch CTC decode — argmax once, then collapse per sample
+        preds = out["logits"].float().cpu().argmax(dim=-1)  # (B, T)
+        pred_gids_cpu = pred_gids.cpu().tolist()
+        gids_cpu = gids.cpu().tolist()
+        for i, (label, pred_g, true_g) in enumerate(zip(labels, pred_gids_cpu, gids_cpu)):
+            if pred_g >= n_groups:
                 continue
             tok = group_tokenizers[pred_g]
-            decoded = ctc_greedy_decode(logits_cpu[i:i+1], tok)
-            dec_s = decoded[0].strip().lower()
+            # Collapse repeats + remove blanks
+            seq = preds[i].tolist()
+            chars = []
+            prev = -1
+            for t in seq:
+                if t != prev and t != 0:
+                    chars.append(t)
+                prev = t
+            dec_s = tok.decode(chars).strip().lower()
             ref_s = str(label).strip().lower()
             ctc_total += 1
             g_word_total[true_g] += 1
