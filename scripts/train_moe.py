@@ -938,6 +938,7 @@ def main():
     use_amp = device.type in ("cuda", "mps")
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True
+        torch.set_float32_matmul_precision('high')
         amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
         use_scaler = amp_dtype == torch.float16
         scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
