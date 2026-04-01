@@ -844,7 +844,7 @@ def main():
 
         # Pre-encode labels will happen after tokenizer is built (below)
         _shard_images = images
-        _shard_group_ids = group_ids
+        _shard_group_ids = group_ids  # will be remapped after active_groups is computed
         _shard_script_ids = script_ids
 
     elif args.synth:
@@ -899,8 +899,13 @@ def main():
             def __getitem__(self, idx):
                 return self.imgs[idx], self.targets[idx], self.target_lens[idx], self.gids[idx], self.labels[idx]
 
-        full_dataset = PreEncodedDataset(_shard_images, target_tensor, target_len_tensor, _shard_group_ids, shard_labels)
-        del _shard_images, _shard_group_ids, _shard_script_ids
+        # Remap global group_ids to local 0..N-1
+        remapped_gids = _shard_group_ids.clone()
+        for global_id, local_id in global_to_local.items():
+            remapped_gids[_shard_group_ids == global_id] = local_id
+
+        full_dataset = PreEncodedDataset(_shard_images, target_tensor, target_len_tensor, remapped_gids, shard_labels)
+        del _shard_images, _shard_group_ids, _shard_script_ids, remapped_gids
         _pre_encoded = True
     else:
         _pre_encoded = False
@@ -964,6 +969,23 @@ def main():
     )
 
     # ---- Build model ----
+    # Determine active groups from scripts + remap group IDs to 0..N-1
+    active_groups = []
+    seen_groups = set()
+    for s in active_scripts:
+        g = SCRIPT_TO_GROUP.get(s)
+        if g and g not in seen_groups:
+            active_groups.append(g)
+            seen_groups.add(g)
+    n_groups = len(active_groups)
+    # Build remap: global group_id -> local group_id (0..N-1)
+    global_to_local = {}
+    for local_id, group_name in enumerate(active_groups):
+        global_id = GROUP_TO_ID[group_name]
+        global_to_local[global_id] = local_id
+    print(f"Active groups: {n_groups} -> {active_groups}")
+    print(f"  Group ID remap: {global_to_local}")
+
     model = LipiMoEEncoder(
         stem_depth=args.stem_depth,
         shared_dim=args.shared_dim,
@@ -972,6 +994,7 @@ def main():
         stage1_blocks=args.stage1_blocks,
         stage2_dim=args.stage2_dim,
         stage2_blocks=args.stage2_blocks,
+        num_groups=n_groups,
         vocab_size=tokenizer.vocab_size,
         head_hidden=args.head_hidden,
     ).to(device)
