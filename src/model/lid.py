@@ -3,19 +3,20 @@ Script Identification (LID).
 
 Single-stage routing based on visual character set similarity:
 
-  LID-1 (after shared SWA): 9 group classification.
+  LID-1 (after shared SWA): 10 group classification.
     Routes to group-specific expert attention + expert MLP + group CTC heads.
 
-Groups (9):
+Groups (10):
   1. Latin (~819 chars, 22 languages, ~3B speakers)
   2. Cyrillic + Greek (~1160 chars, ~300M speakers)
   3. Arabic (~720 chars incl. Persian/Urdu, ~500M)
   4. Hebrew (~293 chars, ~9M)
-  5. CJK (~27K chars, Chinese/Japanese/Korean, ~1.5B)
-  6. N+E Indian Brahmic (~710 chars, Devanagari/Gurmukhi/Gujarati/Bengali, ~1B+)
-  7. South Indian Brahmic (~536 chars, Kannada/Telugu/Malayalam/Tamil, ~285M)
-  8. SE Asian (~533 chars, Thai/Lao, ~90M)
-  9. Emoji (universal)
+  5. Han + Kana (~21K chars, Chinese/Japanese, ~1.4B)
+  6. Korean (~5.7K chars, Hangul, ~80M)
+  7. N+E Indian Brahmic (~710 chars, Devanagari/Gurmukhi/Gujarati/Bengali, ~1B+)
+  8. South Indian Brahmic (~536 chars, Kannada/Telugu/Malayalam/Tamil, ~285M)
+  9. SE Asian (~533 chars, Thai/Lao, ~90M)
+  10. Emoji (universal)
 """
 
 import torch
@@ -35,8 +36,9 @@ SCRIPTS = [
     "arabic",      # 3
     # Group 4: Hebrew
     "hebrew",      # 4
-    # Group 5: CJK
+    # Group 5: Han + Kana (Chinese/Japanese)
     "cjk",         # 5
+    # Group 6: Korean
     "korean",      # 6
     # Group 6: N+E Indian Brahmic
     "devanagari",  # 7
@@ -66,11 +68,12 @@ GROUPS = [
     "cyrillic_greek",    # 1  ~668+492 chars
     "arabic",            # 2  ~720 chars
     "hebrew",            # 3  ~293 chars
-    "cjk",               # 4  ~27K chars
-    "ne_indic",          # 5  ~710 chars (Devanagari, Gurmukhi, Gujarati, Bengali)
-    "south_indic",       # 6  ~536 chars (Kannada, Telugu, Malayalam, Tamil)
-    "southeast_asian",   # 7  ~533 chars (Thai, Lao)
-    "emoji",             # 8
+    "han_kana",          # 4  ~21K chars (Chinese ideographs + Japanese kana)
+    "korean",            # 5  ~5.7K chars (Hangul syllables)
+    "ne_indic",          # 6  ~710 chars (Devanagari, Gurmukhi, Gujarati, Bengali)
+    "south_indic",       # 7  ~536 chars (Kannada, Telugu, Malayalam, Tamil)
+    "southeast_asian",   # 8  ~533 chars (Thai, Lao)
+    "emoji",             # 9
 ]
 
 GROUP_TO_ID = {name: i for i, name in enumerate(GROUPS)}
@@ -83,8 +86,8 @@ SCRIPT_TO_GROUP = {
     "greek": "cyrillic_greek",
     "arabic": "arabic",
     "hebrew": "hebrew",
-    "cjk": "cjk",
-    "korean": "cjk",
+    "cjk": "han_kana",
+    "korean": "korean",
     "devanagari": "ne_indic",
     "gurmukhi": "ne_indic",
     "gujarati": "ne_indic",
@@ -103,7 +106,8 @@ GROUP_SCRIPTS = {
     "cyrillic_greek": ["cyrillic", "greek"],
     "arabic": ["arabic"],
     "hebrew": ["hebrew"],
-    "cjk": ["cjk", "korean"],
+    "han_kana": ["cjk"],
+    "korean": ["korean"],
     "ne_indic": ["devanagari", "gurmukhi", "gujarati", "bengali"],
     "south_indic": ["kannada", "telugu", "malayalam", "tamil"],
     "southeast_asian": ["thai", "lao"],
@@ -119,7 +123,7 @@ def script_to_group_id(script: str) -> int:
 class LIDCoarse(nn.Module):
     """LID-1: Coarse group classifier on stem features.
 
-    Global average pool + MLP. Separates 9 visually distinct families.
+    Global average pool + MLP. Separates 10 visually distinct families.
     Hidden dim scales with input — enough capacity to disentangle script
     identity from the rich visual features in stem output.
     """
