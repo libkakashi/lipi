@@ -281,13 +281,14 @@ def main():
     parser.add_argument("--log-interval", type=int, default=20)
     # Model
     parser.add_argument("--stem-depth", type=int, default=3)
-    parser.add_argument("--shared-blocks", type=int, default=3)
     parser.add_argument("--shared-dim", type=int, default=288)
+    parser.add_argument("--shared-blocks-4x4", type=int, default=6)
+    parser.add_argument("--shared-blocks-4x16", type=int, default=3)
     parser.add_argument("--stage1-dim", type=int, default=288)
-    parser.add_argument("--stage1-blocks", type=int, default=5)
+    parser.add_argument("--stage1-blocks", type=int, default=12)
     parser.add_argument("--stage2-dim", type=int, default=576)
-    parser.add_argument("--stage2-blocks", type=int, default=9)
-    parser.add_argument("--head-hidden", type=int, default=246)
+    parser.add_argument("--stage2-blocks", type=int, default=8)
+    parser.add_argument("--head-hidden", type=int, default=384)
     args = parser.parse_args()
 
     # Device
@@ -370,7 +371,8 @@ def main():
     model = LipiMoEEncoder(
         stem_depth=args.stem_depth,
         shared_dim=args.shared_dim,
-        shared_blocks=args.shared_blocks,
+        shared_blocks_4x4=args.shared_blocks_4x4,
+        shared_blocks_4x16=args.shared_blocks_4x16,
         stage1_dim=args.stage1_dim,
         stage1_blocks=args.stage1_blocks,
         stage2_dim=args.stage2_dim,

@@ -76,28 +76,24 @@ class LipiMoEEncoder(nn.Module):
         self,
         stem_channels: int = 64,
         stem_depth: int = 3,
-        # Shared SWA (before LID)
+        # Shared SWA 4×4 (character-level, before LID)
         shared_dim: int = 288,
-        shared_blocks: int = 3,
-        shared_window_h: int = 4,
-        shared_window_w: int = 4,
+        shared_blocks_4x4: int = 6,
+        # Shared SWA 4×16 (sequence-level, before LID)
+        shared_blocks_4x16: int = 3,
         shared_mlp_ratio: int = 4,
         # Expert SWA Stage 1 (after LID, 4×4 window)
         stage1_dim: int = 288,
-        stage1_blocks: int = 5,
-        stage1_window_h: int = 4,
-        stage1_window_w: int = 4,
+        stage1_blocks: int = 12,
         stage1_mlp_ratio: int = 4,
         # Expert SWA Stage 2 (4×16 window)
         stage2_dim: int = 576,
-        stage2_blocks: int = 9,
-        stage2_window_h: int = 4,
-        stage2_window_w: int = 16,
+        stage2_blocks: int = 8,
         stage2_mlp_ratio: int = 4,
         # Groups
         num_groups: int = NUM_GROUPS,
         vocab_size: int = 171,
-        head_hidden: int = 246,
+        head_hidden: int = 384,
         head_layers: int = 2,
         head_dropout: float = 0.1,
     ):
@@ -113,15 +109,26 @@ class LipiMoEEncoder(nn.Module):
         # Channel projection: stem → shared SWA dim
         self.proj_shared = nn.Linear(stem_channels, shared_dim)
 
-        # Shared SWA blocks (universal features, feeds LID)
-        self.shared_swa = nn.ModuleList([
+        # Shared SWA 4×4 blocks (character-level universal features)
+        self.shared_swa_4x4 = nn.ModuleList([
             SWABlock(
                 dim=shared_dim,
                 num_heads=shared_dim // 32,
-                window_h=shared_window_h, window_w=shared_window_w,
+                window_h=4, window_w=4,
                 shift=(i % 2 == 1), mlp_ratio=shared_mlp_ratio,
             )
-            for i in range(shared_blocks)
+            for i in range(shared_blocks_4x4)
+        ])
+
+        # Shared SWA 4×16 blocks (sequence-level universal features)
+        self.shared_swa_4x16 = nn.ModuleList([
+            SWABlock(
+                dim=shared_dim,
+                num_heads=shared_dim // 32,
+                window_h=4, window_w=16,
+                shift=(i % 2 == 1), mlp_ratio=shared_mlp_ratio,
+            )
+            for i in range(shared_blocks_4x16)
         ])
 
         # LID-1: coarse group classification
@@ -136,7 +143,7 @@ class LipiMoEEncoder(nn.Module):
                 dim=stage1_dim,
                 num_heads=stage1_dim // 32,
                 num_groups=num_groups,
-                window_h=stage1_window_h, window_w=stage1_window_w,
+                window_h=4, window_w=4,
                 shift=(i % 2 == 1), mlp_ratio=stage1_mlp_ratio,
             )
             for i in range(stage1_blocks)
@@ -154,7 +161,7 @@ class LipiMoEEncoder(nn.Module):
                 dim=stage2_dim,
                 num_heads=stage2_dim // 32,
                 num_groups=num_groups,
-                window_h=stage2_window_h, window_w=stage2_window_w,
+                window_h=4, window_w=16,
                 shift=(i % 2 == 1), mlp_ratio=stage2_mlp_ratio,
             )
             for i in range(stage2_blocks)
@@ -195,8 +202,12 @@ class LipiMoEEncoder(nn.Module):
         x = x.permute(0, 2, 3, 1).reshape(B, h * w, C)
         x = self.proj_shared(x)
 
-        # Shared SWA blocks
-        for block in self.shared_swa:
+        # Shared SWA 4×4 (character-level)
+        for block in self.shared_swa_4x4:
+            x = block(x, h=h, w=w)
+
+        # Shared SWA 4×16 (sequence-level)
+        for block in self.shared_swa_4x16:
             x = block(x, h=h, w=w)
 
         # LID-1: group classification

@@ -105,7 +105,7 @@ def detect_group(text: str) -> str:
         Group name from GROUPS list.
     """
     script = detect_script(text)
-    return SCRIPT_TO_GROUP.get(script, "latin_cyrillic")
+    return SCRIPT_TO_GROUP.get(script, "latin")
 
 
 def detect_script_id(text: str) -> int:
