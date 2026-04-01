@@ -101,6 +101,7 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
             if pred_g != true_g:
                 ctc_total += 1
                 g_word_total[true_g] += 1
+                g_char_total[true_g] += len(ref_s)
                 total_chars += len(ref_s)
                 s_word_total[key] = s_word_total.get(key, 0) + 1
                 s_char_total[key] = s_char_total.get(key, 0) + len(ref_s)
