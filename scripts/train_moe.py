@@ -840,21 +840,12 @@ def main():
         del all_imgs, all_sids, all_gids
         shard_labels = all_labels
         print(f"  {len(all_labels)} images loaded")
-
-        # Wrap as a dataset that returns (image, label, script_id, group_id, width)
-        class ShardDataset(torch.utils.data.Dataset):
-            def __init__(self, imgs, labels, sids, gids):
-                self.imgs = imgs
-                self.labels = labels
-                self.sids = sids
-                self.gids = gids
-            def __len__(self):
-                return len(self.labels)
-            def __getitem__(self, idx):
-                return self.imgs[idx], self.labels[idx], self.sids[idx], self.gids[idx], self.imgs[idx].shape[-1]
-
-        full_dataset = ShardDataset(images, all_labels, script_ids, group_ids)
         active_scripts = meta["active_scripts"]
+
+        # Pre-encode labels will happen after tokenizer is built (below)
+        _shard_images = images
+        _shard_group_ids = group_ids
+        _shard_script_ids = script_ids
 
     elif args.synth:
         full_dataset = SyntheticMoEDataset(
@@ -883,6 +874,36 @@ def main():
     tokenizer = build_multi_script_tokenizer(selected_scripts, extra_words=shard_labels)
     print(f"Vocab size: {tokenizer.vocab_size}")
 
+    # ---- Pre-encode labels for --data mode (eliminates per-batch tokenization) ----
+    if args.data and shard_labels:
+        print("Pre-encoding labels...")
+        encoded = [tokenizer.encode(w) for w in shard_labels]
+        max_len = max(len(e) for e in encoded)
+        target_tensor = torch.zeros(len(encoded), max_len, dtype=torch.long)
+        target_len_tensor = torch.zeros(len(encoded), dtype=torch.long)
+        for i, ids in enumerate(encoded):
+            target_len_tensor[i] = len(ids)
+            if ids:
+                target_tensor[i, :len(ids)] = torch.tensor(ids, dtype=torch.long)
+        print(f"  Max label length: {max_len}, encoded {len(encoded)} labels")
+
+        class PreEncodedDataset(torch.utils.data.Dataset):
+            def __init__(self, imgs, targets, target_lens, gids):
+                self.imgs = imgs
+                self.targets = targets
+                self.target_lens = target_lens
+                self.gids = gids
+            def __len__(self):
+                return self.imgs.shape[0]
+            def __getitem__(self, idx):
+                return self.imgs[idx], self.targets[idx], self.target_lens[idx], self.gids[idx]
+
+        full_dataset = PreEncodedDataset(_shard_images, target_tensor, target_len_tensor, _shard_group_ids)
+        del _shard_images, _shard_group_ids, _shard_script_ids, shard_labels
+        _pre_encoded = True
+    else:
+        _pre_encoded = False
+
     # ---- Train/val split ----
     n_total = len(full_dataset)
     n_val = max(1, int(n_total * args.val_split))
@@ -902,20 +923,25 @@ def main():
         n_workers = args.num_workers
     is_cuda = device.type == "cuda"
 
-    # Fast collate for pre-loaded data (all images same size, skip padding loop)
-    def collate_fast(batch):
-        first = batch[0]
-        if len(first) == 5:
-            images, labels, sids, gids, widths = zip(*batch)
-        else:
-            images, labels, sids, gids = zip(*batch)
-            widths = [img.shape[-1] for img in images]
-        return (torch.stack(images), list(labels),
-                torch.tensor(sids, dtype=torch.long),
-                torch.tensor(gids, dtype=torch.long),
-                torch.tensor(widths, dtype=torch.long))
-
-    collate = collate_fast if args.data else collate_moe
+    # Collate selection
+    if _pre_encoded:
+        # Pre-encoded: (image, targets, target_len, group_id) — all tensors, default collate works
+        collate = None  # PyTorch default
+    elif args.data:
+        def collate_fast(batch):
+            first = batch[0]
+            if len(first) == 5:
+                images, labels, sids, gids, widths = zip(*batch)
+            else:
+                images, labels, sids, gids = zip(*batch)
+                widths = [img.shape[-1] for img in images]
+            return (torch.stack(images), list(labels),
+                    torch.tensor(sids, dtype=torch.long),
+                    torch.tensor(gids, dtype=torch.long),
+                    torch.tensor(widths, dtype=torch.long))
+        collate = collate_fast
+    else:
+        collate = collate_moe
 
     train_loader = DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True,
@@ -1028,25 +1054,31 @@ def main():
         epoch_total_loss = 0.0
         n_batches = 0
 
-        for batch_idx, (batch_imgs, batch_labels, batch_sids, batch_gids, widths) in enumerate(train_loader):
-            batch_imgs = batch_imgs.to(device, non_blocking=True)
-            batch_gids = batch_gids.to(device, non_blocking=True)
-
-            # Encode targets for CTC
-            target_ids = [tokenizer.encode(label) for label in batch_labels]
-            target_lengths = torch.tensor(
-                [len(ids) for ids in target_ids], dtype=torch.long, device=device,
-            )
-
-            # Skip batches with empty labels
-            if (target_lengths == 0).any():
-                continue
-
-            max_tgt = target_lengths.max().item()
-            targets = torch.zeros(len(batch_labels), max_tgt, dtype=torch.long, device=device)
-            for i, ids in enumerate(target_ids):
-                if ids:
-                    targets[i, :len(ids)] = torch.tensor(ids, dtype=torch.long, device=device)
+        for batch_idx, batch in enumerate(train_loader):
+            if _pre_encoded:
+                # Pre-encoded: (images, targets, target_lengths, group_ids)
+                batch_imgs, targets, target_lengths, batch_gids = batch
+                batch_imgs = batch_imgs.to(device, non_blocking=True)
+                targets = targets.to(device, non_blocking=True)
+                target_lengths = target_lengths.to(device, non_blocking=True)
+                batch_gids = batch_gids.to(device, non_blocking=True)
+                if (target_lengths == 0).any():
+                    continue
+            else:
+                # String labels: encode on the fly
+                batch_imgs, batch_labels, batch_sids, batch_gids, widths = batch
+                batch_imgs = batch_imgs.to(device, non_blocking=True)
+                batch_gids = batch_gids.to(device, non_blocking=True)
+                target_ids = [tokenizer.encode(label) for label in batch_labels]
+                target_lengths = torch.tensor(
+                    [len(ids) for ids in target_ids], dtype=torch.long, device=device)
+                if (target_lengths == 0).any():
+                    continue
+                max_tgt = target_lengths.max().item()
+                targets = torch.zeros(len(batch_labels), max_tgt, dtype=torch.long, device=device)
+                for i, ids in enumerate(target_ids):
+                    if ids:
+                        targets[i, :len(ids)] = torch.tensor(ids, dtype=torch.long, device=device)
 
             # Forward pass with AMP
             with torch.amp.autocast(device.type, enabled=use_amp, dtype=amp_dtype):
