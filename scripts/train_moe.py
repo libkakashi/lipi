@@ -50,10 +50,7 @@ SCRIPT_TO_LANG = {
 }
 
 
-from src.data.decompose import decompose_text, reconstruct_text, get_vocab_tokens
-
-# Groups that use decomposition
-_DECOMPOSE_GROUPS = {"han_kana", "korean"}
+from src.data.decompose import decompose_text, reconstruct_text, get_vocab_tokens, DECOMPOSE_GROUPS
 
 
 def build_tokenizer(words: list[str]) -> LipiTokenizer:
@@ -77,7 +74,7 @@ def build_group_tokenizers(labels: list[str], group_ids: torch.Tensor,
     for g in range(n_groups):
         group_name = active_groups[g] if g < len(active_groups) else ""
 
-        if group_name in _DECOMPOSE_GROUPS:
+        if group_name in DECOMPOSE_GROUPS:
             # Use decomposition vocab (components/jamo instead of whole chars)
             vocab_tokens = get_vocab_tokens(group_name)
             # Also add BASE_CHARS for digits, punctuation, etc.
@@ -307,7 +304,7 @@ def evaluate(model, val_loader, group_tokenizers, active_groups, device, device_
             raw_decoded = tok.decode(chars)
             # Reconstruct CJK/Korean from components back to characters
             group_name = active_groups[pred_g] if pred_g < len(active_groups) else ""
-            if group_name in _DECOMPOSE_GROUPS:
+            if group_name in DECOMPOSE_GROUPS:
                 raw_decoded = reconstruct_text(raw_decoded, group_name)
             dec_s = raw_decoded.strip().lower()
             ref_s = str(label).strip().lower()
@@ -426,7 +423,7 @@ def main():
     encoded = []
     for i, (label, gid) in enumerate(zip(labels, group_ids.tolist())):
         group_name = active_groups[gid] if gid < len(active_groups) else ""
-        if group_name in _DECOMPOSE_GROUPS:
+        if group_name in DECOMPOSE_GROUPS:
             label_tokens = decompose_text(label, group_name)
         else:
             label_tokens = label
