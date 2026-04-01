@@ -896,13 +896,30 @@ def main():
 
     if args.num_workers < 0:
         import os
-        n_workers = min(os.cpu_count() or 4, 16) if device.type == "cuda" else 0
+        # Pre-loaded data (--data) is already in RAM — workers add overhead
+        n_workers = 0 if args.data else min(os.cpu_count() or 4, 16) if device.type == "cuda" else 0
     else:
         n_workers = args.num_workers
     is_cuda = device.type == "cuda"
+
+    # Fast collate for pre-loaded data (all images same size, skip padding loop)
+    def collate_fast(batch):
+        first = batch[0]
+        if len(first) == 5:
+            images, labels, sids, gids, widths = zip(*batch)
+        else:
+            images, labels, sids, gids = zip(*batch)
+            widths = [img.shape[-1] for img in images]
+        return (torch.stack(images), list(labels),
+                torch.tensor(sids, dtype=torch.long),
+                torch.tensor(gids, dtype=torch.long),
+                torch.tensor(widths, dtype=torch.long))
+
+    collate = collate_fast if args.data else collate_moe
+
     train_loader = DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True,
-        collate_fn=collate_moe, num_workers=n_workers,
+        collate_fn=collate, num_workers=n_workers,
         pin_memory=is_cuda,
         persistent_workers=n_workers > 0,
         prefetch_factor=4 if n_workers > 0 else None,
