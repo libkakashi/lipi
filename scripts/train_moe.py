@@ -148,7 +148,7 @@ def collate_moe(batch):
 # ---------------------------------------------------------------------------
 
 def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
-                    tokenizer, ce_loss_fn, device, device_type, use_amp,
+                    group_tokenizers, ce_loss_fn, device, device_type, use_amp,
                     amp_dtype, epoch, total_epochs, grad_accum, log_interval):
     model.train()
     ctc_loss_sum = lid1_loss_sum = total_loss_sum = 0.0
@@ -468,7 +468,7 @@ def main():
 
         metrics = train_one_epoch(
             model, train_loader, optimizer, scheduler, scaler,
-            tokenizer, ce_loss_fn, device, device_type, use_amp, amp_dtype,
+            group_tokenizers, ce_loss_fn, device, device_type, use_amp, amp_dtype,
             epoch, args.epochs, args.grad_accum, args.log_interval)
 
         elapsed = time.time() - t0
