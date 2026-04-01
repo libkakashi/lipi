@@ -671,24 +671,20 @@ def evaluate(
     total_correct = 0
     total_samples = 0
     lid1_correct = 0
-    lid2_correct = 0
     per_script_correct: dict[str, int] = {}
     per_script_total: dict[str, int] = {}
 
     for batch_imgs, batch_labels, batch_sids, batch_gids, widths in dataloader:
         batch_imgs = batch_imgs.to(device, non_blocking=True)
-        batch_sids = batch_sids.to(device, non_blocking=True)
         batch_gids = batch_gids.to(device, non_blocking=True)
 
-        out = model(batch_imgs, script_ids=None, group_ids=None)
+        out = model(batch_imgs, group_ids=None)
         logits = out["logits"]
         decoded = ctc_greedy_decode(logits.float().cpu(), tokenizer)
 
         # LID accuracy (compare predicted vs ground truth)
         pred_gids = out["group_logits"].argmax(dim=-1)
-        pred_sids = out["script_logits"].argmax(dim=-1)
         lid1_correct += (pred_gids == batch_gids).sum().item()
-        lid2_correct += (pred_sids == batch_sids).sum().item()
 
         for i, (dec, label) in enumerate(zip(decoded, batch_labels)):
             sid = batch_sids[i].item()
@@ -707,13 +703,11 @@ def evaluate(
     # Print results
     ctc_acc = total_correct / max(total_samples, 1) * 100
     lid1_acc = lid1_correct / max(total_samples, 1) * 100
-    lid2_acc = lid2_correct / max(total_samples, 1) * 100
 
     print(f"\n  {'Metric':<25} {'Value':>10}")
     print(f"  {'-' * 40}")
     print(f"  {'CTC Accuracy':<25} {ctc_acc:>9.1f}%")
     print(f"  {'LID-1 (Group) Accuracy':<25} {lid1_acc:>9.1f}%")
-    print(f"  {'LID-2 (Script) Accuracy':<25} {lid2_acc:>9.1f}%")
 
     print(f"\n  {'Script':<20} {'Correct':>8} {'Total':>8} {'Accuracy':>10}")
     print(f"  {'-' * 50}")
@@ -729,7 +723,6 @@ def evaluate(
     return {
         "ctc_accuracy": ctc_acc,
         "lid1_accuracy": lid1_acc,
-        "lid2_accuracy": lid2_acc,
         "per_script": {s: per_script_correct.get(s, 0) / max(per_script_total.get(s, 1), 1) * 100
                        for s in active_scripts if s in per_script_total},
     }
@@ -784,7 +777,6 @@ def main():
     # Loss weights
     parser.add_argument("--w-ctc", type=float, default=1.0, help="CTC loss weight")
     parser.add_argument("--w-lid1", type=float, default=0.1, help="LID-1 CE loss weight")
-    parser.add_argument("--w-lid2", type=float, default=0.1, help="LID-2 CE loss weight")
 
     args = parser.parse_args()
 
@@ -1006,7 +998,7 @@ def main():
     print(f"  Batch: {args.batch_size} x {args.grad_accum} accum = {eff_batch} effective")
     print(f"  Workers: {n_workers}, AMP: {amp_dtype}, Scaler: {scaler.is_enabled()}")
     print(f"  Compile: {args.compile and hasattr(torch, 'compile')}")
-    print(f"  Losses: CTC x{args.w_ctc} + LID1 x{args.w_lid1} + LID2 x{args.w_lid2}")
+    print(f"  Losses: CTC x{args.w_ctc} + LID1 x{args.w_lid1}")
     print(f"{'=' * 60}")
 
     start_time = time.time()
@@ -1015,13 +1007,11 @@ def main():
         model.train()
         epoch_ctc_loss = 0.0
         epoch_lid1_loss = 0.0
-        epoch_lid2_loss = 0.0
         epoch_total_loss = 0.0
         n_batches = 0
 
         for batch_idx, (batch_imgs, batch_labels, batch_sids, batch_gids, widths) in enumerate(train_loader):
             batch_imgs = batch_imgs.to(device, non_blocking=True)
-            batch_sids = batch_sids.to(device, non_blocking=True)
             batch_gids = batch_gids.to(device, non_blocking=True)
 
             # Encode targets for CTC
@@ -1042,13 +1032,12 @@ def main():
 
             # Forward pass with AMP
             with torch.amp.autocast(device.type, enabled=use_amp, dtype=amp_dtype):
-                out = model(batch_imgs, script_ids=batch_sids, group_ids=batch_gids)
+                out = model(batch_imgs, group_ids=batch_gids)
                 logits = out["logits"]
                 enc_lengths = out["lengths"]
 
-                # LID losses (inside autocast)
+                # LID-1 loss (inside autocast)
                 lid1_loss = ce_loss_fn(out["group_logits"], batch_gids)
-                lid2_loss = ce_loss_fn(out["script_logits"], batch_sids)
 
             # CTC loss (outside autocast for float32 stability)
             log_probs = logits.float().log_softmax(dim=-1).permute(1, 0, 2)  # (T, B, V)
@@ -1064,9 +1053,7 @@ def main():
                 continue
 
             # Combined loss
-            loss = (args.w_ctc * loss_ctc
-                    + args.w_lid1 * lid1_loss.float()
-                    + args.w_lid2 * lid2_loss.float())
+            loss = args.w_ctc * loss_ctc + args.w_lid1 * lid1_loss.float()
 
             # Scale loss for gradient accumulation
             if args.grad_accum > 1:
@@ -1089,7 +1076,6 @@ def main():
             # Track losses
             epoch_ctc_loss += loss_ctc.item()
             epoch_lid1_loss += lid1_loss.item()
-            epoch_lid2_loss += lid2_loss.item()
             epoch_total_loss += loss.item()
             n_batches += 1
 
@@ -1097,7 +1083,7 @@ def main():
                 lr = scheduler.get_last_lr()[0]
                 print(f"  [{epoch}/{args.epochs}] batch {n_batches}/{steps_per_epoch}  "
                       f"loss={loss.item():.4f} (ctc={loss_ctc.item():.4f} "
-                      f"lid1={lid1_loss.item():.4f} lid2={lid2_loss.item():.4f})  "
+                      f"lid1={lid1_loss.item():.4f})  "
                       f"lr={lr:.2e}")
 
         # Epoch summary
@@ -1108,12 +1094,11 @@ def main():
         avg_total = epoch_total_loss / n_batches
         avg_ctc = epoch_ctc_loss / n_batches
         avg_lid1 = epoch_lid1_loss / n_batches
-        avg_lid2 = epoch_lid2_loss / n_batches
         elapsed = time.time() - start_time
 
         print(f"\nEpoch {epoch}/{args.epochs}: "
               f"total={avg_total:.4f} ctc={avg_ctc:.4f} "
-              f"lid1={avg_lid1:.4f} lid2={avg_lid2:.4f}  "
+              f"lid1={avg_lid1:.4f}  "
               f"time={elapsed:.0f}s")
 
         # Save checkpoint
