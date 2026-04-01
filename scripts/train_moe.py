@@ -426,13 +426,20 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
                         s_lid2_correct[key] = s_lid2_correct.get(key, 0) + (
                             pred_scripts[s_mask] == ls).sum().item()
 
+        # Build predicted script ID per sample (from LID-2)
+        pred_sids = sids.clone()  # default to true for single-script groups
+        for g_idx, script_logits, group_mask in out["script_logits_per_group"]:
+            if script_logits is not None:
+                pred_sids[group_mask] = script_logits.argmax(-1).cpu()
+
         # CTC decode
         preds = out["logits"].float().cpu().argmax(dim=-1)
         pred_gids_cpu = pred_gids.cpu().tolist()
         gids_cpu = gids.cpu().tolist()
         sids_cpu = sids.cpu().tolist()
-        for i, (label, pred_g, true_g, local_sid) in enumerate(
-                zip(labels, pred_gids_cpu, gids_cpu, sids_cpu)):
+        pred_sids_cpu = pred_sids.cpu().tolist()
+        for i, (label, pred_g, true_g, local_sid, pred_sid) in enumerate(
+                zip(labels, pred_gids_cpu, gids_cpu, sids_cpu, pred_sids_cpu)):
             if pred_g >= n_groups:
                 continue
             key = (true_g, local_sid)
@@ -447,8 +454,9 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
                 s_char_total[key] = s_char_total.get(key, 0) + len(ref_s)
                 continue
 
-            local_sid_safe = min(local_sid, len(group_tokenizers[true_g]) - 1)
-            tok = group_tokenizers[true_g][local_sid_safe]
+            # Use the PREDICTED script's tokenizer (logits came from that CTC head)
+            pred_sid_safe = min(pred_sid, len(group_tokenizers[pred_g]) - 1)
+            tok = group_tokenizers[pred_g][pred_sid_safe]
             seq = preds[i].tolist()
             chars = []
             prev = -1
