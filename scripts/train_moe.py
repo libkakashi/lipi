@@ -144,7 +144,7 @@ def ctc_greedy_decode(logits: torch.Tensor, tokenizer: LipiTokenizer) -> list[st
 def load_shards(shard_dir: Path):
     """Load all shards in parallel. Returns (images, labels, script_ids, group_ids, meta)."""
     meta = torch.load(shard_dir / "metadata.pt", weights_only=False)
-    shard_files = sorted(shard_dir.glob("shard_*.pt"))
+    shard_files = sorted(shard_dir.glob("shard_*.pt")) + sorted(shard_dir.glob("char_shard_*.pt"))
     print(f"  {len(shard_files)} shards")
 
     all_imgs, all_labels, all_sids, all_gids = [], [], [], []
@@ -233,8 +233,8 @@ class CUDAPrefetcher:
 def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
                     group_tokenizers, ce_loss_fn, device, device_type, use_amp,
                     amp_dtype, epoch, total_epochs, grad_accum, log_interval,
-                    lid1_weight=1.0):
-    """Predicted routing with self-paced CTC: skip CTC on misrouted samples."""
+                    lid1_weight=1.0, group_max_vocabs=None):
+    """Predicted routing with self-paced CTC. Per-group CTC with correct vocab slicing."""
     model.train()
     n_batches = 0
 
@@ -262,19 +262,33 @@ def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
             pred_gids = out["group_ids"]
             lid1_loss = ce_loss_fn(out["group_logits"], gids)
 
-        # CTC only on correctly-routed samples (misrouted → wrong CTC head → skip)
+        # CTC only on correctly-routed samples, computed PER GROUP with correct
+        # vocab slicing. Without this, log_softmax over the global max_vocab
+        # (e.g., 2245 for han_kana) dilutes probability for smaller vocabs
+        # (e.g., latin at 356) — 1889 zero-padded classes steal ~85% of softmax mass.
         valid = (pred_gids == gids) & (tgt_lens <= enc_lengths) & (tgt_lens > 0)
 
-        valid_logits = logits[valid]
         ctc_loss = torch.zeros(1, device=device)
-        if valid_logits.shape[0] > 0:
-            log_probs = valid_logits.float().log_softmax(dim=-1).permute(1, 0, 2)
-            ctc_raw = F.ctc_loss(
-                log_probs, targets[valid],
-                enc_lengths[valid], tgt_lens[valid],
-                blank=0, reduction="mean", zero_infinity=True,
+        ctc_samples = 0
+        n_groups = len(group_max_vocabs) if group_max_vocabs else 0
+        for g in range(n_groups):
+            g_mask = valid & (gids == g)
+            g_logits = logits[g_mask]
+            if g_logits.shape[0] == 0:
+                continue
+            # Slice to this group's actual vocab size before log_softmax
+            vs = group_max_vocabs[g]
+            g_log_probs = g_logits[:, :, :vs].float().log_softmax(dim=-1).permute(1, 0, 2)
+            g_ctc = F.ctc_loss(
+                g_log_probs, targets[g_mask],
+                enc_lengths[g_mask], tgt_lens[g_mask],
+                blank=0, reduction="sum", zero_infinity=True,
             )
-            ctc_loss = torch.clamp(ctc_raw, min=0.0, max=100.0)
+            ctc_loss = ctc_loss + g_ctc
+            ctc_samples += tgt_lens[g_mask].sum()
+        # Average across all characters (like reduction="mean")
+        if ctc_samples > 0:
+            ctc_loss = torch.clamp(ctc_loss / ctc_samples, min=0.0, max=100.0)
 
         # LID-2 loss only on correctly-routed samples (averaged across groups)
         lid2_loss = torch.zeros(1, device=device)
@@ -725,6 +739,10 @@ def main():
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
+    # Max vocab per group for per-group CTC slicing
+    group_max_vocabs = [max(vs) for vs in group_script_vocab_sizes]
+    print(f"  Group max vocabs: {group_max_vocabs}")
+
     eff_batch = args.batch_size * args.grad_accum
     print(f"\n{'=' * 60}")
     print(f"TRAINING: epochs {start_epoch}-{args.epochs}, lr={args.lr}")
@@ -740,7 +758,7 @@ def main():
             model, train_loader, optimizer, scheduler, scaler,
             group_tokenizers, ce_loss_fn, device, device_type, use_amp, amp_dtype,
             epoch, args.epochs, args.grad_accum, args.log_interval,
-            lid1_weight=args.lid1_weight)
+            lid1_weight=args.lid1_weight, group_max_vocabs=group_max_vocabs)
 
         elapsed = time.time() - t0
 
