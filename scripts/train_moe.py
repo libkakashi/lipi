@@ -884,10 +884,11 @@ def main():
     # ---- AMP setup ----
     use_amp = device.type in ("cuda", "mps")
     if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
         amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-        # GradScaler only needed for fp16, not bf16
         use_scaler = amp_dtype == torch.float16
         scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
+        print(f"AMP: {amp_dtype}, cudnn.benchmark: True")
     elif device.type == "mps":
         amp_dtype = torch.float16
         scaler = torch.amp.GradScaler(enabled=False)
