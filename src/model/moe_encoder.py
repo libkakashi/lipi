@@ -70,15 +70,21 @@ class GroupCTCModule(nn.Module):
             for vs in script_vocab_sizes
         ])
 
-        # LID-2 classifier (only for multi-script groups)
+        # LID-2 with learned attention pooling (only for multi-script groups)
         if self.multi_script:
-            self.lid2 = nn.Sequential(
+            self.lid2_pool = nn.Sequential(
+                nn.Linear(enc_dim, 64),
+                nn.Tanh(),
+                nn.Linear(64, 1),
+            )
+            self.lid2_classifier = nn.Sequential(
                 nn.Linear(enc_dim, enc_dim // 4),
                 nn.ReLU(),
                 nn.Linear(enc_dim // 4, self.n_scripts),
             )
         else:
-            self.lid2 = None
+            self.lid2_pool = None
+            self.lid2_classifier = None
 
     def forward(self, features: Tensor, script_ids: Tensor | None = None
                 ) -> tuple[Tensor, Tensor | None, Tensor | None]:
@@ -95,10 +101,13 @@ class GroupCTCModule(nn.Module):
         """
         N, T, C = features.shape
 
-        # LID-2
+        # LID-2 with attention pooling
         script_logits = None
         if self.multi_script:
-            script_logits = self.lid2(features.mean(dim=1))  # (N, n_scripts)
+            attn_scores = self.lid2_pool(features)                   # (N, T, 1)
+            attn_weights = torch.softmax(attn_scores, dim=1)        # (N, T, 1)
+            pooled = (features * attn_weights).sum(dim=1)            # (N, C)
+            script_logits = self.lid2_classifier(pooled)             # (N, n_scripts)
             if script_ids is None:
                 script_ids = script_logits.argmax(dim=-1)
         else:
