@@ -233,9 +233,15 @@ def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
 
 
 @torch.no_grad()
-def evaluate(model, val_loader, group_tokenizers, device, device_type, use_amp, amp_dtype):
+def evaluate(model, val_loader, group_tokenizers, active_groups, device, device_type, use_amp, amp_dtype):
     model.eval()
+    n_groups = len(group_tokenizers)
     lid_correct = lid_total = ctc_correct = ctc_total = total_chars = correct_chars = 0
+    # Per-group stats
+    g_lid_correct = [0] * n_groups
+    g_lid_total = [0] * n_groups
+    g_word_correct = [0] * n_groups
+    g_word_total = [0] * n_groups
 
     for batch in val_loader:
         imgs, targets, tgt_lens, gids, labels = batch
@@ -245,34 +251,48 @@ def evaluate(model, val_loader, group_tokenizers, device, device_type, use_amp, 
         with torch.amp.autocast(device_type, enabled=use_amp, dtype=amp_dtype):
             out = model(imgs, group_ids=None)
 
-        # LID accuracy
         pred_gids = out["group_logits"].argmax(-1)
         lid_correct += (pred_gids == gids).sum().item()
         lid_total += gids.shape[0]
 
-        # CTC accuracy — decode each sample with its predicted group's tokenizer
+        # Per-group LID
+        for g in range(n_groups):
+            mask = (gids == g)
+            if mask.any():
+                g_lid_total[g] += mask.sum().item()
+                g_lid_correct[g] += (pred_gids[mask] == g).sum().item()
+
+        # CTC decode per sample
         logits_cpu = out["logits"].float().cpu()
         pred_gids_cpu = pred_gids.cpu()
-        for i, (label, pred_g) in enumerate(zip(labels, pred_gids_cpu.tolist())):
-            if pred_g < len(group_tokenizers):
-                tok = group_tokenizers[pred_g]
-            else:
+        gids_cpu = gids.cpu()
+        for i, (label, pred_g, true_g) in enumerate(zip(labels, pred_gids_cpu.tolist(), gids_cpu.tolist())):
+            if pred_g >= len(group_tokenizers):
                 continue
+            tok = group_tokenizers[pred_g]
             decoded = ctc_greedy_decode(logits_cpu[i:i+1], tok)
             dec_s = decoded[0].strip().lower()
             ref_s = str(label).strip().lower()
             ctc_total += 1
+            g_word_total[true_g] += 1
             if dec_s == ref_s:
                 ctc_correct += 1
+                g_word_correct[true_g] += 1
             total_chars += len(ref_s)
             correct_chars += sum(1 for a, b in zip(dec_s, ref_s) if a == b)
 
     lid_acc = 100 * lid_correct / max(lid_total, 1)
     ctc_acc = 100 * ctc_correct / max(ctc_total, 1)
     char_acc = 100 * correct_chars / max(total_chars, 1)
-    print(f"  LID-1 accuracy: {lid_acc:.1f}%")
-    print(f"  Word  accuracy: {ctc_acc:.1f}% ({ctc_correct}/{ctc_total})")
-    print(f"  Char  accuracy: {char_acc:.1f}% ({correct_chars}/{total_chars})")
+    print(f"  LID-1: {lid_acc:.1f}%  |  Word: {ctc_acc:.1f}%  |  Char: {char_acc:.1f}%")
+    print(f"  Per group:")
+    for g in range(n_groups):
+        gl = g_lid_total[g]
+        gw = g_word_total[g]
+        lid_g = 100 * g_lid_correct[g] / max(gl, 1)
+        word_g = 100 * g_word_correct[g] / max(gw, 1)
+        name = active_groups[g] if g < len(active_groups) else f"group{g}"
+        print(f"    {name:18s} LID: {lid_g:5.1f}% ({g_lid_correct[g]}/{gl})  Word: {word_g:5.1f}% ({g_word_correct[g]}/{gw})")
     return {"lid1_acc": lid_acc, "word_acc": ctc_acc, "char_acc": char_acc}
 
 
@@ -492,7 +512,7 @@ def main():
 
         # Eval
         print(f"\n  Eval epoch {epoch}:")
-        evaluate(model, val_loader, group_tokenizers, device, device_type, use_amp, amp_dtype)
+        evaluate(model, val_loader, group_tokenizers, active_groups, device, device_type, use_amp, amp_dtype)
 
     print(f"\n{'=' * 60}")
     print("DONE")
