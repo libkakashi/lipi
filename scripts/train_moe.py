@@ -888,18 +888,19 @@ def main():
         print(f"  Max label length: {max_len}, encoded {len(encoded)} labels")
 
         class PreEncodedDataset(torch.utils.data.Dataset):
-            def __init__(self, imgs, targets, target_lens, gids):
+            def __init__(self, imgs, targets, target_lens, gids, labels):
                 self.imgs = imgs
                 self.targets = targets
                 self.target_lens = target_lens
                 self.gids = gids
+                self.labels = labels
             def __len__(self):
                 return self.imgs.shape[0]
             def __getitem__(self, idx):
-                return self.imgs[idx], self.targets[idx], self.target_lens[idx], self.gids[idx]
+                return self.imgs[idx], self.targets[idx], self.target_lens[idx], self.gids[idx], self.labels[idx]
 
-        full_dataset = PreEncodedDataset(_shard_images, target_tensor, target_len_tensor, _shard_group_ids)
-        del _shard_images, _shard_group_ids, _shard_script_ids, shard_labels
+        full_dataset = PreEncodedDataset(_shard_images, target_tensor, target_len_tensor, _shard_group_ids, shard_labels)
+        del _shard_images, _shard_group_ids, _shard_script_ids
         _pre_encoded = True
     else:
         _pre_encoded = False
@@ -925,8 +926,12 @@ def main():
 
     # Collate selection
     if _pre_encoded:
-        # Pre-encoded: (image, targets, target_len, group_id) — all tensors, default collate works
-        collate = None  # PyTorch default
+        # Pre-encoded: (image, targets, target_len, group_id, label_str)
+        def collate_preencoded(batch):
+            imgs, targets, target_lens, gids, labels = zip(*batch)
+            return (torch.stack(imgs), torch.stack(targets), torch.stack(target_lens),
+                    torch.stack(gids), list(labels))
+        collate = collate_preencoded
     elif args.data:
         def collate_fast(batch):
             first = batch[0]
@@ -1056,8 +1061,8 @@ def main():
 
         for batch_idx, batch in enumerate(train_loader):
             if _pre_encoded:
-                # Pre-encoded: (images, targets, target_lengths, group_ids)
-                batch_imgs, targets, target_lengths, batch_gids = batch
+                # Pre-encoded: (images, targets, target_lengths, group_ids, labels)
+                batch_imgs, targets, target_lengths, batch_gids, _ = batch
                 batch_imgs = batch_imgs.to(device, non_blocking=True)
                 targets = targets.to(device, non_blocking=True)
                 target_lengths = target_lengths.to(device, non_blocking=True)
@@ -1164,25 +1169,40 @@ def main():
         }, ckpt_path)
         print(f"  Saved: {ckpt_path}")
 
-        # Evaluate (skip for pre-encoded data — no string labels in val loader)
-        if not _pre_encoded:
-            print(f"\n  Evaluation after epoch {epoch}:")
-            eval_results = evaluate(model, tokenizer, val_loader, device, active_scripts)
-        else:
-            # Quick LID accuracy on val set
-            model.eval()
-            lid_correct = lid_total = 0
-            with torch.no_grad():
-                for batch in val_loader:
-                    imgs, _, _, gids = batch
-                    imgs = imgs.to(device, non_blocking=True)
-                    gids = gids.to(device, non_blocking=True)
-                    out = model(imgs, group_ids=None)
-                    pred = out["group_logits"].argmax(-1)
-                    lid_correct += (pred == gids).sum().item()
-                    lid_total += gids.shape[0]
-            print(f"  LID-1 accuracy: {100*lid_correct/max(lid_total,1):.1f}%")
-            model.train()
+        # Evaluate
+        print(f"\n  Evaluation after epoch {epoch}:")
+        model.eval()
+        lid_correct = lid_total = ctc_correct = ctc_total = 0
+        with torch.no_grad():
+            for batch in val_loader:
+                if _pre_encoded:
+                    imgs, targets, tgt_lens, gids, labels = batch
+                else:
+                    imgs, labels, _, gids, _ = batch
+                imgs = imgs.to(device, non_blocking=True)
+                gids = gids.to(device, non_blocking=True)
+
+                out = model(imgs, group_ids=None)
+
+                # LID accuracy
+                pred_gids = out["group_logits"].argmax(-1)
+                lid_correct += (pred_gids == gids).sum().item()
+                lid_total += gids.shape[0]
+
+                # CTC accuracy (greedy decode)
+                decoded = ctc_greedy_decode(out["logits"].float().cpu(), tokenizer)
+                for dec, label in zip(decoded, labels):
+                    if isinstance(label, torch.Tensor):
+                        continue  # shouldn't happen now but safety
+                    ctc_total += 1
+                    if dec.strip().lower() == label.strip().lower():
+                        ctc_correct += 1
+
+        lid_acc = 100 * lid_correct / max(lid_total, 1)
+        ctc_acc = 100 * ctc_correct / max(ctc_total, 1)
+        print(f"  LID-1 accuracy: {lid_acc:.1f}%")
+        print(f"  CTC  accuracy:  {ctc_acc:.1f}% ({ctc_correct}/{ctc_total})")
+        model.train()
 
     # Final summary
     total_time = time.time() - start_time
