@@ -1011,8 +1011,8 @@ def main():
             with ThreadPoolExecutor(max_workers=16) as pool:
                 for shard in pool.map(_load_shard, shard_files):
                     all_imgs.append(shard["images"])
-                    all_slabels.append(shard["script_labels"])
-                    all_glabels.append(shard["group_labels"])
+                    all_slabels.append(shard.get("script_labels", shard.get("script_ids")))
+                    all_glabels.append(shard.get("group_labels", shard.get("group_ids")))
 
             print(f"  Concatenating...")
             images = torch.cat(all_imgs)

@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
 """
-Generate synthetic MoE training data (images + text labels) and save to shards.
+Generate synthetic training data for LID and MoE training.
 
-Run once, then train multiple times:
-    python scripts/generate_moe_data.py --samples-per-script 10000 --scripts all --out data/moe_shards
-    python scripts/train_moe.py --data data/moe_shards --epochs 10 --batch-size 64
+Outputs per shard: images, text labels, script IDs, group IDs.
+Works for both LID training (uses group labels) and MoE training (uses text labels + CTC).
+
+Usage:
+    python scripts/generate_data.py --samples-per-script 10000 --out data/shards
+    python scripts/generate_data.py --samples-per-script 30000 --balance-groups --out data/lid_shards
+    python scripts/generate_data.py --scripts latin,cyrillic,greek,devanagari --out data/moe_2group
+
+Then train:
+    python scripts/train_lid.py --data data/lid_shards ...
+    python scripts/train_moe.py --data data/moe_2group ...
 """
 
 import argparse
@@ -15,24 +23,22 @@ import time
 from pathlib import Path
 from multiprocessing import Pool
 
-import numpy as np
 import torch
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.model.lid import SCRIPTS, SCRIPT_TO_GROUP, GROUP_TO_ID, SCRIPT_TO_ID
+from src.model.lid import SCRIPTS, SCRIPT_TO_GROUP, GROUP_TO_ID, SCRIPT_TO_ID, GROUPS
 from src.data.color import rgb_to_input
 from src.data.augmentation import RandAugmentOCR
 from scripts.train_lid import (
     find_fonts_for_script, font_can_render, render_word, render_emoji,
-    random_ink_color, random_bg_color,
     SCRIPT_SAMPLES, load_all_script_samples,
 )
 
 
 def _generate_batch(args_tuple):
-    """Generate images + text labels for one script chunk. Saves to disk."""
+    """Generate images for one chunk. Saves shard to disk directly."""
     script, count, fonts, words, h, mw, do_augment, shard_path = args_tuple
     aug = RandAugmentOCR(n_ops=2, p=0.5) if do_augment else None
 
@@ -82,7 +88,7 @@ def _generate_batch(args_tuple):
         "script_ids": torch.full((n,), script_id, dtype=torch.long),
         "group_ids": torch.full((n,), group_id, dtype=torch.long),
     }, shard_path)
-    del images
+    del images, labels
 
     elapsed = time.time() - t0
     rate = n / elapsed if elapsed > 0 else 0
@@ -91,15 +97,17 @@ def _generate_batch(args_tuple):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate MoE training data")
+    parser = argparse.ArgumentParser(description="Generate training data (LID + MoE)")
     parser.add_argument("--samples-per-script", type=int, default=10000)
     parser.add_argument("--scripts", type=str, default="all",
-                        help="Comma-separated script names, or 'all'")
+                        help="Comma-separated scripts, or 'all'")
+    parser.add_argument("--balance-groups", action="store_true",
+                        help="Balance samples per group (for LID training)")
     parser.add_argument("--augment", action="store_true", default=True)
     parser.add_argument("--no-augment", action="store_true")
     parser.add_argument("--height", type=int, default=32)
     parser.add_argument("--max-width", type=int, default=192)
-    parser.add_argument("--out", type=str, default="data/moe_shards")
+    parser.add_argument("--out", type=str, default="data/shards")
     parser.add_argument("--workers", type=int, default=48)
     args = parser.parse_args()
 
@@ -130,7 +138,6 @@ def main():
         sample = SCRIPT_SAMPLES[script][0]
         valid = [f for f in fonts if font_can_render(f, sample)]
         if valid:
-            # Weight fonts
             weighted = []
             for f in valid:
                 name = Path(f).name.lower()
@@ -148,41 +155,50 @@ def main():
             print(f"  {script:<15}   0 fonts — SKIPPED")
 
     if len(valid_scripts) < 2:
-        print("ERROR: Need at least 2 scripts")
+        print("ERROR: Need at least 2 scripts with fonts")
         sys.exit(1)
+
+    # Build targets per script
+    tasks = []
+    for script in valid_scripts:
+        group = SCRIPT_TO_GROUP[script]
+        if args.balance_groups:
+            scripts_in_group = [s for s in valid_scripts if SCRIPT_TO_GROUP[s] == group]
+            target = args.samples_per_script // len(scripts_in_group)
+        else:
+            target = args.samples_per_script
+        tasks.append((script, target))
 
     shard_dir = Path(args.out)
     shard_dir.mkdir(parents=True, exist_ok=True)
 
-    # Build chunks
+    # Build chunks, skip existing shards (resume support)
     chunks = []
     shard_idx = 0
-    for script in valid_scripts:
+    skipped = 0
+    for script, target in tasks:
         fonts = script_fonts[script]
         words = SCRIPT_SAMPLES.get(script, ["placeholder"])
-        target = args.samples_per_script
-        chunk_size = max(500, target // max(1, args.workers // len(valid_scripts)))
+        chunk_size = max(500, target // max(1, args.workers // len(tasks)))
         remaining = target
         while remaining > 0:
             batch = min(chunk_size, remaining)
             shard_path = str(shard_dir / f"shard_{shard_idx:04d}.pt")
-            # Skip if already exists (resume)
-            if not (Path(shard_path).exists() and Path(shard_path).stat().st_size > 100):
+            if Path(shard_path).exists() and Path(shard_path).stat().st_size > 100:
+                skipped += batch
+            else:
                 chunks.append((script, batch, fonts, words, args.height, args.max_width,
                               args.augment, shard_path))
-            else:
-                shard_idx += 1
-                remaining -= batch
-                continue
             shard_idx += 1
             remaining -= batch
 
     total_est = sum(c[1] for c in chunks)
-    print(f"\nGenerating {total_est} images across {len(valid_scripts)} scripts...")
+    if skipped > 0:
+        print(f"\nResuming: {skipped} images in existing shards, {total_est} remaining")
     if not chunks:
         print("All shards exist. Done.")
     else:
-        print(f"  {len(chunks)} chunks across {min(args.workers, len(chunks))} workers\n")
+        print(f"\nGenerating {total_est} images, {len(chunks)} chunks, {min(args.workers, len(chunks))} workers\n")
         start = time.time()
         done = 0
         with Pool(processes=min(args.workers, len(chunks)), maxtasksperchild=1) as pool:
@@ -193,19 +209,29 @@ def main():
                 print(f"    total: {done}/{total_est} ({done/elapsed:.0f} img/s)", flush=True)
 
     # Save metadata
+    active_groups = []
+    seen = set()
+    for s in valid_scripts:
+        g = SCRIPT_TO_GROUP[s]
+        if g not in seen:
+            active_groups.append(g)
+            seen.add(g)
+
     torch.save({
         "active_scripts": valid_scripts,
-        "samples_per_script": args.samples_per_script,
+        "active_groups": active_groups,
+        "script_to_idx": {s: i for i, s in enumerate(valid_scripts)},
+        "group_to_idx": {g: i for i, g in enumerate(active_groups)},
         "height": args.height,
         "max_width": args.max_width,
         "augmented": args.augment,
+        "samples_per_script": args.samples_per_script,
         "has_labels": True,
     }, shard_dir / "metadata.pt")
 
     total_shards = len(list(shard_dir.glob("shard_*.pt")))
     total_mb = sum(f.stat().st_size for f in shard_dir.glob("*.pt")) / 1e6
     print(f"\nDone. {total_shards} shards ({total_mb:.0f} MB) in {shard_dir}/")
-    print(f"Train with: python scripts/train_moe.py --data {shard_dir}")
 
 
 if __name__ == "__main__":
