@@ -296,8 +296,25 @@ def main():
     if args.resume:
         print(f"\nResuming from {args.resume}...")
         ckpt = torch.load(args.resume, map_location=device, weights_only=False)
-        model.load_state_dict(ckpt["model"])
-        optimizer.load_state_dict(ckpt["optimizer"])
+        # Partial load: skip mismatched layers (e.g., CTC proj after vocab change)
+        model_state = ckpt["model"]
+        current_state = model.state_dict()
+        skipped = []
+        for k in list(model_state.keys()):
+            if k in current_state and model_state[k].shape != current_state[k].shape:
+                skipped.append(k)
+                del model_state[k]
+        if skipped:
+            print(f"  Skipped {len(skipped)} mismatched layers (vocab changed):")
+            for k in skipped[:5]:
+                print(f"    {k}")
+            if len(skipped) > 5:
+                print(f"    ... and {len(skipped) - 5} more")
+        model.load_state_dict(model_state, strict=False)
+        try:
+            optimizer.load_state_dict(ckpt["optimizer"])
+        except (ValueError, KeyError):
+            print("  Optimizer state incompatible, starting fresh optimizer")
         if "scaler" in ckpt:
             scaler.load_state_dict(ckpt["scaler"])
         if "scheduler" in ckpt:
