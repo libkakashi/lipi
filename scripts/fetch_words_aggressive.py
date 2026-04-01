@@ -74,6 +74,29 @@ LANG_CONFIG = {
     "id": {"files": ["indonesian.txt"], "wikt_cats": ["Indonesian_lemmas"]},
     "ms": {"files": ["malay.txt"], "wikt_cats": ["Malay_lemmas"]},
     "sw": {"files": ["swahili.txt"], "wikt_cats": ["Swahili_lemmas"]},
+    # Additional Latin-script languages
+    "af": {"files": ["afrikaans.txt"], "wikt_cats": ["Afrikaans_lemmas"]},
+    "sq": {"files": ["albanian.txt"], "wikt_cats": ["Albanian_lemmas"]},
+    "eu": {"files": ["basque.txt"], "wikt_cats": ["Basque_lemmas"]},
+    "ca": {"files": ["catalan.txt"], "wikt_cats": ["Catalan_lemmas"]},
+    "et": {"files": ["estonian.txt"], "wikt_cats": ["Estonian_lemmas"]},
+    "gl": {"files": ["galician.txt"], "wikt_cats": ["Galician_lemmas"]},
+    "is": {"files": ["icelandic.txt"], "wikt_cats": ["Icelandic_lemmas"]},
+    "lv": {"files": ["latvian.txt"], "wikt_cats": ["Latvian_lemmas"]},
+    "lt": {"files": ["lithuanian.txt"], "wikt_cats": ["Lithuanian_lemmas"]},
+    "mt": {"files": ["maltese.txt"], "wikt_cats": ["Maltese_lemmas"]},
+    "sk": {"files": ["slovak.txt"], "wikt_cats": ["Slovak_lemmas"]},
+    "sl": {"files": ["slovenian.txt"], "wikt_cats": ["Slovenian_lemmas"]},
+    "cy": {"files": ["welsh.txt"], "wikt_cats": ["Welsh_lemmas"]},
+    "ga": {"files": ["irish.txt"], "wikt_cats": ["Irish_lemmas"]},
+    "tl": {"files": ["tagalog.txt"], "wikt_cats": ["Tagalog_lemmas"]},
+    # Additional Cyrillic
+    "mn": {"files": ["cyrillic.txt"], "wikt_cats": ["Mongolian_lemmas"]},
+    "ky": {"files": ["cyrillic.txt"], "wikt_cats": ["Kyrgyz_lemmas"]},
+    "tg": {"files": ["cyrillic.txt"], "wikt_cats": ["Tajik_lemmas"]},
+    # Additional Arabic script
+    "ps": {"files": ["arabic.txt"], "wikt_cats": ["Pashto_lemmas"]},
+    "ku": {"files": ["arabic.txt"], "wikt_cats": ["Kurdish_lemmas"]},
 }
 
 
