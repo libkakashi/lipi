@@ -471,6 +471,8 @@ def main():
     parser.add_argument("--stage2-dim", type=int, default=576)
     parser.add_argument("--stage2-blocks", type=int, default=8)
     parser.add_argument("--head-hidden", type=int, default=384)
+    parser.add_argument("--no-compile", action="store_true",
+                        help="Disable torch.compile (saves ~5-10GB VRAM)")
     args = parser.parse_args()
 
     # Device
@@ -616,7 +618,8 @@ def main():
     print(f"Model: {total_params / 1e6:.1f}M params ({n_groups} groups)")
 
     # torch.compile — fuses kernels, reduces launch overhead
-    if device_type == "cuda":
+    # Disabled by default: uses ~5-10GB extra VRAM on 575M model
+    if device_type == "cuda" and not args.no_compile:
         print("Compiling model with torch.compile...")
         model = torch.compile(model)
         print("  Done.")
