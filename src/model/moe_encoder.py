@@ -260,7 +260,6 @@ class LipiMoEEncoder(nn.Module):
         images: Tensor,
         group_ids: Tensor | None = None,
         script_ids: Tensor | None = None,
-        detach_shared: bool = False,
     ) -> dict:
         B = images.shape[0]
         W = images.shape[3]
@@ -287,13 +286,6 @@ class LipiMoEEncoder(nn.Module):
         group_logits = self.lid_coarse.forward_seq(x)
         if group_ids is None:
             group_ids = group_logits.argmax(dim=-1)
-
-        # Scale CTC gradient at the shared→expert boundary so LID can
-        # drive the shared backbone without being overwhelmed by CTC.
-        # grad_scale=0.1 means 10% of CTC gradient reaches shared backbone.
-        # grad_scale=1.0 (default) means full gradient (predicted routing).
-        if detach_shared and self.training:
-            x = x * 0.1 + x.detach() * 0.9
 
         # Project to stage1
         x = self.proj1(x)

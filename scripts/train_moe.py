@@ -234,12 +234,8 @@ class CUDAPrefetcher:
 def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
                     group_tokenizers, ce_loss_fn, device, device_type, use_amp,
                     amp_dtype, epoch, total_epochs, grad_accum, log_interval,
-                    gt_ratio=1.0, lid1_weight=10.0):
-    """
-    Curriculum routing: gt_ratio controls GT vs predicted routing.
-      gt_ratio=1.0 → pure GT routing (early training, bootstrap CTC)
-      gt_ratio=0.0 → pure predicted routing (late training, inference robustness)
-    """
+                    lid1_weight=1.0):
+    """Predicted routing with self-paced CTC: skip CTC on misrouted samples."""
     model.train()
     n_batches = 0
 
@@ -260,32 +256,15 @@ def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
         gids = gids.to(device, non_blocking=True)
         sids = sids.to(device, non_blocking=True)
 
-        # Curriculum routing: per-batch decision based on gt_ratio
-        use_gt = (gt_ratio >= 1.0) or (gt_ratio > 0.0 and random.random() < gt_ratio)
-
         with torch.amp.autocast(device_type, enabled=use_amp, dtype=amp_dtype):
-            if use_gt:
-                # GT routing: experts + CTC heads get correct groups.
-                # detach_shared stops CTC gradient from overwhelming LID
-                # at the shared backbone level.
-                out = model(imgs, group_ids=gids, script_ids=sids, detach_shared=True)
-            else:
-                # Predicted routing: LID-1 decides, realistic inference path.
-                # CTC gradient flows through backbone → co-trains LID.
-                out = model(imgs, group_ids=None, script_ids=None, detach_shared=False)
+            out = model(imgs, group_ids=None, script_ids=None)
             logits = out["logits"]
             enc_lengths = out["lengths"]
+            pred_gids = out["group_ids"]
             lid1_loss = ce_loss_fn(out["group_logits"], gids)
 
-        # CTC valid mask
-        if use_gt:
-            # GT routing: all samples are correctly routed
-            valid = (tgt_lens <= enc_lengths) & (tgt_lens > 0)
-        else:
-            # Predicted routing: only correctly-routed samples get CTC
-            # (misrouted → wrong CTC head → garbage gradients)
-            pred_gids = out["group_ids"]
-            valid = (pred_gids == gids) & (tgt_lens <= enc_lengths) & (tgt_lens > 0)
+        # CTC only on correctly-routed samples (misrouted → wrong CTC head → skip)
+        valid = (pred_gids == gids) & (tgt_lens <= enc_lengths) & (tgt_lens > 0)
 
         valid_logits = logits[valid]
         ctc_loss = torch.zeros(1, device=device)
@@ -298,18 +277,13 @@ def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
             )
             ctc_loss = torch.clamp(ctc_raw, min=0.0, max=100.0)
 
-        # LID-2 loss per multi-script group
+        # LID-2 loss only on correctly-routed samples
         lid2_loss = torch.zeros(1, device=device)
         for _g, script_logits, group_mask in out["script_logits_per_group"]:
-            if use_gt:
-                sl = script_logits
-                sl_targets = sids[group_mask]
-            else:
-                routed_ok = (out["group_ids"][group_mask] == gids[group_mask])
-                sl = script_logits[routed_ok]
-                sl_targets = sids[group_mask][routed_ok]
+            routed_ok = valid[group_mask]
+            sl = script_logits[routed_ok]
             if sl.shape[0] > 0:
-                lid2_loss = lid2_loss + ce_loss_fn(sl, sl_targets)
+                lid2_loss = lid2_loss + ce_loss_fn(sl, sids[group_mask][routed_ok])
 
         loss = ctc_loss + lid1_weight * lid1_loss.float() + lid2_loss.float()
 
@@ -348,11 +322,10 @@ def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
             avg_total = log_total_acc.item() / log_count
             lr = scheduler.get_last_lr()[0]
             steps = len(train_loader)
-            route_str = "GT" if use_gt else "pred"
             print(f"  [{epoch}/{total_epochs}] batch {batch_idx+1}/{steps}  "
                   f"loss={avg_total:.4f} "
                   f"(ctc={avg_ctc:.4f} lid1={avg_lid1:.4f} lid2={avg_lid2:.4f})  "
-                  f"lr={lr:.2e}  [{route_str}]")
+                  f"lr={lr:.2e}")
             log_ctc_acc.zero_()
             log_lid1_acc.zero_()
             log_lid2_acc.zero_()
@@ -555,12 +528,8 @@ def main():
     parser.add_argument("--head-hidden", type=int, default=384)
     parser.add_argument("--no-compile", action="store_true",
                         help="Disable torch.compile (saves ~5-10GB VRAM)")
-    parser.add_argument("--gt-epochs", type=int, default=5,
-                        help="Pure GT routing for first N epochs, then linear transition to predicted")
-    parser.add_argument("--transition-epochs", type=int, default=5,
-                        help="Epochs to linearly transition from GT to predicted routing")
-    parser.add_argument("--lid1-weight", type=float, default=10.0,
-                        help="LID-1 loss weight (high to match CTC magnitude under decomposition)")
+    parser.add_argument("--lid1-weight", type=float, default=1.0,
+                        help="LID-1 loss weight")
     args = parser.parse_args()
 
     # Device
@@ -754,38 +723,28 @@ def main():
     save_dir.mkdir(parents=True, exist_ok=True)
 
     eff_batch = args.batch_size * args.grad_accum
-    gt_end = args.gt_epochs + args.transition_epochs
     print(f"\n{'=' * 60}")
     print(f"TRAINING: epochs {start_epoch}-{args.epochs}, lr={args.lr}")
     print(f"  Batch: {args.batch_size} x {args.grad_accum} = {eff_batch} effective")
-    print(f"  Routing: GT epochs 1-{args.gt_epochs}, transition {args.gt_epochs+1}-{gt_end}, predicted {gt_end+1}+")
     print(f"  Losses: CTC x1.0 + LID1 x{args.lid1_weight}")
+    print(f"  Routing: predicted (skip CTC on misroutes)")
     print(f"{'=' * 60}")
 
     for epoch in range(start_epoch, args.epochs + 1):
         t0 = time.time()
 
-        # Curriculum: compute GT routing ratio for this epoch
-        if epoch <= args.gt_epochs:
-            gt_ratio = 1.0
-        elif epoch <= gt_end:
-            gt_ratio = 1.0 - (epoch - args.gt_epochs) / args.transition_epochs
-        else:
-            gt_ratio = 0.0
-
         metrics = train_one_epoch(
             model, train_loader, optimizer, scheduler, scaler,
             group_tokenizers, ce_loss_fn, device, device_type, use_amp, amp_dtype,
             epoch, args.epochs, args.grad_accum, args.log_interval,
-            gt_ratio=gt_ratio, lid1_weight=args.lid1_weight)
+            lid1_weight=args.lid1_weight)
 
         elapsed = time.time() - t0
 
         if metrics:
-            route_info = f"GT={gt_ratio:.0%}" if gt_ratio > 0 else "predicted"
             print(f"\nEpoch {epoch}/{args.epochs}: "
                   f"ctc={metrics['ctc']:.4f} lid1={metrics['lid1']:.4f}  "
-                  f"time={elapsed:.0f}s  routing={route_info}")
+                  f"time={elapsed:.0f}s")
 
         # Save
         ckpt_path = save_dir / f"moe_epoch{epoch}.pt"
