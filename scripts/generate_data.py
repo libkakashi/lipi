@@ -23,6 +23,7 @@ import time
 from pathlib import Path
 from multiprocessing import Pool
 
+import numpy as np
 import torch
 from PIL import Image
 
@@ -31,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.model.lid import SCRIPTS, SCRIPT_TO_GROUP, GROUP_TO_ID, SCRIPT_TO_ID
 from src.data.color import rgb_to_input
 from src.data.augmentation import RandAugmentOCR
+from src.data.renderer import font_has_codepoint
 from scripts.train_lid import (
     find_fonts_for_script, font_can_render, render_word, render_emoji,
     SCRIPT_SAMPLES, load_all_script_samples,
@@ -47,20 +49,73 @@ def _get_script_chars(script: str, words: list[str]) -> list[str]:
     return sorted(chars)
 
 
+def _image_has_ink(img: Image.Image, min_ink_pixels: int = 10) -> bool:
+    """Check if a rendered image has visible content (not blank/faint).
+
+    Only checks for blank or nearly-invisible renders. Tofu detection is
+    handled upstream via font_has_codepoint (cmap check), which is definitive
+    and avoids false positives on box-shaped characters like 口, ㅁ, ם, O.
+    """
+    arr = np.array(img)
+    if arr.ndim == 3:
+        gray = 0.299 * arr[:,:,0] + 0.587 * arr[:,:,1] + 0.114 * arr[:,:,2]
+    else:
+        gray = arr.astype(float)
+
+    # Background from corner pixels
+    corners = [gray[0,0], gray[0,-1], gray[-1,0], gray[-1,-1]]
+    bg = np.median(corners)
+
+    # Count pixels that differ significantly from background
+    ink_pixels = (np.abs(gray - bg) > 30).sum()
+    return ink_pixels >= min_ink_pixels
+
+
 def _generate_char_batch(args_tuple):
-    """Generate single-character images. One image per character, repeated with variations."""
+    """Generate single-character images with validation.
+
+    Skips characters that don't render properly (blank, tofu boxes, invisible).
+    Tries multiple fonts per character before giving up.
+    """
     script, chars, reps_per_char, fonts, h, mw, do_augment, shard_path = args_tuple
     aug = RandAugmentOCR(n_ops=2, p=0.5) if do_augment else None
 
     images = []
     labels = []
+    skipped_chars = 0
     t0 = time.time()
 
+    # Pre-filter: which unique fonts have each char in their cmap?
+    # This prevents tofu without false-positiving on box-shaped chars (口, ㅁ, ם, O).
+    # Then rebuild weighted list from the originals so font diversity is preserved.
+    unique_fonts = list(dict.fromkeys(fonts))  # dedupe for cmap check
+    cmap_ok = {}  # font_path -> set of chars it can render
+    for f in unique_fonts:
+        cmap_ok[f] = set()
+        for ch in chars:
+            if font_has_codepoint(f, ch):
+                cmap_ok[f].add(ch)
+
+    char_fonts = {}
     for ch in chars:
-        for _ in range(reps_per_char):
-            img = render_word(ch, random.choice(fonts), h)
-            if img is None:
+        # Keep original weighted list, just filter to fonts whose cmap has this char
+        valid = [f for f in fonts if ch in cmap_ok.get(f, set())]
+        if valid:
+            char_fonts[ch] = valid
+        else:
+            skipped_chars += 1
+
+    for ch in char_fonts:
+        got_any = False
+        for rep in range(reps_per_char):
+            font = random.choice(char_fonts[ch])
+            img = render_word(ch, font, h)
+            # cmap presence doesn't guarantee a good render (some fonts have
+            # empty/zero-width glyphs), so still check for visible ink
+            if img is None or not _image_has_ink(img):
                 continue
+            got_any = True
+
             if img.width > mw:
                 img = img.resize((mw, h), Image.BILINEAR)
             elif img.width < mw:
@@ -71,6 +126,8 @@ def _generate_char_batch(args_tuple):
                 img = aug(img)
             images.append(rgb_to_input(img))
             labels.append(ch)
+        if not got_any:
+            skipped_chars += 1
 
     if not images:
         return shard_path, script, 0
@@ -88,7 +145,8 @@ def _generate_char_batch(args_tuple):
 
     elapsed = time.time() - t0
     rate = n / elapsed if elapsed > 0 else 0
-    print(f"  {script:<15} {n:>5} char images ({len(chars)} unique chars × {reps_per_char} reps) in {elapsed:.0f}s", flush=True)
+    skip_str = f", {skipped_chars} chars skipped (bad render)" if skipped_chars else ""
+    print(f"  {script:<15} {n:>5} char images ({len(chars)} unique × {reps_per_char} reps{skip_str}) in {elapsed:.0f}s", flush=True)
     return shard_path, script, n
 
 
@@ -269,8 +327,14 @@ def main():
 
     # === Single-character images ===
     if args.include_chars:
+        # Cap char images at 25% of word target per script so they supplement
+        # word context rather than dominating. Adaptive reps: scripts with huge
+        # charsets (han_kana ~21K) get 1 rep, small charsets (latin ~100) get many.
+        script_word_target = {s: t for s, t in tasks}
+        char_budget_ratio = 0.25
+
         print(f"\n{'='*60}")
-        print(f"Generating single-character images ({args.char_reps} reps per char)")
+        print(f"Generating single-character images (max {char_budget_ratio:.0%} of word budget)")
         print(f"{'='*60}")
 
         char_chunks = []
@@ -283,6 +347,14 @@ def main():
             if not chars:
                 continue
 
+            # Adaptive reps: cap total char images at char_budget_ratio * word target
+            word_target = script_word_target.get(script, args.samples_per_script)
+            char_budget = int(word_target * char_budget_ratio)
+            reps = max(1, min(args.char_reps, char_budget // len(chars)))
+            est = len(chars) * reps
+            print(f"  {script:<15} {len(chars):>5} unique chars × {reps} reps = ~{est} images "
+                  f"(word budget: {word_target})")
+
             # Split into chunks of ~500 chars for parallelism
             chunk_size = max(200, len(chars) // max(1, args.workers // len(valid_scripts)))
             for ci in range(0, len(chars), chunk_size):
@@ -291,12 +363,12 @@ def main():
                 if Path(shard_path).exists() and Path(shard_path).stat().st_size > 100:
                     shard_idx += 1
                     continue
-                char_chunks.append((script, char_subset, args.char_reps, fonts,
+                char_chunks.append((script, char_subset, reps, fonts,
                                     args.height, args.max_width, args.augment, shard_path))
                 shard_idx += 1
 
         if char_chunks:
-            print(f"  {len(char_chunks)} char chunks across {min(args.workers, len(char_chunks))} workers\n")
+            print(f"\n  {len(char_chunks)} char chunks across {min(args.workers, len(char_chunks))} workers\n")
             char_start = time.time()
             char_done = 0
             with Pool(processes=min(args.workers, len(char_chunks)), maxtasksperchild=1) as pool:

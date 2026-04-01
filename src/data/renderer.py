@@ -159,6 +159,24 @@ else:
     render_text = render_text_pil
 
 
+def font_has_codepoint(font_path: str, char: str) -> bool:
+    """Check if a font's cmap contains the given character.
+
+    Uses FreeType's get_char_index: returns 0 if the glyph is missing
+    (which is what triggers tofu rendering). This is a definitive check —
+    no pixel heuristics needed.
+
+    Falls back to True if freetype is unavailable (let pixel check handle it).
+    """
+    if not HAS_FREETYPE:
+        return True  # can't check, assume yes
+    try:
+        face = _get_face(font_path, 24)
+        return face.get_char_index(ord(char)) != 0
+    except Exception:
+        return True  # on error, let rendering decide
+
+
 def font_can_render(font_path: str, text: str, size: int = 24) -> bool:
     """Check if a font produces visible output for the given text."""
     img = render_text(text, font_path, size, ink=(0, 0, 0), bg=(255, 255, 255), height=32)
