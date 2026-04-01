@@ -601,7 +601,12 @@ def collate_moe(
         group_ids: (B,) long tensor.
         widths: (B,) long tensor of original widths.
     """
-    images, labels, script_ids, group_ids = zip(*batch)
+    # Handle both 4-tuple and 5-tuple (shard dataset adds width)
+    first = batch[0]
+    if len(first) == 5:
+        images, labels, script_ids, group_ids, _ = zip(*batch)
+    else:
+        images, labels, script_ids, group_ids = zip(*batch)
 
     C = images[0].shape[0]
     H = images[0].shape[1]
