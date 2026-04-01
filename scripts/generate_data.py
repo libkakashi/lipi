@@ -191,6 +191,9 @@ def _generate_batch(args_tuple):
             rate = len(images) / elapsed if elapsed > 0 else 0
             print(f"    [{script}] {len(images)}/{count} ({rate:.0f} img/s)", flush=True)
 
+    if not images:
+        return shard_path, script, 0
+
     n = len(images)
     script_id = SCRIPT_TO_ID[script]
     group_id = GROUP_TO_ID[SCRIPT_TO_GROUP[script]]

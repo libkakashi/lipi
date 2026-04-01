@@ -1028,6 +1028,17 @@ def main():
             script_labels = saved["script_labels"]
             group_labels = saved["group_labels"]
 
+        # Remap global group IDs to contiguous 0..N-1
+        active_groups = meta["active_groups"]
+        global_to_local = {}
+        for local_id, gname in enumerate(active_groups):
+            from src.model.lid import GROUP_TO_ID as _G2ID
+            global_to_local[_G2ID[gname]] = local_id
+        remapped = group_labels.clone()
+        for gid, lid in global_to_local.items():
+            remapped[group_labels == gid] = lid
+        group_labels = remapped
+
         dataset = torch.utils.data.TensorDataset(images, script_labels, group_labels)
         dataset.active_scripts = meta["active_scripts"]
         dataset.active_groups = meta["active_groups"]

@@ -611,7 +611,7 @@ def main():
         scripts_in_group = [s for s in active_scripts if SCRIPT_TO_GROUP.get(s) == group_name]
         group_script_list.append(scripts_in_group)
         for local_s, script in enumerate(scripts_in_group):
-            global_sid = active_scripts.index(script)
+            global_sid = SCRIPT_TO_ID[script]
             mask = (script_ids_global == global_sid)
             local_script_ids[mask] = local_s
     for g, scripts in enumerate(group_script_list):
