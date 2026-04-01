@@ -232,7 +232,8 @@ class CUDAPrefetcher:
 
 def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
                     group_tokenizers, ce_loss_fn, device, device_type, use_amp,
-                    amp_dtype, epoch, total_epochs, grad_accum, log_interval):
+                    amp_dtype, epoch, total_epochs, grad_accum, log_interval,
+                    lid1_weight=10.0):
     model.train()
     n_batches = 0
 
@@ -259,21 +260,19 @@ def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
             gids = gids.to(device, non_blocking=True)
             sids = sids.to(device, non_blocking=True)
 
-        # Forward with LID-predicted routing
+        # Forward with ground-truth routing for expert blocks + CTC heads.
+        # LID-1 still computes logits for its own CE loss (learns to route).
+        # Using GT routing ensures CTC gets 100% of samples, not just the
+        # ~10% that LID routes correctly early in training.
         with torch.amp.autocast(device_type, enabled=use_amp, dtype=amp_dtype):
-            out = model(imgs, group_ids=None, script_ids=None)
+            out = model(imgs, group_ids=gids, script_ids=sids)
             logits = out["logits"]
             enc_lengths = out["lengths"]
-            pred_gids = out["group_ids"]
             lid1_loss = ce_loss_fn(out["group_logits"], gids)
 
-        # Build valid mask: LID-1 correct AND CTC length constraint met.
-        # All ops stay on GPU — no .any()/.item() sync.
-        valid = (pred_gids == gids) & (tgt_lens <= enc_lengths) & (tgt_lens > 0)
+        # CTC valid mask: only length constraint (routing is always correct now)
+        valid = (tgt_lens <= enc_lengths) & (tgt_lens > 0)
 
-        # CTC loss on valid samples only.
-        # If valid is all-False, indexing gives empty tensors — guard with shape check
-        # (reads .shape from Python, no GPU sync).
         valid_logits = logits[valid]
         ctc_loss = torch.zeros(1, device=device)
         if valid_logits.shape[0] > 0:
@@ -283,18 +282,16 @@ def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
                 enc_lengths[valid], tgt_lens[valid],
                 blank=0, reduction="mean", zero_infinity=True,
             )
-            # Replace inf/nan without GPU sync: clamp is all-GPU
             ctc_loss = torch.clamp(ctc_raw, min=0.0, max=100.0)
 
-        # LID-2 loss per multi-script group (stays on GPU)
+        # LID-2 loss per multi-script group
         lid2_loss = torch.zeros(1, device=device)
         for _g, script_logits, group_mask in out["script_logits_per_group"]:
-            routed_ok = valid[group_mask]
-            sl = script_logits[routed_ok]
+            sl = script_logits
             if sl.shape[0] > 0:
-                lid2_loss = lid2_loss + ce_loss_fn(sl, sids[group_mask][routed_ok])
+                lid2_loss = lid2_loss + ce_loss_fn(sl, sids[group_mask])
 
-        loss = ctc_loss + lid1_loss.float() + lid2_loss.float()
+        loss = ctc_loss + lid1_weight * lid1_loss.float() + lid2_loss.float()
 
         if grad_accum > 1:
             loss = loss / grad_accum
@@ -473,6 +470,8 @@ def main():
     parser.add_argument("--head-hidden", type=int, default=384)
     parser.add_argument("--no-compile", action="store_true",
                         help="Disable torch.compile (saves ~5-10GB VRAM)")
+    parser.add_argument("--lid1-weight", type=float, default=5.0,
+                        help="LID-1 loss weight (default 5.0 to balance with CTC under decomposition)")
     args = parser.parse_args()
 
     # Device
@@ -674,7 +673,7 @@ def main():
     print(f"\n{'=' * 60}")
     print(f"TRAINING: epochs {start_epoch}-{args.epochs}, lr={args.lr}")
     print(f"  Batch: {args.batch_size} x {args.grad_accum} = {eff_batch} effective")
-    print(f"  Losses: CTC x1.0 + LID1 x1.0")
+    print(f"  Losses: CTC x1.0 + LID1 x{args.lid1_weight}")
     print(f"{'=' * 60}")
 
     for epoch in range(start_epoch, args.epochs + 1):
@@ -683,7 +682,8 @@ def main():
         metrics = train_one_epoch(
             model, train_loader, optimizer, scheduler, scaler,
             group_tokenizers, ce_loss_fn, device, device_type, use_amp, amp_dtype,
-            epoch, args.epochs, args.grad_accum, args.log_interval)
+            epoch, args.epochs, args.grad_accum, args.log_interval,
+            lid1_weight=args.lid1_weight)
 
         elapsed = time.time() - t0
 
