@@ -29,8 +29,15 @@ _FINAL_MAP = {c: i for i, c in enumerate(FINALS) if c}
 _INITIAL_MAP = {c: i for i, c in enumerate(INITIALS)}
 _MEDIAL_MAP = {c: i for i, c in enumerate(MEDIALS)}
 
-_HANGUL_BASE = 0xAC00
-_HANGUL_END = 0xD7A3
+# Unicode ranges
+_HANGUL_BASE = 0xAC00  # First Hangul syllable block
+_HANGUL_END = 0xD7A3   # Last Hangul syllable block
+_CJK_START = 0x4E00    # CJK Unified Ideographs start
+_CJK_END = 0x9FFF      # CJK Unified Ideographs end
+_HIRAGANA_START = 0x3041
+_HIRAGANA_END = 0x3096
+_KATAKANA_START = 0x30A1
+_KATAKANA_END = 0x30FA
 
 # Top-250 common Hangul syllables (kept whole, not decomposed)
 # Lazy-loaded from word list frequency analysis
@@ -161,13 +168,13 @@ def _load_ids():
         if not char or not decomp or len(char) != 1 or "&" in decomp:
             continue
         cp = ord(char)
-        if 0x4E00 <= cp <= 0x9FFF:
+        if _CJK_START <= cp <= _CJK_END:
             _ids_char_to_seq[char] = decomp
             _ids_seq_to_char[decomp] = char
 
 
 def _is_cjk(ch: str) -> bool:
-    return 0x4E00 <= ord(ch) <= 0x9FFF
+    return _CJK_START <= ord(ch) <= _CJK_END
 
 
 def _decompose_cjk_depth2(char: str) -> list[str]:
@@ -343,7 +350,7 @@ def get_vocab_tokens(group: str) -> list[str]:
 
         # CJK chars not in IDS (atomic)
         decomposed = set(_ids_char_to_seq.keys()) if _ids_char_to_seq else set()
-        for cp in range(0x4E00, 0xA000):
+        for cp in range(_CJK_START, _CJK_END + 1):
             ch = chr(cp)
             if ch not in decomposed:
                 tokens.add(ch)
@@ -352,9 +359,9 @@ def get_vocab_tokens(group: str) -> list[str]:
         tokens.update(STRUCTURE_OPS)
 
         # Hiragana + Katakana
-        for cp in range(0x3041, 0x3097):
+        for cp in range(_HIRAGANA_START, _HIRAGANA_END + 1):
             tokens.add(chr(cp))
-        for cp in range(0x30A1, 0x30FB):
+        for cp in range(_KATAKANA_START, _KATAKANA_END + 1):
             tokens.add(chr(cp))
 
         # Marks and punctuation

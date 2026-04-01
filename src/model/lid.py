@@ -61,7 +61,7 @@ SCRIPT_TO_ID = {name: i for i, name in enumerate(SCRIPTS)}
 NUM_SCRIPTS = len(SCRIPTS)
 
 
-# --- Groups (9 families) ---
+# --- Groups (10 families) ---
 
 GROUPS = [
     "latin",             # 0  ~819 chars (22 languages)

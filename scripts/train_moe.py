@@ -222,35 +222,35 @@ def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
         if (tgt_lens > enc_lengths).any():
             continue
 
-        # Only compute CTC + LID-2 loss where LID-1 routed correctly
-        # (when LID-1 is wrong, script_ids don't match the predicted group)
-        lid1_correct = (pred_gids == gids)
+        # CTC + LID-2 only where LID-1 routed correctly.
+        # Wrong routing → script_ids mismatch → skip to avoid garbage gradients.
+        lid1_correct_mask = (pred_gids == gids)
         ctc_loss = torch.tensor(0.0, device=device)
         lid2_loss = torch.tensor(0.0, device=device)
 
-        if lid1_correct.any():
-            m = lid1_correct
-            # CTC loss
-            log_probs = logits[m].float().log_softmax(dim=-1).permute(1, 0, 2)
+        if lid1_correct_mask.any():
+            # CTC loss (float32 for numerical stability)
+            log_probs = logits[lid1_correct_mask].float().log_softmax(dim=-1).permute(1, 0, 2)
             ctc_loss = F.ctc_loss(
-                log_probs, targets[m], enc_lengths[m], tgt_lens[m],
+                log_probs, targets[lid1_correct_mask],
+                enc_lengths[lid1_correct_mask], tgt_lens[lid1_correct_mask],
                 blank=0, reduction="mean", zero_infinity=True,
             )
             if torch.isinf(ctc_loss) or torch.isnan(ctc_loss):
                 ctc_loss = torch.tensor(0.0, device=device)
 
-            # LID-2 loss (only on correctly LID-1-routed samples)
-            for g, script_logits, group_mask in out["script_logits_per_group"]:
-                # Intersect: samples in this group AND correctly routed
-                valid = group_mask & lid1_correct
-                if valid.any():
-                    # script_logits are only for group_mask samples, need to index
-                    valid_in_group = lid1_correct[group_mask]
-                    if valid_in_group.any():
-                        lid2_loss = lid2_loss + ce_loss_fn(
-                            script_logits[valid_in_group], sids[group_mask][valid_in_group])
+            # LID-2 loss per multi-script group
+            for _g, script_logits, group_mask in out["script_logits_per_group"]:
+                # script_logits has shape (N_in_group, n_scripts)
+                # Only use samples that are BOTH in this group AND correctly routed
+                correctly_routed_in_group = lid1_correct_mask[group_mask]
+                if correctly_routed_in_group.any():
+                    lid2_loss = lid2_loss + ce_loss_fn(
+                        script_logits[correctly_routed_in_group],
+                        sids[group_mask][correctly_routed_in_group],
+                    )
 
-        loss = ctc_loss + 1.0 * lid1_loss.float() + 1.0 * lid2_loss.float()
+        loss = ctc_loss + lid1_loss.float() + lid2_loss.float()
 
         if grad_accum > 1:
             loss = loss / grad_accum
