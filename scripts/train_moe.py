@@ -50,35 +50,25 @@ SCRIPT_TO_LANG = {
 }
 
 
-def _load_common_chars(path: Path) -> set[str] | None:
-    """Load common character set from frequency file if it exists."""
-    if path.exists():
-        return set(path.read_text(encoding="utf-8").strip().split("\n"))
-    return None
+from src.data.decompose import decompose_text, reconstruct_text, get_vocab_tokens
+
+# Groups that use decomposition
+_DECOMPOSE_GROUPS = {"han_kana", "korean"}
 
 
-# Load frequency-filtered charsets for CJK/Korean
-_CHAR_FREQ_DIR = Path(__file__).parent.parent / "training_data" / "char_freq"
-_COMMON_CHARS = {
-    "han_kana": _load_common_chars(_CHAR_FREQ_DIR / "han_kana_common.txt"),
-    "korean": _load_common_chars(_CHAR_FREQ_DIR / "korean_common.txt"),
-}
-
-
-def build_tokenizer(words: list[str], common_chars: set[str] | None = None) -> LipiTokenizer:
-    """Build vocab from training words, optionally filtered by common charset."""
+def build_tokenizer(words: list[str]) -> LipiTokenizer:
+    """Build vocab from training words."""
     chars = set(BASE_CHARS)
     for word in words:
         for ch in word:
-            if common_chars is None or ch in common_chars or ord(ch) < 128:
-                chars.add(ch)
+            chars.add(ch)
     vocab = [BLANK_TOKEN] + sorted(chars)
     return LipiTokenizer(vocab=vocab, bigrams=set())
 
 
 def build_group_tokenizers(labels: list[str], group_ids: torch.Tensor,
                            n_groups: int, active_groups: list[str]) -> list[LipiTokenizer]:
-    """Build one tokenizer per group, with frequency filtering for CJK/Korean."""
+    """Build one tokenizer per group, with decomposition for CJK/Korean."""
     group_words = [[] for _ in range(n_groups)]
     for label, gid in zip(labels, group_ids.tolist()):
         group_words[gid].append(label)
@@ -86,10 +76,23 @@ def build_group_tokenizers(labels: list[str], group_ids: torch.Tensor,
     tokenizers = []
     for g in range(n_groups):
         group_name = active_groups[g] if g < len(active_groups) else ""
-        common = _COMMON_CHARS.get(group_name)
-        tok = build_tokenizer(group_words[g], common_chars=common)
-        filtered = " (freq-filtered)" if common else ""
-        print(f"    Group {g} ({group_name}): {tok.vocab_size} chars, {len(group_words[g])} words{filtered}")
+
+        if group_name in _DECOMPOSE_GROUPS:
+            # Use decomposition vocab (components/jamo instead of whole chars)
+            vocab_tokens = get_vocab_tokens(group_name)
+            # Also add BASE_CHARS for digits, punctuation, etc.
+            all_tokens = set(BASE_CHARS) | set(vocab_tokens)
+            # Add chars from decomposed words that might not be in the preset vocab
+            for word in group_words[g]:
+                decomposed = decompose_text(word, group_name)
+                for ch in decomposed:
+                    all_tokens.add(ch)
+            vocab = [BLANK_TOKEN] + sorted(all_tokens)
+            tok = LipiTokenizer(vocab=vocab, bigrams=set())
+            print(f"    Group {g} ({group_name}): {tok.vocab_size} tokens, {len(group_words[g])} words (decomposed)")
+        else:
+            tok = build_tokenizer(group_words[g])
+            print(f"    Group {g} ({group_name}): {tok.vocab_size} chars, {len(group_words[g])} words")
         tokenizers.append(tok)
     return tokenizers
 
@@ -301,7 +304,12 @@ def evaluate(model, val_loader, group_tokenizers, active_groups, device, device_
                 if t != prev and t != 0:
                     chars.append(t)
                 prev = t
-            dec_s = tok.decode(chars).strip().lower()
+            raw_decoded = tok.decode(chars)
+            # Reconstruct CJK/Korean from components back to characters
+            group_name = active_groups[pred_g] if pred_g < len(active_groups) else ""
+            if group_name in _DECOMPOSE_GROUPS:
+                raw_decoded = reconstruct_text(raw_decoded, group_name)
+            dec_s = raw_decoded.strip().lower()
             ref_s = str(label).strip().lower()
             ctc_total += 1
             g_word_total[true_g] += 1
@@ -412,12 +420,17 @@ def main():
     vocab_sizes = [tok.vocab_size for tok in group_tokenizers]
     print(f"  Vocab sizes: {vocab_sizes} (max: {max(vocab_sizes)})")
 
-    # Pre-encode labels using each sample's group tokenizer
+    # Pre-encode labels — decompose CJK/Korean before encoding
     print("Pre-encoding labels...")
     max_len = 0
     encoded = []
     for i, (label, gid) in enumerate(zip(labels, group_ids.tolist())):
-        ids = group_tokenizers[gid].encode(label)
+        group_name = active_groups[gid] if gid < len(active_groups) else ""
+        if group_name in _DECOMPOSE_GROUPS:
+            label_tokens = decompose_text(label, group_name)
+        else:
+            label_tokens = label
+        ids = group_tokenizers[gid].encode(label_tokens)
         encoded.append(ids)
         max_len = max(max_len, len(ids))
 
