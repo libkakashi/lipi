@@ -1164,9 +1164,25 @@ def main():
         }, ckpt_path)
         print(f"  Saved: {ckpt_path}")
 
-        # Evaluate
-        print(f"\n  Evaluation after epoch {epoch}:")
-        eval_results = evaluate(model, tokenizer, val_loader, device, active_scripts)
+        # Evaluate (skip for pre-encoded data — no string labels in val loader)
+        if not _pre_encoded:
+            print(f"\n  Evaluation after epoch {epoch}:")
+            eval_results = evaluate(model, tokenizer, val_loader, device, active_scripts)
+        else:
+            # Quick LID accuracy on val set
+            model.eval()
+            lid_correct = lid_total = 0
+            with torch.no_grad():
+                for batch in val_loader:
+                    imgs, _, _, gids = batch
+                    imgs = imgs.to(device, non_blocking=True)
+                    gids = gids.to(device, non_blocking=True)
+                    out = model(imgs, group_ids=None)
+                    pred = out["group_logits"].argmax(-1)
+                    lid_correct += (pred == gids).sum().item()
+                    lid_total += gids.shape[0]
+            print(f"  LID-1 accuracy: {100*lid_correct/max(lid_total,1):.1f}%")
+            model.train()
 
     # Final summary
     total_time = time.time() - start_time
