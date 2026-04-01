@@ -402,46 +402,74 @@ class FullyExpertSWABlock(nn.Module):
             MLP(dim, mlp_ratio) for _ in range(num_groups)
         ])
 
-    def forward(self, x: Tensor, h: int, w: int, group_ids: Tensor) -> Tensor:
-        B = x.shape[0]
-
-        # Sort batch by group — contiguous memory, better GPU utilization
+    def _get_group_boundaries(self, group_ids: Tensor, B: int) -> list[tuple[int, int]]:
+        """Sort by group and return (start, end) slices. Cached-friendly."""
         sorted_idx = group_ids.argsort()
-        x_sorted = x[sorted_idx]
         gids_sorted = group_ids[sorted_idx]
 
-        # Find group boundaries (start index of each group in sorted order)
-        # This avoids per-group boolean masking
-        group_starts = [0]
-        for g in range(1, self.num_groups):
-            idx = (gids_sorted >= g).to(torch.long).argmax().item()
-            if gids_sorted[idx] >= g:
-                group_starts.append(idx)
-            else:
-                group_starts.append(B)
-        group_starts.append(B)
+        bounds = []
+        start = 0
+        for g in range(self.num_groups):
+            if start >= B:
+                bounds.append((B, B))
+                continue
+            # Find end of this group
+            end = start
+            while end < B and gids_sorted[end] == g:
+                end += 1
+            bounds.append((start, end))
+            start = end
 
-        # Expert attention
+        return sorted_idx, bounds
+
+    def forward(self, x: Tensor, h: int, w: int, group_ids: Tensor) -> Tensor:
+        B = x.shape[0]
+        use_streams = x.is_cuda and self.num_groups > 1
+
+        sorted_idx, bounds = self._get_group_boundaries(group_ids, B)
+        x_sorted = x[sorted_idx]
+
+        # Expert attention — parallel via CUDA streams
         normed = self.norm1(x_sorted)
         attn_out = torch.empty_like(x_sorted)
-        for g in range(self.num_groups):
-            s, e = group_starts[g], group_starts[g + 1]
-            if s < e:
-                attn_out[s:e] = self.expert_attns[g](normed[s:e], h, w).to(attn_out.dtype)
+
+        if use_streams:
+            streams = [torch.cuda.Stream() for _ in range(self.num_groups)]
+            for g in range(self.num_groups):
+                s, e = bounds[g]
+                if s < e:
+                    with torch.cuda.stream(streams[g]):
+                        attn_out[s:e] = self.expert_attns[g](normed[s:e], h, w).to(attn_out.dtype)
+            torch.cuda.synchronize()
+        else:
+            for g in range(self.num_groups):
+                s, e = bounds[g]
+                if s < e:
+                    attn_out[s:e] = self.expert_attns[g](normed[s:e], h, w).to(attn_out.dtype)
+
         x_sorted = x_sorted + attn_out
 
-        # Expert MLP
+        # Expert MLP — parallel via CUDA streams
         normed = self.norm2(x_sorted)
         mlp_out = torch.empty_like(x_sorted)
-        for g in range(self.num_groups):
-            s, e = group_starts[g], group_starts[g + 1]
-            if s < e:
-                mlp_out[s:e] = self.expert_mlps[g](normed[s:e]).to(mlp_out.dtype)
+
+        if use_streams:
+            for g in range(self.num_groups):
+                s, e = bounds[g]
+                if s < e:
+                    with torch.cuda.stream(streams[g]):
+                        mlp_out[s:e] = self.expert_mlps[g](normed[s:e]).to(mlp_out.dtype)
+            torch.cuda.synchronize()
+        else:
+            for g in range(self.num_groups):
+                s, e = bounds[g]
+                if s < e:
+                    mlp_out[s:e] = self.expert_mlps[g](normed[s:e]).to(mlp_out.dtype)
+
         x_sorted = x_sorted + mlp_out
 
         # Unsort back to original order
-        unsort_idx = sorted_idx.argsort()
-        return x_sorted[unsort_idx]
+        return x_sorted[sorted_idx.argsort()]
 
 
 class GlobalBlock(nn.Module):
