@@ -256,19 +256,12 @@ def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
     log_total_acc = torch.zeros(1, device=device)
     log_count = 0
 
-    use_prefetch = device_type == "cuda"
-    loader = CUDAPrefetcher(train_loader, device) if use_prefetch else train_loader
-
-    for batch_idx, batch in enumerate(loader):
-        if use_prefetch:
-            imgs, targets, tgt_lens, gids, sids, _labels = batch
-        else:
-            imgs, targets, tgt_lens, gids, sids, _labels = batch
-            imgs = imgs.to(device, non_blocking=True)
-            targets = targets.to(device, non_blocking=True)
-            tgt_lens = tgt_lens.to(device, non_blocking=True)
-            gids = gids.to(device, non_blocking=True)
-            sids = sids.to(device, non_blocking=True)
+    for batch_idx, (imgs, targets, tgt_lens, gids, sids, _labels) in enumerate(train_loader):
+        imgs = imgs.to(device, non_blocking=True)
+        targets = targets.to(device, non_blocking=True)
+        tgt_lens = tgt_lens.to(device, non_blocking=True)
+        gids = gids.to(device, non_blocking=True)
+        sids = sids.to(device, non_blocking=True)
 
         # Curriculum routing: per-batch decision based on gt_ratio
         use_gt = (gt_ratio >= 1.0) or (gt_ratio > 0.0 and random.random() < gt_ratio)
@@ -627,16 +620,11 @@ def main():
         dataset, [n_train, n_val], generator=torch.Generator().manual_seed(42))
     print(f"Train: {n_train}, Val: {n_val}")
 
-    # DataLoaders — num_workers=2 overlaps collation with GPU work
-    use_workers = device_type == "cuda"
+    # DataLoaders — data in RAM, no workers needed
     train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True,
-                              collate_fn=collate_moe, pin_memory=(device_type == "cuda"),
-                              num_workers=2 if use_workers else 0,
-                              persistent_workers=use_workers)
+                              collate_fn=collate_moe, pin_memory=(device_type == "cuda"))
     val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False,
-                            collate_fn=collate_moe, pin_memory=(device_type == "cuda"),
-                            num_workers=2 if use_workers else 0,
-                            persistent_workers=use_workers)
+                            collate_fn=collate_moe, pin_memory=(device_type == "cuda"))
 
     # Model
     model = LipiMoEEncoder(
