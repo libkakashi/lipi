@@ -262,10 +262,16 @@ def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
             pred_gids = out["group_ids"]
             lid1_loss = ce_loss_fn(out["group_logits"], gids)
 
-        # CTC per-script with exact vocab slicing. Each script's CTC head
-        # outputs its own vocab size — log_softmax must only cover those classes.
-        # Without this, zero-padded positions steal softmax probability mass.
-        valid = (pred_gids == gids) & (tgt_lens <= enc_lengths) & (tgt_lens > 0)
+        # Build predicted script IDs from LID-2 (for multi-script groups)
+        pred_sids = sids.clone()  # single-script groups: always correct
+        for _g, script_logits, group_mask in out["script_logits_per_group"]:
+            if script_logits is not None:
+                pred_sids[group_mask] = script_logits.argmax(-1)
+
+        # CTC per-script with exact vocab slicing.
+        # Skip when LID-1 OR LID-2 is wrong (wrong CTC head → garbage gradients).
+        valid = ((pred_gids == gids) & (pred_sids == sids)
+                 & (tgt_lens <= enc_lengths) & (tgt_lens > 0))
 
         ctc_loss = torch.zeros(1, device=device)
         ctc_samples = 0
