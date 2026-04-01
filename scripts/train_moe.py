@@ -311,10 +311,10 @@ def main():
             if len(skipped) > 5:
                 print(f"    ... and {len(skipped) - 5} more")
         model.load_state_dict(model_state, strict=False)
-        try:
+        if not skipped:
             optimizer.load_state_dict(ckpt["optimizer"])
-        except (ValueError, KeyError):
-            print("  Optimizer state incompatible, starting fresh optimizer")
+        else:
+            print("  Skipping optimizer state (vocab changed, momentum shapes stale)")
         if "scaler" in ckpt:
             scaler.load_state_dict(ckpt["scaler"])
         if "scheduler" in ckpt:
