@@ -32,7 +32,7 @@ from torch.utils.data import Dataset, DataLoader
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.model.moe_encoder import LipiMoEEncoder
-from src.model.lid import SCRIPTS, SCRIPT_TO_GROUP, GROUP_TO_ID
+from src.model.lid import SCRIPTS, SCRIPT_TO_GROUP, GROUP_TO_ID, SCRIPT_TO_ID, GROUP_SCRIPTS
 from src.data.bigrams import LipiTokenizer, BASE_CHARS, BLANK_TOKEN
 
 
@@ -63,35 +63,58 @@ def build_tokenizer(words: list[str]) -> LipiTokenizer:
     return LipiTokenizer(vocab=vocab, bigrams=set())
 
 
-def build_group_tokenizers(labels: list[str], group_ids: torch.Tensor,
-                           n_groups: int, active_groups: list[str]) -> list[LipiTokenizer]:
-    """Build one tokenizer per group, with decomposition for CJK/Korean."""
-    group_words = [[] for _ in range(n_groups)]
-    for label, gid in zip(labels, group_ids.tolist()):
-        group_words[gid].append(label)
+def build_script_tokenizers(
+    labels: list[str], script_ids: torch.Tensor,
+    active_scripts: list[str], active_groups: list[str],
+    global_to_local_group: dict[int, int],
+) -> tuple[list[list[LipiTokenizer]], list[list[int]], list[list[str]]]:
+    """Build per-script tokenizers organized by group.
 
-    tokenizers = []
-    for g in range(n_groups):
-        group_name = active_groups[g] if g < len(active_groups) else ""
+    Returns:
+        group_tokenizers: group_tokenizers[g][s] = tokenizer for script s in group g
+        group_script_vocab_sizes: vocab sizes per script per group
+        group_script_names: script names per group
+    """
+    # Collect words per script
+    script_words: dict[str, list[str]] = {s: [] for s in active_scripts}
+    for label, sid in zip(labels, script_ids.tolist()):
+        script = active_scripts[sid] if sid < len(active_scripts) else None
+        if script:
+            script_words[script].append(label)
 
-        if group_name in DECOMPOSE_GROUPS:
-            # Use decomposition vocab (components/jamo instead of whole chars)
-            vocab_tokens = get_vocab_tokens(group_name)
-            # Also add BASE_CHARS for digits, punctuation, etc.
-            all_tokens = set(BASE_CHARS) | set(vocab_tokens)
-            # Add chars from decomposed words that might not be in the preset vocab
-            for word in group_words[g]:
-                decomposed = decompose_text(word, group_name)
-                for ch in decomposed:
-                    all_tokens.add(ch)
-            vocab = [BLANK_TOKEN] + sorted(all_tokens)
-            tok = LipiTokenizer(vocab=vocab, bigrams=set())
-            print(f"    Group {g} ({group_name}): {tok.vocab_size} tokens, {len(group_words[g])} words (decomposed)")
-        else:
-            tok = build_tokenizer(group_words[g])
-            print(f"    Group {g} ({group_name}): {tok.vocab_size} chars, {len(group_words[g])} words")
-        tokenizers.append(tok)
-    return tokenizers
+    # Organize scripts by group
+    group_tokenizers = []
+    group_script_vocab_sizes = []
+    group_script_names = []
+
+    for g, group_name in enumerate(active_groups):
+        scripts_in_group = [s for s in active_scripts if SCRIPT_TO_GROUP.get(s) == group_name]
+        tokenizers = []
+        vocab_sizes = []
+
+        for script in scripts_in_group:
+            words = script_words.get(script, [])
+            if group_name in DECOMPOSE_GROUPS:
+                vocab_tokens = get_vocab_tokens(group_name)
+                all_tokens = set(BASE_CHARS) | set(vocab_tokens)
+                for word in words:
+                    for ch in decompose_text(word, group_name):
+                        all_tokens.add(ch)
+                vocab = [BLANK_TOKEN] + sorted(all_tokens)
+                tok = LipiTokenizer(vocab=vocab, bigrams=set())
+                tag = "decomposed"
+            else:
+                tok = build_tokenizer(words)
+                tag = "chars"
+            tokenizers.append(tok)
+            vocab_sizes.append(tok.vocab_size)
+            print(f"    Group {g} ({group_name}) / {script}: {tok.vocab_size} {tag}, {len(words)} words")
+
+        group_tokenizers.append(tokenizers)
+        group_script_vocab_sizes.append(vocab_sizes)
+        group_script_names.append(scripts_in_group)
+
+    return group_tokenizers, group_script_vocab_sizes, group_script_names
 
 
 # ---------------------------------------------------------------------------
@@ -117,34 +140,37 @@ def ctc_greedy_decode(logits: torch.Tensor, tokenizer: LipiTokenizer) -> list[st
 # Data loading from shards
 # ---------------------------------------------------------------------------
 
-def load_shards(shard_dir: Path) -> tuple[torch.Tensor, list[str], torch.Tensor, torch.Tensor]:
-    """Load all shards in parallel. Returns (images, labels, script_ids, group_ids)."""
+def load_shards(shard_dir: Path):
+    """Load all shards in parallel. Returns (images, labels, script_ids, group_ids, meta)."""
     meta = torch.load(shard_dir / "metadata.pt", weights_only=False)
     shard_files = sorted(shard_dir.glob("shard_*.pt"))
     print(f"  {len(shard_files)} shards")
 
-    all_imgs, all_labels, all_gids = [], [], []
+    all_imgs, all_labels, all_sids, all_gids = [], [], [], []
     with ThreadPoolExecutor(max_workers=16) as pool:
         for shard in pool.map(lambda p: torch.load(p, weights_only=False), shard_files):
             all_imgs.append(shard["images"])
             all_labels.extend(shard["labels"])
+            all_sids.append(shard["script_ids"])
             all_gids.append(shard["group_ids"])
 
     images = torch.cat(all_imgs)
+    script_ids = torch.cat(all_sids)
     group_ids = torch.cat(all_gids)
-    del all_imgs, all_gids
+    del all_imgs, all_sids, all_gids
     print(f"  {len(all_labels)} images loaded")
-    return images, all_labels, group_ids, meta
+    return images, all_labels, script_ids, group_ids, meta
 
 
 class MoEDataset(Dataset):
-    """Pre-encoded dataset: images + CTC targets + group IDs + string labels."""
+    """Pre-encoded dataset with group IDs, local script IDs, and string labels."""
 
-    def __init__(self, images, targets, target_lens, group_ids, labels):
+    def __init__(self, images, targets, target_lens, group_ids, local_script_ids, labels):
         self.images = images
         self.targets = targets
         self.target_lens = target_lens
         self.group_ids = group_ids
+        self.local_script_ids = local_script_ids
         self.labels = labels
 
     def __len__(self):
@@ -152,14 +178,14 @@ class MoEDataset(Dataset):
 
     def __getitem__(self, idx):
         return (self.images[idx], self.targets[idx], self.target_lens[idx],
-                self.group_ids[idx], self.labels[idx])
+                self.group_ids[idx], self.local_script_ids[idx], self.labels[idx])
 
 
 def collate_moe(batch):
-    """Stack pre-encoded batch. All images same size from shards."""
-    imgs, targets, tgt_lens, gids, labels = zip(*batch)
+    """Stack pre-encoded batch."""
+    imgs, targets, tgt_lens, gids, sids, labels = zip(*batch)
     return (torch.stack(imgs), torch.stack(targets), torch.stack(tgt_lens),
-            torch.stack(gids), list(labels))
+            torch.stack(gids), torch.stack(sids), list(labels))
 
 
 # ---------------------------------------------------------------------------
@@ -173,44 +199,49 @@ def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
     ctc_loss_sum = lid1_loss_sum = total_loss_sum = 0.0
     n_batches = 0
 
-    for batch_idx, (imgs, targets, tgt_lens, gids, _labels) in enumerate(train_loader):
+    for batch_idx, (imgs, targets, tgt_lens, gids, sids, _labels) in enumerate(train_loader):
         imgs = imgs.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
         tgt_lens = tgt_lens.to(device, non_blocking=True)
         gids = gids.to(device, non_blocking=True)
+        sids = sids.to(device, non_blocking=True)
 
         # Skip empty labels
         if (tgt_lens == 0).any():
             continue
 
-        # Forward with LID-predicted routing (not ground truth)
-        # This forces the model to learn routing AND recognition together
+        # Forward with LID-predicted routing (LID-1 and LID-2 decide)
         with torch.amp.autocast(device_type, enabled=use_amp, dtype=amp_dtype):
-            out = model(imgs, group_ids=None)  # LID decides routing
+            out = model(imgs, group_ids=None, script_ids=None)
             logits = out["logits"]
             enc_lengths = out["lengths"]
-            pred_gids = out["group_ids"]  # what LID predicted
-            lid1_loss = ce_loss_fn(out["group_logits"], gids)  # loss vs ground truth
+            pred_gids = out["group_ids"]
+            lid1_loss = ce_loss_fn(out["group_logits"], gids)
+
+            # LID-2 loss (per multi-script group)
+            lid2_loss = torch.tensor(0.0, device=device)
+            for g, script_logits, mask in out["script_logits_per_group"]:
+                lid2_loss = lid2_loss + ce_loss_fn(script_logits, sids[mask])
 
         # CTC constraint
         if (tgt_lens > enc_lengths).any():
             continue
 
-        # Only compute CTC where LID routed correctly
+        # Only compute CTC where LID-1 routed correctly
         correct = (pred_gids == gids)
         if correct.any():
             m = correct
             log_probs = logits[m].float().log_softmax(dim=-1).permute(1, 0, 2)
             ctc_loss = F.ctc_loss(
                 log_probs, targets[m], enc_lengths[m], tgt_lens[m],
-                blank=0, reduction="mean", zero_infinity=True,  # blank is always ID 0
+                blank=0, reduction="mean", zero_infinity=True,
             )
             if torch.isinf(ctc_loss) or torch.isnan(ctc_loss):
                 ctc_loss = torch.tensor(0.0, device=device)
         else:
             ctc_loss = torch.tensor(0.0, device=device)
 
-        loss = ctc_loss + 1.0 * lid1_loss.float()
+        loss = ctc_loss + 1.0 * lid1_loss.float() + 1.0 * lid2_loss.float()
 
         if grad_accum > 1:
             loss = loss / grad_accum
@@ -267,7 +298,7 @@ def evaluate(model, val_loader, group_tokenizers, active_groups, device, device_
     for batch_idx, batch in enumerate(val_loader):
         if batch_idx >= max_batches:
             break
-        imgs, targets, tgt_lens, gids, labels = batch
+        imgs, targets, tgt_lens, gids, sids, labels = batch
         imgs = imgs.to(device, non_blocking=True)
         gids = gids.to(device, non_blocking=True)
 
@@ -292,7 +323,8 @@ def evaluate(model, val_loader, group_tokenizers, active_groups, device, device_
         for i, (label, pred_g, true_g) in enumerate(zip(labels, pred_gids_cpu, gids_cpu)):
             if pred_g >= n_groups:
                 continue
-            tok = group_tokenizers[pred_g]
+            # Use first script tokenizer in the predicted group (for decoding)
+            tok = group_tokenizers[pred_g][0]
             # Collapse repeats + remove blanks
             seq = preds[i].tolist()
             chars = []
@@ -379,7 +411,7 @@ def main():
     # Load shards
     data_path = Path(args.data)
     print(f"\nLoading data from {data_path}/...")
-    images, labels, group_ids, meta = load_shards(data_path)
+    images, labels, script_ids_global, group_ids_global, meta = load_shards(data_path)
     active_scripts = meta["active_scripts"]
 
     # Filter scripts if specified
@@ -388,7 +420,7 @@ def main():
         active_scripts = [s for s in active_scripts if s in selected]
     print(f"Scripts: {active_scripts}")
 
-    # Determine active groups + remap IDs to 0..N-1
+    # Determine active groups + remap group IDs to 0..N-1
     active_groups = []
     seen = set()
     for s in active_scripts:
@@ -397,37 +429,50 @@ def main():
             active_groups.append(g)
             seen.add(g)
 
-    global_to_local = {}
+    global_to_local_group = {}
     for local_id, gname in enumerate(active_groups):
-        global_to_local[GROUP_TO_ID[gname]] = local_id
+        global_to_local_group[GROUP_TO_ID[gname]] = local_id
 
     n_groups = len(active_groups)
     print(f"Groups: {n_groups} -> {active_groups}")
-    print(f"  Remap: {global_to_local}")
 
     # Remap group IDs
-    remapped = group_ids.clone()
-    for gid, lid in global_to_local.items():
-        remapped[group_ids == gid] = lid
-    group_ids = remapped
+    group_ids = group_ids_global.clone()
+    for gid, lid in global_to_local_group.items():
+        group_ids[group_ids_global == gid] = lid
 
-    # Build per-group tokenizers
-    print("Building per-group tokenizers...")
-    group_tokenizers = build_group_tokenizers(labels, group_ids, n_groups, active_groups)
-    vocab_sizes = [tok.vocab_size for tok in group_tokenizers]
-    print(f"  Vocab sizes: {vocab_sizes} (max: {max(vocab_sizes)})")
+    # Build per-script local IDs within each group
+    # local_script_ids[i] = index of sample i's script within its group (0, 1, 2, ...)
+    local_script_ids = torch.zeros_like(group_ids)
+    group_script_list = []  # group_script_list[g] = [script_name, ...]
+    for g, group_name in enumerate(active_groups):
+        scripts_in_group = [s for s in active_scripts if SCRIPT_TO_GROUP.get(s) == group_name]
+        group_script_list.append(scripts_in_group)
+        for local_s, script in enumerate(scripts_in_group):
+            global_sid = active_scripts.index(script)
+            mask = (script_ids_global == global_sid)
+            local_script_ids[mask] = local_s
+    for g, scripts in enumerate(group_script_list):
+        print(f"  Group {g} ({active_groups[g]}): scripts {scripts}")
 
-    # Pre-encode labels — decompose CJK/Korean before encoding
+    # Build per-script tokenizers
+    print("\nBuilding per-script tokenizers...")
+    group_tokenizers, group_script_vocab_sizes, group_script_names = build_script_tokenizers(
+        labels, script_ids_global, active_scripts, active_groups, global_to_local_group)
+    print(f"  Per-group vocab sizes: {group_script_vocab_sizes}")
+
+    # Pre-encode labels using each sample's script tokenizer
     print("Pre-encoding labels...")
     max_len = 0
     encoded = []
-    for i, (label, gid) in enumerate(zip(labels, group_ids.tolist())):
+    for i, (label, gid, lsid) in enumerate(zip(labels, group_ids.tolist(), local_script_ids.tolist())):
         group_name = active_groups[gid] if gid < len(active_groups) else ""
         if group_name in DECOMPOSE_GROUPS:
             label_tokens = decompose_text(label, group_name)
         else:
             label_tokens = label
-        ids = group_tokenizers[gid].encode(label_tokens)
+        tok = group_tokenizers[gid][lsid]
+        ids = tok.encode(label_tokens)
         encoded.append(ids)
         max_len = max(max_len, len(ids))
 
@@ -442,7 +487,7 @@ def main():
     print(f"  Max label length: {max_len}")
 
     # Dataset + split
-    dataset = MoEDataset(images, target_tensor, target_len_tensor, group_ids, labels)
+    dataset = MoEDataset(images, target_tensor, target_len_tensor, group_ids, local_script_ids, labels)
     n_total = len(dataset)
     n_val = max(1, int(n_total * args.val_split))
     n_train = n_total - n_val
@@ -467,7 +512,8 @@ def main():
         stage2_dim=args.stage2_dim,
         stage2_blocks=args.stage2_blocks,
         num_groups=n_groups,
-        vocab_sizes=vocab_sizes,
+        group_script_vocab_sizes=group_script_vocab_sizes,
+        group_script_names=group_script_names,
         head_hidden=args.head_hidden,
     ).to(device)
 

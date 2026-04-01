@@ -5,16 +5,16 @@ Architecture:
     Input: (B, 2, 32, W) — L+a from rgb_to_input
     -> ColorProjection: L+a → 1ch
     -> ResNet Stem: 1→64ch, stride 4×
-    -> Shared SWA 4×4: universal features
+    -> Shared SWA 4×4: character-level universal features
+    -> Shared SWA 4×16: sequence-level universal features
     -> LID-1: 10-group classification
-    -> Expert SWA 4×4: group-specific char features
+    -> Expert SWA 4×4: group-specific character features
     -> Height pool 8→4
-    -> Expert SWA 4×16: group-specific sequence context
+    -> Expert SWA 4×16: group-specific sequence features
     -> Height pool 4→1
     -> LayerNorm
-    -> Per-group BiLSTM CTC heads (10 groups, per-group vocab)
-
-No LID-2. Script identity comes from the CTC output characters themselves.
+    -> LID-2: per-script classification (multi-script groups only)
+    -> Per-script BiLSTM CTC heads
 """
 
 import torch
@@ -25,76 +25,124 @@ from src.data.color import ColorProjection
 from src.model.stem import ResNetStem
 from src.model.pooling import LearnedHeightPooling
 from src.model.attention import SWABlock, FullyExpertSWABlock
-from src.model.lid import (
-    LIDCoarse, NUM_GROUPS,
-)
+from src.model.lid import LIDCoarse, NUM_GROUPS
 
 
-class GroupCTCHeads(nn.Module):
-    """Per-group BiLSTM CTC heads with per-group vocabularies.
+class CTCHead(nn.Module):
+    """Single BiLSTM CTC head for one script/group."""
 
-    Each group has its own vocab (only chars that appear in that group's scripts).
-    Output is padded to max_vocab_size for batching, but each head only
-    uses its own vocab_size columns.
-    """
-
-    def __init__(self, enc_dim: int, vocab_sizes: list[int],
+    def __init__(self, enc_dim: int, vocab_size: int,
                  hidden_dim: int = 384, num_layers: int = 2, dropout: float = 0.1):
         super().__init__()
-        self.max_vocab = max(vocab_sizes)
+        self.vocab_size = vocab_size
+        self.lstm = nn.LSTM(
+            enc_dim, hidden_dim,
+            num_layers=num_layers,
+            dropout=dropout if num_layers > 1 else 0.0,
+            bidirectional=True, batch_first=True,
+        )
+        self.proj = nn.Linear(hidden_dim * 2, vocab_size)
+
+    def forward(self, features: Tensor) -> Tensor:
+        out, _ = self.lstm(features)
+        return self.proj(out)
+
+
+class GroupCTCModule(nn.Module):
+    """CTC module for one group. Handles both single-script and multi-script groups.
+
+    Single-script: one CTC head, no LID-2.
+    Multi-script: LID-2 classifier + per-script CTC heads.
+    """
+
+    def __init__(self, enc_dim: int, script_vocab_sizes: list[int],
+                 script_names: list[str],
+                 hidden_dim: int = 384, num_layers: int = 2, dropout: float = 0.1):
+        super().__init__()
+        self.n_scripts = len(script_vocab_sizes)
+        self.script_names = script_names
+        self.multi_script = self.n_scripts > 1
+        self.max_vocab = max(script_vocab_sizes)
+
+        # Per-script CTC heads
         self.heads = nn.ModuleList([
-            nn.ModuleDict({
-                "lstm": nn.LSTM(
-                    enc_dim, hidden_dim,
-                    num_layers=num_layers,
-                    dropout=dropout if num_layers > 1 else 0.0,
-                    bidirectional=True, batch_first=True,
-                ),
-                "proj": nn.Linear(hidden_dim * 2, vs),
-            })
-            for vs in vocab_sizes
+            CTCHead(enc_dim, vs, hidden_dim, num_layers, dropout)
+            for vs in script_vocab_sizes
         ])
 
-    def forward(self, features: Tensor, group_ids: Tensor) -> Tensor:
-        B, T, C = features.shape
-        # Pad all outputs to max_vocab for uniform tensor shape
-        logits = torch.zeros(B, T, self.max_vocab,
+        # LID-2 classifier (only for multi-script groups)
+        if self.multi_script:
+            self.lid2 = nn.Sequential(
+                nn.Linear(enc_dim, enc_dim // 4),
+                nn.ReLU(),
+                nn.Linear(enc_dim // 4, self.n_scripts),
+            )
+        else:
+            self.lid2 = None
+
+    def forward(self, features: Tensor, script_ids: Tensor | None = None
+                ) -> tuple[Tensor, Tensor | None, Tensor | None]:
+        """
+        Args:
+            features: (N, T, C) — encoder output for this group's samples.
+            script_ids: (N,) — local script index within this group (0..n_scripts-1).
+                        None at inference → uses LID-2 predictions.
+
+        Returns:
+            logits: (N, T, max_vocab)
+            script_logits: (N, n_scripts) or None if single-script
+            script_ids_used: (N,) script IDs used for routing
+        """
+        N, T, C = features.shape
+
+        # LID-2
+        script_logits = None
+        if self.multi_script:
+            script_logits = self.lid2(features.mean(dim=1))  # (N, n_scripts)
+            if script_ids is None:
+                script_ids = script_logits.argmax(dim=-1)
+        else:
+            script_ids = torch.zeros(N, dtype=torch.long, device=features.device)
+
+        # Route to per-script CTC heads
+        logits = torch.zeros(N, T, self.max_vocab,
                              device=features.device, dtype=features.dtype)
-        for g in range(len(self.heads)):
-            mask = (group_ids == g)
+        for s in range(self.n_scripts):
+            mask = (script_ids == s)
             if not mask.any():
                 continue
-            head = self.heads[g]
-            out, _ = head["lstm"](features[mask])
-            proj_out = head["proj"](out).to(logits.dtype)
-            logits[mask, :, :proj_out.shape[-1]] = proj_out
-        return logits
+            head_out = self.heads[s](features[mask]).to(logits.dtype)
+            logits[mask, :, :head_out.shape[-1]] = head_out
+
+        return logits, script_logits, script_ids
 
 
 class LipiMoEEncoder(nn.Module):
-    """Full Lipi MoE encoder with shared SWA before LID routing."""
+    """Full Lipi MoE encoder with LID-1 group routing + LID-2 script routing."""
 
     def __init__(
         self,
         stem_channels: int = 64,
         stem_depth: int = 3,
-        # Shared SWA 4×4 (character-level, before LID)
+        # Shared SWA
         shared_dim: int = 288,
         shared_blocks_4x4: int = 6,
-        # Shared SWA 4×16 (sequence-level, before LID)
         shared_blocks_4x16: int = 3,
         shared_mlp_ratio: int = 4,
-        # Expert SWA Stage 1 (after LID, 4×4 window)
+        # Expert SWA Stage 1
         stage1_dim: int = 288,
         stage1_blocks: int = 12,
         stage1_mlp_ratio: int = 4,
-        # Expert SWA Stage 2 (4×16 window)
+        # Expert SWA Stage 2
         stage2_dim: int = 576,
         stage2_blocks: int = 8,
         stage2_mlp_ratio: int = 4,
-        # Groups
+        # Groups and scripts
         num_groups: int = NUM_GROUPS,
-        vocab_sizes: list[int] | int = 171,  # per-group vocab sizes, or single int for all
+        group_script_vocab_sizes: list[list[int]] | None = None,
+        group_script_names: list[list[str]] | None = None,
+        # Legacy: single vocab per group (no LID-2)
+        vocab_sizes: list[int] | int | None = None,
         head_hidden: int = 384,
         head_layers: int = 2,
         head_dropout: float = 0.1,
@@ -102,87 +150,99 @@ class LipiMoEEncoder(nn.Module):
         super().__init__()
         self.num_groups = num_groups
 
-        # Color projection: L+a → 1ch
+        # Color projection
         self.color_proj = ColorProjection()
 
-        # Stem: 1→64ch, downsample 4×
+        # Stem
         self.stem = ResNetStem(out_channels=stem_channels, depth=stem_depth)
 
-        # Channel projection: stem → shared SWA dim
+        # Channel projection
         self.proj_shared = nn.Linear(stem_channels, shared_dim)
 
-        # Shared SWA 4×4 blocks (character-level universal features)
+        # Shared SWA 4×4
         self.shared_swa_4x4 = nn.ModuleList([
-            SWABlock(
-                dim=shared_dim,
-                num_heads=shared_dim // 32,
-                window_h=4, window_w=4,
-                shift=(i % 2 == 1), mlp_ratio=shared_mlp_ratio,
-            )
+            SWABlock(dim=shared_dim, num_heads=shared_dim // 32,
+                     window_h=4, window_w=4,
+                     shift=(i % 2 == 1), mlp_ratio=shared_mlp_ratio)
             for i in range(shared_blocks_4x4)
         ])
 
-        # Shared SWA 4×16 blocks (sequence-level universal features)
+        # Shared SWA 4×16
         self.shared_swa_4x16 = nn.ModuleList([
-            SWABlock(
-                dim=shared_dim,
-                num_heads=shared_dim // 32,
-                window_h=4, window_w=16,
-                shift=(i % 2 == 1), mlp_ratio=shared_mlp_ratio,
-            )
+            SWABlock(dim=shared_dim, num_heads=shared_dim // 32,
+                     window_h=4, window_w=16,
+                     shift=(i % 2 == 1), mlp_ratio=shared_mlp_ratio)
             for i in range(shared_blocks_4x16)
         ])
 
-        # LID-1: coarse group classification
+        # LID-1
         self.lid_coarse = LIDCoarse(in_channels=shared_dim, num_groups=num_groups)
 
-        # Channel projection: shared → stage1
+        # Channel projection
         self.proj1 = nn.Linear(shared_dim, stage1_dim) if shared_dim != stage1_dim else nn.Identity()
 
-        # Expert SWA Stage 1: fully expert, 4×4 window
+        # Expert SWA Stage 1
         self.stage1 = nn.ModuleList([
-            FullyExpertSWABlock(
-                dim=stage1_dim,
-                num_heads=stage1_dim // 32,
-                num_groups=num_groups,
-                window_h=4, window_w=4,
-                shift=(i % 2 == 1), mlp_ratio=stage1_mlp_ratio,
-            )
+            FullyExpertSWABlock(dim=stage1_dim, num_heads=stage1_dim // 32,
+                                num_groups=num_groups, window_h=4, window_w=4,
+                                shift=(i % 2 == 1), mlp_ratio=stage1_mlp_ratio)
             for i in range(stage1_blocks)
         ])
 
-        # Height pooling: 8 → 4
+        # Height pool 8→4
         self.pool1 = LearnedHeightPooling(channels=stage1_dim, h_in=8, h_out=4)
 
-        # Channel projection: Stage 1 → Stage 2
+        # Channel projection
         self.proj2 = nn.Linear(stage1_dim, stage2_dim)
 
-        # Expert SWA Stage 2: fully expert, 4×16 window
+        # Expert SWA Stage 2
         self.stage2 = nn.ModuleList([
-            FullyExpertSWABlock(
-                dim=stage2_dim,
-                num_heads=stage2_dim // 32,
-                num_groups=num_groups,
-                window_h=4, window_w=16,
-                shift=(i % 2 == 1), mlp_ratio=stage2_mlp_ratio,
-            )
+            FullyExpertSWABlock(dim=stage2_dim, num_heads=stage2_dim // 32,
+                                num_groups=num_groups, window_h=4, window_w=16,
+                                shift=(i % 2 == 1), mlp_ratio=stage2_mlp_ratio)
             for i in range(stage2_blocks)
         ])
 
-        # Height pooling: 4 → 1
+        # Height pool 4→1
         self.pool2 = LearnedHeightPooling(channels=stage2_dim, h_in=4, h_out=1)
 
         # Final norm
         self.norm = nn.LayerNorm(stage2_dim)
 
-        # Per-group BiLSTM CTC heads (each group gets its own vocab size)
-        if isinstance(vocab_sizes, int):
-            vocab_sizes = [vocab_sizes] * num_groups
-        self.ctc_heads = GroupCTCHeads(
-            enc_dim=stage2_dim, vocab_sizes=vocab_sizes,
-            hidden_dim=head_hidden,
-            num_layers=head_layers, dropout=head_dropout,
-        )
+        # CTC heads: per-script within each group (with LID-2 for multi-script groups)
+        if group_script_vocab_sizes is not None:
+            # New: per-script CTC heads with LID-2
+            if group_script_names is None:
+                group_script_names = [[f"s{i}" for i in range(len(vs))]
+                                      for vs in group_script_vocab_sizes]
+            self.ctc_modules = nn.ModuleList([
+                GroupCTCModule(
+                    enc_dim=stage2_dim,
+                    script_vocab_sizes=group_script_vocab_sizes[g],
+                    script_names=group_script_names[g],
+                    hidden_dim=head_hidden,
+                    num_layers=head_layers,
+                    dropout=head_dropout,
+                )
+                for g in range(num_groups)
+            ])
+        else:
+            # Legacy: single CTC head per group
+            if isinstance(vocab_sizes, int):
+                vocab_sizes = [vocab_sizes] * num_groups
+            if vocab_sizes is None:
+                vocab_sizes = [171] * num_groups
+            self.ctc_modules = nn.ModuleList([
+                GroupCTCModule(
+                    enc_dim=stage2_dim,
+                    script_vocab_sizes=[vocab_sizes[g]],
+                    script_names=[f"group{g}"],
+                    hidden_dim=head_hidden,
+                    num_layers=head_layers,
+                    dropout=head_dropout,
+                )
+                for g in range(num_groups)
+            ])
 
         self.output_dim = stage2_dim
 
@@ -190,49 +250,48 @@ class LipiMoEEncoder(nn.Module):
         self,
         images: Tensor,
         group_ids: Tensor | None = None,
+        script_ids: Tensor | None = None,
     ) -> dict:
         B = images.shape[0]
         W = images.shape[3]
         T = W // 4
 
-        # Color projection: L+a → 1ch
+        # Color projection
         x = self.color_proj(images)
 
         # Stem
         x = self.stem(x)
         _, C, h, w = x.shape
 
-        # Reshape to sequence + project to shared dim
+        # Reshape + project
         x = x.permute(0, 2, 3, 1).reshape(B, h * w, C)
         x = self.proj_shared(x)
 
-        # Shared SWA 4×4 (character-level)
+        # Shared SWA
         for block in self.shared_swa_4x4:
             x = block(x, h=h, w=w)
-
-        # Shared SWA 4×16 (sequence-level)
         for block in self.shared_swa_4x16:
             x = block(x, h=h, w=w)
 
-        # LID-1: group classification
+        # LID-1
         group_logits = self.lid_coarse.classifier(x.mean(dim=1))
         if group_ids is None:
             group_ids = group_logits.argmax(dim=-1)
 
-        # Project to stage1 dim
+        # Project to stage1
         x = self.proj1(x)
 
         # Expert SWA Stage 1
         for block in self.stage1:
             x = block(x, h=h, w=w, group_ids=group_ids)
 
-        # Height pooling 8→4
+        # Height pool 8→4
         C1 = x.shape[-1]
         x = x.reshape(B, h, w, C1).permute(0, 3, 1, 2)
         x = self.pool1(x)
         h = 4
 
-        # Channel projection to Stage 2
+        # Project to stage2
         x = x.permute(0, 2, 3, 1).reshape(B, h * w, C1)
         x = self.proj2(x)
 
@@ -240,7 +299,7 @@ class LipiMoEEncoder(nn.Module):
         for block in self.stage2:
             x = block(x, h=h, w=w, group_ids=group_ids)
 
-        # Height pooling 4→1
+        # Height pool 4→1
         C2 = x.shape[-1]
         x = x.reshape(B, h, w, C2).permute(0, 3, 1, 2)
         x = self.pool2(x)
@@ -249,8 +308,27 @@ class LipiMoEEncoder(nn.Module):
         # Final norm
         x = self.norm(x)
 
-        # Per-group CTC heads
-        logits = self.ctc_heads(x, group_ids)
+        # Per-group CTC with LID-2
+        max_vocab = max(m.max_vocab for m in self.ctc_modules)
+        logits = torch.zeros(B, T, max_vocab, device=x.device, dtype=x.dtype)
+        all_script_logits = []  # (group_idx, script_logits_tensor, mask)
+
+        for g in range(self.num_groups):
+            mask = (group_ids == g)
+            if not mask.any():
+                continue
+
+            # Get local script_ids for this group (if provided)
+            local_script_ids = None
+            if script_ids is not None:
+                local_script_ids = script_ids[mask]
+
+            g_logits, g_script_logits, g_script_ids = self.ctc_modules[g](
+                x[mask], script_ids=local_script_ids)
+            logits[mask, :, :g_logits.shape[-1]] = g_logits.to(logits.dtype)
+
+            if g_script_logits is not None:
+                all_script_logits.append((g, g_script_logits, mask))
 
         lengths = torch.full((B,), T, dtype=torch.long, device=x.device)
 
@@ -259,4 +337,5 @@ class LipiMoEEncoder(nn.Module):
             "lengths": lengths,
             "group_logits": group_logits,
             "group_ids": group_ids,
+            "script_logits_per_group": all_script_logits,  # for LID-2 loss
         }
