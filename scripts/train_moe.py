@@ -249,6 +249,7 @@ def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
     total_loss_accum = torch.zeros(1, device=device)
     log_ctc_acc = torch.zeros(1, device=device)
     log_lid1_acc = torch.zeros(1, device=device)
+    log_lid2_acc = torch.zeros(1, device=device)
     log_total_acc = torch.zeros(1, device=device)
     log_count = 0
 
@@ -331,6 +332,7 @@ def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
         total_loss_accum += loss.detach() * mult
         log_ctc_acc += ctc_loss.detach()
         log_lid1_acc += lid1_loss.detach()
+        log_lid2_acc += lid2_loss.detach()
         log_total_acc += loss.detach() * mult
         n_batches += 1
         log_count += 1
@@ -339,16 +341,18 @@ def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
         if n_batches % log_interval == 0:
             avg_ctc = log_ctc_acc.item() / log_count
             avg_lid1 = log_lid1_acc.item() / log_count
+            avg_lid2 = log_lid2_acc.item() / log_count
             avg_total = log_total_acc.item() / log_count
             lr = scheduler.get_last_lr()[0]
             steps = len(train_loader)
             route_str = "GT" if use_gt else "pred"
             print(f"  [{epoch}/{total_epochs}] batch {batch_idx+1}/{steps}  "
                   f"loss={avg_total:.4f} "
-                  f"(ctc={avg_ctc:.4f} lid1={avg_lid1:.4f})  "
+                  f"(ctc={avg_ctc:.4f} lid1={avg_lid1:.4f} lid2={avg_lid2:.4f})  "
                   f"lr={lr:.2e}  [{route_str}]")
             log_ctc_acc.zero_()
             log_lid1_acc.zero_()
+            log_lid2_acc.zero_()
             log_total_acc.zero_()
             log_count = 0
 
