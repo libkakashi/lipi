@@ -32,8 +32,8 @@ from torch.utils.data import Dataset, DataLoader
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.model.moe_encoder import LipiMoEEncoder
-from src.model.lid import SCRIPTS, SCRIPT_TO_GROUP, GROUP_TO_ID, GROUPS
-from src.data.bigrams import LipiTokenizer, SCRIPT_CHARSETS, BASE_CHARS, BLANK_TOKEN
+from src.model.lid import SCRIPTS, SCRIPT_TO_GROUP, GROUP_TO_ID
+from src.data.bigrams import LipiTokenizer, BASE_CHARS, BLANK_TOKEN
 
 
 # ---------------------------------------------------------------------------

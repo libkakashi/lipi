@@ -6,13 +6,13 @@ Architecture:
     -> ColorProjection: L+a → 1ch
     -> ResNet Stem: 1→64ch, stride 4×
     -> Shared SWA 4×4: universal features
-    -> LID-1: 8-group classification
+    -> LID-1: 10-group classification
     -> Expert SWA 4×4: group-specific char features
     -> Height pool 8→4
     -> Expert SWA 4×16: group-specific sequence context
     -> Height pool 4→1
     -> LayerNorm
-    -> Per-group BiLSTM CTC heads (8 groups, shared vocab)
+    -> Per-group BiLSTM CTC heads (10 groups, per-group vocab)
 
 No LID-2. Script identity comes from the CTC output characters themselves.
 """
@@ -26,9 +26,7 @@ from src.model.stem import ResNetStem
 from src.model.pooling import LearnedHeightPooling
 from src.model.attention import SWABlock, FullyExpertSWABlock
 from src.model.lid import (
-    LIDCoarse,
-    SCRIPTS, NUM_SCRIPTS, NUM_GROUPS,
-    GROUPS, SCRIPT_TO_GROUP, GROUP_TO_ID,
+    LIDCoarse, NUM_GROUPS,
 )
 
 
@@ -43,7 +41,6 @@ class GroupCTCHeads(nn.Module):
     def __init__(self, enc_dim: int, vocab_sizes: list[int],
                  hidden_dim: int = 384, num_layers: int = 2, dropout: float = 0.1):
         super().__init__()
-        self.vocab_sizes = vocab_sizes
         self.max_vocab = max(vocab_sizes)
         self.heads = nn.ModuleList([
             nn.ModuleDict({

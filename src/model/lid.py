@@ -40,20 +40,20 @@ SCRIPTS = [
     "han_kana",    # 5
     # Group 6: Korean
     "korean",      # 6
-    # Group 6: N+E Indian Brahmic
+    # Group 7: N+E Indian Brahmic
     "devanagari",  # 7
     "gurmukhi",    # 8
     "gujarati",    # 9
     "bengali",     # 10
-    # Group 7: South Indian Brahmic (incl. Tamil)
+    # Group 8: South Indian Brahmic (incl. Tamil)
     "kannada",     # 11
     "telugu",      # 12
     "malayalam",   # 13
     "tamil",       # 14
-    # Group 8: SE Asian Brahmic
+    # Group 9: SE Asian Brahmic
     "thai",        # 15
     "lao",         # 16
-    # Group 9: Emoji
+    # Group 10: Emoji
     "emoji",       # 17
 ]
 
