@@ -234,15 +234,11 @@ class CUDAPrefetcher:
 def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
                     group_tokenizers, ce_loss_fn, device, device_type, use_amp,
                     amp_dtype, epoch, total_epochs, grad_accum, log_interval,
-                    gt_ratio=1.0, log_sigma_ctc=None, log_sigma_lid=None):
+                    gt_ratio=1.0, lid1_weight=10.0):
     """
     Curriculum routing: gt_ratio controls GT vs predicted routing.
       gt_ratio=1.0 → pure GT routing (early training, bootstrap CTC)
       gt_ratio=0.0 → pure predicted routing (late training, inference robustness)
-
-    Loss balancing via uncertainty weighting (Kendall et al. 2018):
-      loss = ctc / (2*σ_ctc²) + log(σ_ctc) + lid / (2*σ_lid²) + log(σ_lid)
-      Learnable σ auto-balances loss magnitudes.
     """
     model.train()
     n_batches = 0
@@ -311,15 +307,7 @@ def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
             if sl.shape[0] > 0:
                 lid2_loss = lid2_loss + ce_loss_fn(sl, sl_targets)
 
-        # Uncertainty weighting: auto-balances CTC vs LID loss magnitudes
-        if log_sigma_ctc is not None and log_sigma_lid is not None:
-            precision_ctc = torch.exp(-2 * log_sigma_ctc)
-            precision_lid = torch.exp(-2 * log_sigma_lid)
-            loss = (precision_ctc * ctc_loss + log_sigma_ctc +
-                    precision_lid * lid1_loss.float() + log_sigma_lid +
-                    lid2_loss.float())
-        else:
-            loss = ctc_loss + lid1_loss.float() + lid2_loss.float()
+        loss = ctc_loss + lid1_weight * lid1_loss.float() + lid2_loss.float()
 
         if grad_accum > 1:
             loss = loss / grad_accum
@@ -354,14 +342,11 @@ def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
             avg_total = log_total_acc.item() / log_count
             lr = scheduler.get_last_lr()[0]
             steps = len(train_loader)
-            sigma_str = ""
-            if log_sigma_ctc is not None:
-                sigma_str = f"  σ_ctc={log_sigma_ctc.item():.2f} σ_lid={log_sigma_lid.item():.2f}"
             route_str = "GT" if use_gt else "pred"
             print(f"  [{epoch}/{total_epochs}] batch {batch_idx+1}/{steps}  "
                   f"loss={avg_total:.4f} "
                   f"(ctc={avg_ctc:.4f} lid1={avg_lid1:.4f})  "
-                  f"lr={lr:.2e}  [{route_str}]{sigma_str}")
+                  f"lr={lr:.2e}  [{route_str}]")
             log_ctc_acc.zero_()
             log_lid1_acc.zero_()
             log_total_acc.zero_()
@@ -567,6 +552,8 @@ def main():
                         help="Pure GT routing for first N epochs, then linear transition to predicted")
     parser.add_argument("--transition-epochs", type=int, default=5,
                         help="Epochs to linearly transition from GT to predicted routing")
+    parser.add_argument("--lid1-weight", type=float, default=10.0,
+                        help="LID-1 loss weight (high to match CTC magnitude under decomposition)")
     args = parser.parse_args()
 
     # Device
@@ -759,20 +746,13 @@ def main():
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    # Uncertainty weighting: learnable log-sigma per task (Kendall et al. 2018)
-    # Auto-balances CTC vs LID loss magnitudes during training
-    log_sigma_ctc = nn.Parameter(torch.zeros(1, device=device))
-    log_sigma_lid = nn.Parameter(torch.zeros(1, device=device))
-    # Add to optimizer so they get updated
-    optimizer.add_param_group({"params": [log_sigma_ctc, log_sigma_lid], "lr": args.lr})
-
     eff_batch = args.batch_size * args.grad_accum
     gt_end = args.gt_epochs + args.transition_epochs
     print(f"\n{'=' * 60}")
     print(f"TRAINING: epochs {start_epoch}-{args.epochs}, lr={args.lr}")
     print(f"  Batch: {args.batch_size} x {args.grad_accum} = {eff_batch} effective")
     print(f"  Routing: GT epochs 1-{args.gt_epochs}, transition {args.gt_epochs+1}-{gt_end}, predicted {gt_end+1}+")
-    print(f"  Loss balancing: uncertainty weighting (learned σ)")
+    print(f"  Losses: CTC x1.0 + LID1 x{args.lid1_weight}")
     print(f"{'=' * 60}")
 
     for epoch in range(start_epoch, args.epochs + 1):
@@ -790,7 +770,7 @@ def main():
             model, train_loader, optimizer, scheduler, scaler,
             group_tokenizers, ce_loss_fn, device, device_type, use_amp, amp_dtype,
             epoch, args.epochs, args.grad_accum, args.log_interval,
-            gt_ratio=gt_ratio, log_sigma_ctc=log_sigma_ctc, log_sigma_lid=log_sigma_lid)
+            gt_ratio=gt_ratio, lid1_weight=args.lid1_weight)
 
         elapsed = time.time() - t0
 
