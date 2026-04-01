@@ -75,11 +75,12 @@ def build_script_tokenizers(
         group_script_vocab_sizes: vocab sizes per script per group
         group_script_names: script names per group
     """
-    # Collect words per script
+    # Collect words per script (script_ids are GLOBAL from SCRIPT_TO_ID)
     script_words: dict[str, list[str]] = {s: [] for s in active_scripts}
+    active_set = set(active_scripts)
     for label, sid in zip(labels, script_ids.tolist()):
-        script = active_scripts[sid] if sid < len(active_scripts) else None
-        if script:
+        script = SCRIPTS[sid] if sid < len(SCRIPTS) else None
+        if script and script in active_set:
             script_words[script].append(label)
 
     # Organize scripts by group
@@ -329,7 +330,8 @@ def evaluate(model, val_loader, group_tokenizers, active_groups, device, device_
         preds = out["logits"].float().cpu().argmax(dim=-1)  # (B, T)
         pred_gids_cpu = pred_gids.cpu().tolist()
         gids_cpu = gids.cpu().tolist()
-        for i, (label, pred_g, true_g) in enumerate(zip(labels, pred_gids_cpu, gids_cpu)):
+        sids_cpu = sids.cpu().tolist()
+        for i, (label, pred_g, true_g, local_sid) in enumerate(zip(labels, pred_gids_cpu, gids_cpu, sids_cpu)):
             if pred_g >= n_groups:
                 continue
             # Only decode when LID-1 is correct — wrong routing → wrong CTC head → invalid tokens
@@ -338,7 +340,9 @@ def evaluate(model, val_loader, group_tokenizers, active_groups, device, device_
                 g_word_total[true_g] += 1
                 total_chars += len(str(label).strip())
                 continue
-            tok = group_tokenizers[true_g][0]
+            # Use the correct script's tokenizer within the group
+            local_sid = min(local_sid, len(group_tokenizers[true_g]) - 1)
+            tok = group_tokenizers[true_g][local_sid]
             # Collapse repeats + remove blanks
             seq = preds[i].tolist()
             chars = []
