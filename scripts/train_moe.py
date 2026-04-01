@@ -174,7 +174,7 @@ def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
         if torch.isinf(ctc_loss) or torch.isnan(ctc_loss):
             continue
 
-        loss = ctc_loss + 0.1 * lid1_loss.float()
+        loss = ctc_loss + 1.0 * lid1_loss.float()
 
         if grad_accum > 1:
             loss = loss / grad_accum
@@ -420,7 +420,7 @@ def main():
     print(f"\n{'=' * 60}")
     print(f"TRAINING: epochs {start_epoch}-{args.epochs}, lr={args.lr}")
     print(f"  Batch: {args.batch_size} x {args.grad_accum} = {eff_batch} effective")
-    print(f"  Losses: CTC x1.0 + LID1 x0.1")
+    print(f"  Losses: CTC x1.0 + LID1 x1.0")
     print(f"{'=' * 60}")
 
     for epoch in range(start_epoch, args.epochs + 1):
