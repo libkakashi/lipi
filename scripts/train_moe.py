@@ -746,6 +746,8 @@ def main():
     parser.add_argument("--save-dir", type=str, default="checkpoints/moe")
     parser.add_argument("--resume", type=str, default=None,
                         help="Resume from checkpoint path")
+    parser.add_argument("--data", type=str, default=None,
+                        help="Pre-generated shard directory from generate_moe_data.py")
     parser.add_argument("--synth-samples", type=int, default=500,
                         help="Samples per script in synthetic mode (default: 500)")
     parser.add_argument("--val-split", type=float, default=0.1,
@@ -798,8 +800,8 @@ def main():
     load_script_samples()
 
     # ---- Validate data mode ----
-    if not args.synth and not args.train_dir:
-        print("ERROR: Must specify --synth or --train_dir")
+    if not args.synth and not args.train_dir and not args.data:
+        print("ERROR: Must specify --synth, --train_dir, or --data")
         sys.exit(1)
 
     # ---- Build tokenizer ----
@@ -807,7 +809,49 @@ def main():
     print(f"Vocab size: {tokenizer.vocab_size}")
 
     # ---- Build dataset ----
-    if args.synth:
+    if args.data:
+        # Load pre-generated shards from generate_moe_data.py
+        from torch.utils.data import TensorDataset
+        from concurrent.futures import ThreadPoolExecutor
+        data_path = Path(args.data)
+        print(f"Loading shards from {data_path}/...")
+        meta = torch.load(data_path / "metadata.pt", weights_only=False)
+        shard_files = sorted(data_path.glob("shard_*.pt"))
+        print(f"  {len(shard_files)} shards")
+
+        def _load(p):
+            return torch.load(p, weights_only=False)
+
+        all_imgs, all_labels, all_sids, all_gids = [], [], [], []
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            for shard in pool.map(_load, shard_files):
+                all_imgs.append(shard["images"])
+                all_labels.extend(shard["labels"])
+                all_sids.append(shard["script_ids"])
+                all_gids.append(shard["group_ids"])
+
+        images = torch.cat(all_imgs)
+        script_ids = torch.cat(all_sids)
+        group_ids = torch.cat(all_gids)
+        del all_imgs, all_sids, all_gids
+        print(f"  {len(all_labels)} images loaded")
+
+        # Wrap as a dataset that returns (image, label, script_id, group_id, width)
+        class ShardDataset(torch.utils.data.Dataset):
+            def __init__(self, imgs, labels, sids, gids):
+                self.imgs = imgs
+                self.labels = labels
+                self.sids = sids
+                self.gids = gids
+            def __len__(self):
+                return len(self.labels)
+            def __getitem__(self, idx):
+                return self.imgs[idx], self.labels[idx], self.sids[idx], self.gids[idx], self.imgs[idx].shape[-1]
+
+        full_dataset = ShardDataset(images, all_labels, script_ids, group_ids)
+        active_scripts = meta["active_scripts"]
+
+    elif args.synth:
         full_dataset = SyntheticMoEDataset(
             scripts=selected_scripts,
             samples_per_script=args.synth_samples,
