@@ -288,14 +288,12 @@ class LipiMoEEncoder(nn.Module):
         if group_ids is None:
             group_ids = group_logits.argmax(dim=-1)
 
-        # Optionally detach shared features before expert path: LID gradient
-        # drives the shared backbone, CTC gradient drives expert blocks only.
-        # Without this, CTC gradient overwhelms LID at the shared backbone
-        # (optimizes for char recognition, not script discrimination).
-        # Used during GT routing; disabled during predicted routing so CTC
-        # co-trains LID through the backbone.
-        if detach_shared:
-            x = x.detach()
+        # Scale CTC gradient at the shared→expert boundary so LID can
+        # drive the shared backbone without being overwhelmed by CTC.
+        # grad_scale=0.1 means 10% of CTC gradient reaches shared backbone.
+        # grad_scale=1.0 (default) means full gradient (predicted routing).
+        if detach_shared and self.training:
+            x = x * 0.1 + x.detach() * 0.9
 
         # Project to stage1
         x = self.proj1(x)
