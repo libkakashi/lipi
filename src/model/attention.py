@@ -376,7 +376,8 @@ class FullyExpertSWABlock(nn.Module):
     """Fully expert SWA block — per-group attention + per-group MLP.
 
     Every component is specialized per group. No shared params except LayerNorms.
-    Used after LID routing where full script specialization is needed.
+    Optimized: precomputes group indices once, sorts batch by group for
+    contiguous memory access, scatters results back.
     """
 
     def __init__(
@@ -402,27 +403,45 @@ class FullyExpertSWABlock(nn.Module):
         ])
 
     def forward(self, x: Tensor, h: int, w: int, group_ids: Tensor) -> Tensor:
+        B = x.shape[0]
+
+        # Sort batch by group — contiguous memory, better GPU utilization
+        sorted_idx = group_ids.argsort()
+        x_sorted = x[sorted_idx]
+        gids_sorted = group_ids[sorted_idx]
+
+        # Find group boundaries (start index of each group in sorted order)
+        # This avoids per-group boolean masking
+        group_starts = [0]
+        for g in range(1, self.num_groups):
+            idx = (gids_sorted >= g).to(torch.long).argmax().item()
+            if gids_sorted[idx] >= g:
+                group_starts.append(idx)
+            else:
+                group_starts.append(B)
+        group_starts.append(B)
+
         # Expert attention
-        normed = self.norm1(x)
-        attn_out = torch.zeros_like(x)
+        normed = self.norm1(x_sorted)
+        attn_out = torch.empty_like(x_sorted)
         for g in range(self.num_groups):
-            mask = (group_ids == g)
-            if mask.any():
-                result = self.expert_attns[g](normed[mask], h, w)
-                attn_out[mask] = result.to(attn_out.dtype)
-        x = x + attn_out
+            s, e = group_starts[g], group_starts[g + 1]
+            if s < e:
+                attn_out[s:e] = self.expert_attns[g](normed[s:e], h, w).to(attn_out.dtype)
+        x_sorted = x_sorted + attn_out
 
         # Expert MLP
-        normed = self.norm2(x)
-        mlp_out = torch.zeros_like(x)
+        normed = self.norm2(x_sorted)
+        mlp_out = torch.empty_like(x_sorted)
         for g in range(self.num_groups):
-            mask = (group_ids == g)
-            if mask.any():
-                result = self.expert_mlps[g](normed[mask])
-                mlp_out[mask] = result.to(mlp_out.dtype)
-        x = x + mlp_out
+            s, e = group_starts[g], group_starts[g + 1]
+            if s < e:
+                mlp_out[s:e] = self.expert_mlps[g](normed[s:e]).to(mlp_out.dtype)
+        x_sorted = x_sorted + mlp_out
 
-        return x
+        # Unsort back to original order
+        unsort_idx = sorted_idx.argsort()
+        return x_sorted[unsort_idx]
 
 
 class GlobalBlock(nn.Module):
