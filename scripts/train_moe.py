@@ -153,26 +153,32 @@ def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
         if (tgt_lens == 0).any():
             continue
 
-        # Forward
+        # Forward with LID-predicted routing (not ground truth)
+        # This forces the model to learn routing AND recognition together
         with torch.amp.autocast(device_type, enabled=use_amp, dtype=amp_dtype):
-            out = model(imgs, group_ids=gids)
+            out = model(imgs, group_ids=None)  # LID decides routing
             logits = out["logits"]
             enc_lengths = out["lengths"]
-            lid1_loss = ce_loss_fn(out["group_logits"], gids)
+            pred_gids = out["group_ids"]  # what LID predicted
+            lid1_loss = ce_loss_fn(out["group_logits"], gids)  # loss vs ground truth
 
-        # CTC constraint: input_length >= target_length
+        # CTC constraint
         if (tgt_lens > enc_lengths).any():
             continue
 
-        # CTC loss in float32
-        log_probs = logits.float().log_softmax(dim=-1).permute(1, 0, 2)
-        ctc_loss = F.ctc_loss(
-            log_probs, targets, enc_lengths, tgt_lens,
-            blank=tokenizer.blank_id, reduction="mean", zero_infinity=True,
-        )
-
-        if torch.isinf(ctc_loss) or torch.isnan(ctc_loss):
-            continue
+        # Only compute CTC where LID routed correctly
+        correct = (pred_gids == gids)
+        if correct.any():
+            m = correct
+            log_probs = logits[m].float().log_softmax(dim=-1).permute(1, 0, 2)
+            ctc_loss = F.ctc_loss(
+                log_probs, targets[m], enc_lengths[m], tgt_lens[m],
+                blank=tokenizer.blank_id, reduction="mean", zero_infinity=True,
+            )
+            if torch.isinf(ctc_loss) or torch.isnan(ctc_loss):
+                ctc_loss = torch.tensor(0.0, device=device)
+        else:
+            ctc_loss = torch.tensor(0.0, device=device)
 
         loss = ctc_loss + 1.0 * lid1_loss.float()
 
