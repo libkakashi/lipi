@@ -242,6 +242,8 @@ def evaluate(model, val_loader, group_tokenizers, active_groups, device, device_
     g_lid_total = [0] * n_groups
     g_word_correct = [0] * n_groups
     g_word_total = [0] * n_groups
+    g_char_correct = [0] * n_groups
+    g_char_total = [0] * n_groups
 
     for batch in val_loader:
         imgs, targets, tgt_lens, gids, labels = batch
@@ -275,11 +277,14 @@ def evaluate(model, val_loader, group_tokenizers, active_groups, device, device_
             ref_s = str(label).strip().lower()
             ctc_total += 1
             g_word_total[true_g] += 1
+            matched = sum(1 for a, b in zip(dec_s, ref_s) if a == b)
             if dec_s == ref_s:
                 ctc_correct += 1
                 g_word_correct[true_g] += 1
             total_chars += len(ref_s)
-            correct_chars += sum(1 for a, b in zip(dec_s, ref_s) if a == b)
+            correct_chars += matched
+            g_char_total[true_g] += len(ref_s)
+            g_char_correct[true_g] += matched
 
     lid_acc = 100 * lid_correct / max(lid_total, 1)
     ctc_acc = 100 * ctc_correct / max(ctc_total, 1)
@@ -291,8 +296,9 @@ def evaluate(model, val_loader, group_tokenizers, active_groups, device, device_
         gw = g_word_total[g]
         lid_g = 100 * g_lid_correct[g] / max(gl, 1)
         word_g = 100 * g_word_correct[g] / max(gw, 1)
+        char_g = 100 * g_char_correct[g] / max(g_char_total[g], 1)
         name = active_groups[g] if g < len(active_groups) else f"group{g}"
-        print(f"    {name:18s} LID: {lid_g:5.1f}% ({g_lid_correct[g]}/{gl})  Word: {word_g:5.1f}% ({g_word_correct[g]}/{gw})")
+        print(f"    {name:18s} LID:{lid_g:5.1f}%  Word:{word_g:5.1f}%  Char:{char_g:5.1f}%")
     return {"lid1_acc": lid_acc, "word_acc": ctc_acc, "char_acc": char_acc}
 
 
