@@ -268,16 +268,17 @@ def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
             if script_logits is not None:
                 pred_sids[group_mask] = script_logits.argmax(-1)
 
-        # CTC per-script with exact vocab slicing.
-        # Skip when LID-1 OR LID-2 is wrong (wrong CTC head → garbage gradients).
-        valid = ((pred_gids == gids) & (pred_sids == sids)
-                 & (tgt_lens <= enc_lengths) & (tgt_lens > 0))
+        # Two masks:
+        # lid1_ok: LID-1 correct — used for LID-2 loss (learn from LID-2 mistakes)
+        # ctc_ok: LID-1 AND LID-2 correct — used for CTC (needs correct CTC head)
+        lid1_ok = (pred_gids == gids)
+        ctc_ok = lid1_ok & (pred_sids == sids) & (tgt_lens <= enc_lengths) & (tgt_lens > 0)
 
         ctc_loss = torch.zeros(1, device=device)
         ctc_samples = 0
         for g, script_vocabs in enumerate(group_script_vocabs or []):
             for s, vs in enumerate(script_vocabs):
-                s_mask = valid & (gids == g) & (sids == s)
+                s_mask = ctc_ok & (gids == g) & (sids == s)
                 s_logits = logits[s_mask]
                 if s_logits.shape[0] == 0:
                     continue
@@ -293,11 +294,11 @@ def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
         if ctc_samples > 0:
             ctc_loss = torch.clamp(ctc_loss / ctc_samples, min=0.0, max=100.0)
 
-        # LID-2 loss only on correctly-routed samples (averaged across groups)
+        # LID-2 loss on all correctly LID-1-routed samples (learns from LID-2 mistakes)
         lid2_loss = torch.zeros(1, device=device)
         lid2_count = 0
         for _g, script_logits, group_mask in out["script_logits_per_group"]:
-            routed_ok = valid[group_mask]
+            routed_ok = lid1_ok[group_mask]
             sl = script_logits[routed_ok]
             if sl.shape[0] > 0:
                 lid2_loss = lid2_loss + ce_loss_fn(sl, sids[group_mask][routed_ok])
