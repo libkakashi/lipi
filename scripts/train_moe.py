@@ -224,7 +224,7 @@ def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
 @torch.no_grad()
 def evaluate(model, val_loader, tokenizer, device, device_type, use_amp, amp_dtype, pre_encoded):
     model.eval()
-    lid_correct = lid_total = ctc_correct = ctc_total = 0
+    lid_correct = lid_total = ctc_correct = ctc_total = total_chars = correct_chars = 0
 
     for batch in val_loader:
         imgs, targets, tgt_lens, gids, labels = batch
@@ -239,18 +239,25 @@ def evaluate(model, val_loader, tokenizer, device, device_type, use_amp, amp_dty
         lid_correct += (pred_gids == gids).sum().item()
         lid_total += gids.shape[0]
 
-        # CTC accuracy
+        # CTC accuracy + character error rate
         decoded = ctc_greedy_decode(out["logits"].float().cpu(), tokenizer)
         for dec, label in zip(decoded, labels):
+            dec_s = dec.strip().lower()
+            ref_s = str(label).strip().lower()
             ctc_total += 1
-            if dec.strip().lower() == str(label).strip().lower():
+            if dec_s == ref_s:
                 ctc_correct += 1
+            # Character-level: count edit distance
+            total_chars += len(ref_s)
+            correct_chars += sum(1 for a, b in zip(dec_s, ref_s) if a == b)
 
     lid_acc = 100 * lid_correct / max(lid_total, 1)
     ctc_acc = 100 * ctc_correct / max(ctc_total, 1)
+    char_acc = 100 * correct_chars / max(total_chars, 1)
     print(f"  LID-1 accuracy: {lid_acc:.1f}%")
-    print(f"  CTC  accuracy:  {ctc_acc:.1f}% ({ctc_correct}/{ctc_total})")
-    return {"lid1_acc": lid_acc, "ctc_acc": ctc_acc}
+    print(f"  Word  accuracy: {ctc_acc:.1f}% ({ctc_correct}/{ctc_total})")
+    print(f"  Char  accuracy: {char_acc:.1f}% ({correct_chars}/{total_chars})")
+    return {"lid1_acc": lid_acc, "word_acc": ctc_acc, "char_acc": char_acc}
 
 
 # ---------------------------------------------------------------------------
