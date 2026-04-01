@@ -50,27 +50,46 @@ SCRIPT_TO_LANG = {
 }
 
 
-def build_tokenizer(words: list[str]) -> LipiTokenizer:
-    """Build vocab from actual training words."""
+def _load_common_chars(path: Path) -> set[str] | None:
+    """Load common character set from frequency file if it exists."""
+    if path.exists():
+        return set(path.read_text(encoding="utf-8").strip().split("\n"))
+    return None
+
+
+# Load frequency-filtered charsets for CJK/Korean
+_CHAR_FREQ_DIR = Path(__file__).parent.parent / "training_data" / "char_freq"
+_COMMON_CHARS = {
+    "han_kana": _load_common_chars(_CHAR_FREQ_DIR / "han_kana_common.txt"),
+    "korean": _load_common_chars(_CHAR_FREQ_DIR / "korean_common.txt"),
+}
+
+
+def build_tokenizer(words: list[str], common_chars: set[str] | None = None) -> LipiTokenizer:
+    """Build vocab from training words, optionally filtered by common charset."""
     chars = set(BASE_CHARS)
     for word in words:
         for ch in word:
-            chars.add(ch)
+            if common_chars is None or ch in common_chars or ord(ch) < 128:
+                chars.add(ch)
     vocab = [BLANK_TOKEN] + sorted(chars)
     return LipiTokenizer(vocab=vocab, bigrams=set())
 
 
 def build_group_tokenizers(labels: list[str], group_ids: torch.Tensor,
-                           n_groups: int) -> list[LipiTokenizer]:
-    """Build one tokenizer per group from its words only."""
+                           n_groups: int, active_groups: list[str]) -> list[LipiTokenizer]:
+    """Build one tokenizer per group, with frequency filtering for CJK/Korean."""
     group_words = [[] for _ in range(n_groups)]
     for label, gid in zip(labels, group_ids.tolist()):
         group_words[gid].append(label)
 
     tokenizers = []
     for g in range(n_groups):
-        tok = build_tokenizer(group_words[g])
-        print(f"    Group {g}: {tok.vocab_size} chars, {len(group_words[g])} words")
+        group_name = active_groups[g] if g < len(active_groups) else ""
+        common = _COMMON_CHARS.get(group_name)
+        tok = build_tokenizer(group_words[g], common_chars=common)
+        filtered = " (freq-filtered)" if common else ""
+        print(f"    Group {g} ({group_name}): {tok.vocab_size} chars, {len(group_words[g])} words{filtered}")
         tokenizers.append(tok)
     return tokenizers
 
@@ -389,7 +408,7 @@ def main():
 
     # Build per-group tokenizers
     print("Building per-group tokenizers...")
-    group_tokenizers = build_group_tokenizers(labels, group_ids, n_groups)
+    group_tokenizers = build_group_tokenizers(labels, group_ids, n_groups, active_groups)
     vocab_sizes = [tok.vocab_size for tok in group_tokenizers]
     print(f"  Vocab sizes: {vocab_sizes} (max: {max(vocab_sizes)})")
 
