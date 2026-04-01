@@ -107,17 +107,17 @@ class ShiftedWindowAttention(nn.Module):
 
     def _build_shift_mask(
         self, h: int, w: int, device: torch.device
-    ) -> Tensor | None:
+    ) -> Tensor:
         """Build attention mask for shifted windows.
 
         In shifted mode, tokens from different original regions share a window.
         The mask prevents attention across region boundaries.
 
-        Returns: (num_windows, window_size, window_size) or None if no shift.
-        """
-        if not self.shift:
-            return None
+        Always builds the mask (branchless for torch.compile). When shift=0,
+        all tokens get the same region ID → all-zeros mask → no-op when added.
 
+        Returns: (num_windows, window_size, window_size)
+        """
         hp = h + (self.window_h - h % self.window_h) % self.window_h
         wp = w + (self.window_w - w % self.window_w) % self.window_w
 
@@ -163,16 +163,16 @@ class ShiftedWindowAttention(nn.Module):
             h, w: spatial dimensions.
 
         Returns: (B, h*w, C)
+
+        Branchless on self.shift for torch.compile — no recompilation when
+        expert blocks alternate between shifted/non-shifted.
         """
         B, N, C = x.shape
 
-        # Cyclic shift
-        if self.shift:
-            x_shifted = x.reshape(B, h, w, C)
-            x_shifted = torch.roll(x_shifted, shifts=(-self.shift_h, -self.shift_w), dims=(1, 2))
-            x_shifted = x_shifted.reshape(B, h * w, C)
-        else:
-            x_shifted = x
+        # Cyclic shift (no-op when shift_h=shift_w=0)
+        x_shifted = x.reshape(B, h, w, C)
+        x_shifted = torch.roll(x_shifted, shifts=(-self.shift_h, -self.shift_w), dims=(1, 2))
+        x_shifted = x_shifted.reshape(B, h * w, C)
 
         # Partition into windows
         x_win, nH, nW = self._partition_windows(x_shifted, h, w)
@@ -191,14 +191,12 @@ class ShiftedWindowAttention(nn.Module):
         # Scaled dot-product attention
         attn = (q @ k.transpose(-2, -1)) * self.scale  # (B*nwin, heads, ws, ws)
 
-        # Apply shift mask if needed
+        # Apply shift mask (all-zeros when shift=0 → adding zeros is no-op)
         mask = self._build_shift_mask(h, w, x.device)
-        if mask is not None:
-            num_windows = nH * nW
-            # mask: (num_windows, ws, ws) -> broadcast over B and heads
-            attn = attn.reshape(B, num_windows, self.num_heads, -1, attn.shape[-1])
-            attn = attn + mask.unsqueeze(0).unsqueeze(2)
-            attn = attn.reshape(-1, self.num_heads, attn.shape[-2], attn.shape[-1])
+        num_windows = nH * nW
+        attn = attn.reshape(B, num_windows, self.num_heads, -1, attn.shape[-1])
+        attn = attn + mask.unsqueeze(0).unsqueeze(2)
+        attn = attn.reshape(-1, self.num_heads, attn.shape[-2], attn.shape[-1])
 
         attn = F.softmax(attn, dim=-1)
         out = attn @ v  # (B*nwin, heads, ws, head_dim)
@@ -212,11 +210,10 @@ class ShiftedWindowAttention(nn.Module):
         # Merge windows back
         out = self._merge_windows(out, nH, nW, B, h, w)
 
-        # Reverse cyclic shift
-        if self.shift:
-            out = out.reshape(B, h, w, C)
-            out = torch.roll(out, shifts=(self.shift_h, self.shift_w), dims=(1, 2))
-            out = out.reshape(B, h * w, C)
+        # Reverse cyclic shift (no-op when shift_h=shift_w=0)
+        out = out.reshape(B, h, w, C)
+        out = torch.roll(out, shifts=(self.shift_h, self.shift_w), dims=(1, 2))
+        out = out.reshape(B, h * w, C)
 
         return out
 
