@@ -276,13 +276,17 @@ def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
             )
             ctc_loss = torch.clamp(ctc_raw, min=0.0, max=100.0)
 
-        # LID-2 loss only on correctly-routed samples
+        # LID-2 loss only on correctly-routed samples (averaged across groups)
         lid2_loss = torch.zeros(1, device=device)
+        lid2_count = 0
         for _g, script_logits, group_mask in out["script_logits_per_group"]:
             routed_ok = valid[group_mask]
             sl = script_logits[routed_ok]
             if sl.shape[0] > 0:
                 lid2_loss = lid2_loss + ce_loss_fn(sl, sids[group_mask][routed_ok])
+                lid2_count += 1
+        if lid2_count > 0:
+            lid2_loss = lid2_loss / lid2_count
 
         loss = ctc_loss + lid1_weight * lid1_loss.float() + lid2_loss.float()
 
