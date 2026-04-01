@@ -33,15 +33,18 @@ from src.model.lid import (
 
 
 class GroupCTCHeads(nn.Module):
-    """Per-group BiLSTM CTC heads.
+    """Per-group BiLSTM CTC heads with per-group vocabularies.
 
-    One head per group (8 total). Each head decodes all scripts in its group
-    using a shared vocab. The output characters identify the script.
+    Each group has its own vocab (only chars that appear in that group's scripts).
+    Output is padded to max_vocab_size for batching, but each head only
+    uses its own vocab_size columns.
     """
 
-    def __init__(self, enc_dim: int, vocab_size: int, num_groups: int = NUM_GROUPS,
-                 hidden_dim: int = 246, num_layers: int = 2, dropout: float = 0.1):
+    def __init__(self, enc_dim: int, vocab_sizes: list[int],
+                 hidden_dim: int = 384, num_layers: int = 2, dropout: float = 0.1):
         super().__init__()
+        self.vocab_sizes = vocab_sizes
+        self.max_vocab = max(vocab_sizes)
         self.heads = nn.ModuleList([
             nn.ModuleDict({
                 "lstm": nn.LSTM(
@@ -50,14 +53,15 @@ class GroupCTCHeads(nn.Module):
                     dropout=dropout if num_layers > 1 else 0.0,
                     bidirectional=True, batch_first=True,
                 ),
-                "proj": nn.Linear(hidden_dim * 2, vocab_size),
+                "proj": nn.Linear(hidden_dim * 2, vs),
             })
-            for _ in range(num_groups)
+            for vs in vocab_sizes
         ])
 
     def forward(self, features: Tensor, group_ids: Tensor) -> Tensor:
         B, T, C = features.shape
-        logits = torch.zeros(B, T, self.heads[0]["proj"].out_features,
+        # Pad all outputs to max_vocab for uniform tensor shape
+        logits = torch.zeros(B, T, self.max_vocab,
                              device=features.device, dtype=features.dtype)
         for g in range(len(self.heads)):
             mask = (group_ids == g)
@@ -65,7 +69,8 @@ class GroupCTCHeads(nn.Module):
                 continue
             head = self.heads[g]
             out, _ = head["lstm"](features[mask])
-            logits[mask] = head["proj"](out).to(logits.dtype)
+            proj_out = head["proj"](out).to(logits.dtype)
+            logits[mask, :, :proj_out.shape[-1]] = proj_out
         return logits
 
 
@@ -92,7 +97,7 @@ class LipiMoEEncoder(nn.Module):
         stage2_mlp_ratio: int = 4,
         # Groups
         num_groups: int = NUM_GROUPS,
-        vocab_size: int = 171,
+        vocab_sizes: list[int] | int = 171,  # per-group vocab sizes, or single int for all
         head_hidden: int = 384,
         head_layers: int = 2,
         head_dropout: float = 0.1,
@@ -173,10 +178,12 @@ class LipiMoEEncoder(nn.Module):
         # Final norm
         self.norm = nn.LayerNorm(stage2_dim)
 
-        # Per-group BiLSTM CTC heads
+        # Per-group BiLSTM CTC heads (each group gets its own vocab size)
+        if isinstance(vocab_sizes, int):
+            vocab_sizes = [vocab_sizes] * num_groups
         self.ctc_heads = GroupCTCHeads(
-            enc_dim=stage2_dim, vocab_size=vocab_size,
-            num_groups=num_groups, hidden_dim=head_hidden,
+            enc_dim=stage2_dim, vocab_sizes=vocab_sizes,
+            hidden_dim=head_hidden,
             num_layers=head_layers, dropout=head_dropout,
         )
 

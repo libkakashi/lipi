@@ -50,18 +50,29 @@ SCRIPT_TO_LANG = {
 }
 
 
-def build_tokenizer(scripts: list[str], words: list[str]) -> LipiTokenizer:
-    """Build vocab from charset tables + actual training words."""
+def build_tokenizer(words: list[str]) -> LipiTokenizer:
+    """Build vocab from actual training words."""
     chars = set(BASE_CHARS)
-    for script in scripts:
-        lang = SCRIPT_TO_LANG.get(script, "en")
-        for ch in SCRIPT_CHARSETS.get(lang, []):
-            chars.add(ch)
     for word in words:
         for ch in word:
             chars.add(ch)
     vocab = [BLANK_TOKEN] + sorted(chars)
     return LipiTokenizer(vocab=vocab, bigrams=set())
+
+
+def build_group_tokenizers(labels: list[str], group_ids: torch.Tensor,
+                           n_groups: int) -> list[LipiTokenizer]:
+    """Build one tokenizer per group from its words only."""
+    group_words = [[] for _ in range(n_groups)]
+    for label, gid in zip(labels, group_ids.tolist()):
+        group_words[gid].append(label)
+
+    tokenizers = []
+    for g in range(n_groups):
+        tok = build_tokenizer(group_words[g])
+        print(f"    Group {g}: {tok.vocab_size} chars, {len(group_words[g])} words")
+        tokenizers.append(tok)
+    return tokenizers
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +184,7 @@ def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
             log_probs = logits[m].float().log_softmax(dim=-1).permute(1, 0, 2)
             ctc_loss = F.ctc_loss(
                 log_probs, targets[m], enc_lengths[m], tgt_lens[m],
-                blank=tokenizer.blank_id, reduction="mean", zero_infinity=True,
+                blank=0, reduction="mean", zero_infinity=True,  # blank is always ID 0
             )
             if torch.isinf(ctc_loss) or torch.isnan(ctc_loss):
                 ctc_loss = torch.tensor(0.0, device=device)
@@ -222,7 +233,7 @@ def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
 
 
 @torch.no_grad()
-def evaluate(model, val_loader, tokenizer, device, device_type, use_amp, amp_dtype, pre_encoded):
+def evaluate(model, val_loader, group_tokenizers, device, device_type, use_amp, amp_dtype):
     model.eval()
     lid_correct = lid_total = ctc_correct = ctc_total = total_chars = correct_chars = 0
 
@@ -239,15 +250,20 @@ def evaluate(model, val_loader, tokenizer, device, device_type, use_amp, amp_dty
         lid_correct += (pred_gids == gids).sum().item()
         lid_total += gids.shape[0]
 
-        # CTC accuracy + character error rate
-        decoded = ctc_greedy_decode(out["logits"].float().cpu(), tokenizer)
-        for dec, label in zip(decoded, labels):
-            dec_s = dec.strip().lower()
+        # CTC accuracy — decode each sample with its predicted group's tokenizer
+        logits_cpu = out["logits"].float().cpu()
+        pred_gids_cpu = pred_gids.cpu()
+        for i, (label, pred_g) in enumerate(zip(labels, pred_gids_cpu.tolist())):
+            if pred_g < len(group_tokenizers):
+                tok = group_tokenizers[pred_g]
+            else:
+                continue
+            decoded = ctc_greedy_decode(logits_cpu[i:i+1], tok)
+            dec_s = decoded[0].strip().lower()
             ref_s = str(label).strip().lower()
             ctc_total += 1
             if dec_s == ref_s:
                 ctc_correct += 1
-            # Character-level: count edit distance
             total_chars += len(ref_s)
             correct_chars += sum(1 for a, b in zip(dec_s, ref_s) if a == b)
 
@@ -336,14 +352,23 @@ def main():
         remapped[group_ids == gid] = lid
     group_ids = remapped
 
-    # Build tokenizer from actual training words
-    tokenizer = build_tokenizer(active_scripts, labels)
-    print(f"Vocab: {tokenizer.vocab_size}")
+    # Build per-group tokenizers
+    print("Building per-group tokenizers...")
+    group_tokenizers = build_group_tokenizers(labels, group_ids, n_groups)
+    vocab_sizes = [tok.vocab_size for tok in group_tokenizers]
+    print(f"  Vocab sizes: {vocab_sizes} (max: {max(vocab_sizes)})")
 
-    # Pre-encode labels
+    # Pre-encode labels using each sample's group tokenizer
     print("Pre-encoding labels...")
-    encoded = [tokenizer.encode(w) for w in labels]
-    max_len = max(len(e) for e in encoded) if encoded else 1
+    max_len = 0
+    encoded = []
+    for i, (label, gid) in enumerate(zip(labels, group_ids.tolist())):
+        ids = group_tokenizers[gid].encode(label)
+        encoded.append(ids)
+        max_len = max(max_len, len(ids))
+
+    if max_len == 0:
+        max_len = 1
     target_tensor = torch.zeros(len(encoded), max_len, dtype=torch.long)
     target_len_tensor = torch.zeros(len(encoded), dtype=torch.long)
     for i, ids in enumerate(encoded):
@@ -378,7 +403,7 @@ def main():
         stage2_dim=args.stage2_dim,
         stage2_blocks=args.stage2_blocks,
         num_groups=n_groups,
-        vocab_size=tokenizer.vocab_size,
+        vocab_sizes=vocab_sizes,
         head_hidden=args.head_hidden,
     ).to(device)
 
@@ -467,7 +492,7 @@ def main():
 
         # Eval
         print(f"\n  Eval epoch {epoch}:")
-        evaluate(model, val_loader, tokenizer, device, device_type, use_amp, amp_dtype, True)
+        evaluate(model, val_loader, group_tokenizers, device, device_type, use_amp, amp_dtype)
 
     print(f"\n{'=' * 60}")
     print("DONE")
