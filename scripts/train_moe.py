@@ -435,24 +435,34 @@ def render_word(text: str, font_path: str, height: int = 32) -> Image.Image | No
 # ---------------------------------------------------------------------------
 # Build a unified tokenizer covering all selected scripts
 # ---------------------------------------------------------------------------
-def build_multi_script_tokenizer(scripts: list[str]) -> LipiTokenizer:
-    """Build a character-level tokenizer covering all selected scripts.
+def build_multi_script_tokenizer(scripts: list[str], extra_words: list[str] | None = None) -> LipiTokenizer:
+    """Build a character-level tokenizer from actual training data.
 
-    Merges BASE_CHARS with all script-specific character sets needed.
-    No bigrams -- character-level only for now.
+    Scans all word lists for the given scripts and extracts every unique character.
+    This guarantees the tokenizer can encode any word in our training set.
     """
-    all_chars = list(BASE_CHARS)
-    seen = set(BASE_CHARS)
+    all_chars = set(BASE_CHARS)
 
+    # Add chars from SCRIPT_CHARSETS
     for script in scripts:
         lang = SCRIPT_TO_LANG.get(script, "en")
-        script_chars = SCRIPT_CHARSETS.get(lang, [])
-        for ch in script_chars:
-            if ch not in seen:
-                seen.add(ch)
-                all_chars.append(ch)
+        for ch in SCRIPT_CHARSETS.get(lang, []):
+            all_chars.add(ch)
 
-    vocab = [BLANK_TOKEN] + all_chars
+    # Add chars from word lists (the actual training data)
+    for script in scripts:
+        words = SCRIPT_SAMPLES.get(script, [])
+        for word in words:
+            for ch in word:
+                all_chars.add(ch)
+
+    # Add chars from extra words (e.g., labels loaded from shards)
+    if extra_words:
+        for word in extra_words:
+            for ch in word:
+                all_chars.add(ch)
+
+    vocab = [BLANK_TOKEN] + sorted(all_chars)
     return LipiTokenizer(vocab=vocab, bigrams=set())
 
 
@@ -809,11 +819,8 @@ def main():
         print("ERROR: Must specify --synth, --train_dir, or --data")
         sys.exit(1)
 
-    # ---- Build tokenizer ----
-    tokenizer = build_multi_script_tokenizer(selected_scripts)
-    print(f"Vocab size: {tokenizer.vocab_size}")
-
     # ---- Build dataset ----
+    shard_labels = None  # populated if loading from shards
     if args.data:
         # Load pre-generated shards from generate_moe_data.py
         from torch.utils.data import TensorDataset
@@ -839,6 +846,7 @@ def main():
         script_ids = torch.cat(all_sids)
         group_ids = torch.cat(all_gids)
         del all_imgs, all_sids, all_gids
+        shard_labels = all_labels
         print(f"  {len(all_labels)} images loaded")
 
         # Wrap as a dataset that returns (image, label, script_id, group_id, width)
@@ -878,6 +886,10 @@ def main():
             full_dataset = ConcatDataset(datasets)
         print(f"  Total: {len(full_dataset)} samples")
         active_scripts = selected_scripts
+
+    # ---- Build tokenizer (after dataset so we can include shard labels) ----
+    tokenizer = build_multi_script_tokenizer(selected_scripts, extra_words=shard_labels)
+    print(f"Vocab size: {tokenizer.vocab_size}")
 
     # ---- Train/val split ----
     n_total = len(full_dataset)
