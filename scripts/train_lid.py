@@ -63,7 +63,7 @@ _SCRIPT_EXTRA_FILES = {
     "cyrillic": ["ukrainian.txt"],
     "devanagari": ["marathi.txt"],
     "arabic": ["persian.txt", "urdu.txt"],
-    "cjk": ["japanese.txt"],
+    "han_kana": ["japanese.txt"],
 }
 
 
@@ -151,7 +151,7 @@ _SCRIPT_SAMPLES_FALLBACK = {
         "قضية", "محامي", "حكومة", "عربي", "القاهرة", "وقت",
         "إنسان", "بلد", "بيت", "يوم", "كتاب", "مدرسة",
     ],
-    "cjk": [
+    "han_kana": [
         "你好", "正义", "法院", "法律", "权利", "判决",
         "案件", "律师", "政府", "中文", "北京", "时间",
         "人民", "国家", "房子", "今天", "学校", "工作",
@@ -226,7 +226,7 @@ _LOCAL_FONT_MAP = {
         "NotoSerifHebrew-Regular.ttf",
         "FrankRuhlLibre[wght].ttf", "Rubik[wght].ttf", "SecularOne-Regular.ttf",
     ],
-    "cjk": [
+    "han_kana": [
         "NotoSansSC[wght].ttf", "NotoSansJP[wght].ttf",
         "NotoSansCJKsc-Regular.otf", "NotoSansCJKjp-Regular.otf",
         "NotoSerifCJKsc-Regular.otf",
@@ -288,7 +288,7 @@ _LANG_MAP = {
     "devanagari": "hi", "bengali": "bn", "tamil": "ta",
     "telugu": "te", "kannada": "kn", "malayalam": "ml",
     "gujarati": "gu", "gurmukhi": "pa",
-    "arabic": "ar", "hebrew": "he", "cjk": "zh", "korean": "ko",
+    "arabic": "ar", "hebrew": "he", "han_kana": "zh", "korean": "ko",
     "thai": "th", "lao": "lo",
 }
 

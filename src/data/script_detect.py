@@ -41,7 +41,7 @@ _SCRIPT_RANGES = {
         (0x0590, 0x05FF),  # Hebrew
         (0xFB1D, 0xFB4F),  # Hebrew Presentation Forms
     ],
-    "cjk": [
+    "han_kana": [
         (0x4E00, 0x9FFF),   # CJK Unified Ideographs
         (0x3400, 0x4DBF),   # CJK Extension A
         (0x3040, 0x309F),   # Hiragana

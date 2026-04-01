@@ -65,7 +65,7 @@ WIKI_LANGS = {
     # Hebrew
     "he": ["hebrew.txt"],
     # CJK
-    "zh": ["cjk.txt"],
+    "zh": ["han_kana.txt"],
     "ja": ["japanese.txt"],
     # Korean
     "ko": ["korean.txt"],

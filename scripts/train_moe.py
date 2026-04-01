@@ -42,7 +42,7 @@ from src.data.bigrams import LipiTokenizer, SCRIPT_CHARSETS, BASE_CHARS, BLANK_T
 
 SCRIPT_TO_LANG = {
     "latin": "en", "cyrillic": "en", "greek": "en",
-    "arabic": "ur", "hebrew": "en", "cjk": "en", "korean": "en",
+    "arabic": "ur", "hebrew": "en", "han_kana": "en", "korean": "en",
     "devanagari": "hi", "gurmukhi": "pa", "gujarati": "gu",
     "bengali": "bn_as", "kannada": "kn", "telugu": "te",
     "malayalam": "ml", "tamil": "ta", "thai": "en", "lao": "en",

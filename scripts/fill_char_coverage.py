@@ -394,7 +394,7 @@ SCRIPT_FILLERS = {
     "gurmukhi":    (["gurmukhi.txt"], fill_gurmukhi),
     "thai":        (["thai.txt"], fill_thai),
     "lao":         (["lao.txt"], fill_lao),
-    "cjk":         (["cjk.txt", "japanese.txt"], fill_cjk),
+    "han_kana":         (["han_kana.txt", "japanese.txt"], fill_cjk),
     "korean":      (["korean.txt"], fill_korean),
     "arabic":      (["arabic.txt"], fill_arabic),
     "hebrew":      (["hebrew.txt"], fill_hebrew),

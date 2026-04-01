@@ -13,7 +13,7 @@ TEST_WORDS = {
     "latin": "Hello",
     "arabic": "مرحبا",
     "hebrew": "שלום",
-    "cjk": "你好",
+    "han_kana": "你好",
     "korean": "안녕",
     "devanagari": "नमस्ते",
     "bengali": "নমস্কার",

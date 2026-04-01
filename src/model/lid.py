@@ -37,7 +37,7 @@ SCRIPTS = [
     # Group 4: Hebrew
     "hebrew",      # 4
     # Group 5: Han + Kana (Chinese/Japanese)
-    "cjk",         # 5
+    "han_kana",    # 5
     # Group 6: Korean
     "korean",      # 6
     # Group 6: N+E Indian Brahmic
@@ -86,7 +86,7 @@ SCRIPT_TO_GROUP = {
     "greek": "cyrillic_greek",
     "arabic": "arabic",
     "hebrew": "hebrew",
-    "cjk": "han_kana",
+    "han_kana": "han_kana",
     "korean": "korean",
     "devanagari": "ne_indic",
     "gurmukhi": "ne_indic",
@@ -106,7 +106,7 @@ GROUP_SCRIPTS = {
     "cyrillic_greek": ["cyrillic", "greek"],
     "arabic": ["arabic"],
     "hebrew": ["hebrew"],
-    "han_kana": ["cjk"],
+    "han_kana": ["han_kana"],
     "korean": ["korean"],
     "ne_indic": ["devanagari", "gurmukhi", "gujarati", "bengali"],
     "south_indic": ["kannada", "telugu", "malayalam", "tamil"],
