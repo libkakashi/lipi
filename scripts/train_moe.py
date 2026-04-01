@@ -233,8 +233,8 @@ class CUDAPrefetcher:
 def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
                     group_tokenizers, ce_loss_fn, device, device_type, use_amp,
                     amp_dtype, epoch, total_epochs, grad_accum, log_interval,
-                    lid1_weight=1.0, group_max_vocabs=None):
-    """Predicted routing with self-paced CTC. Per-group CTC with correct vocab slicing."""
+                    lid1_weight=1.0, group_script_vocabs=None):
+    """Predicted routing with self-paced CTC. Per-script CTC with exact vocab slicing."""
     model.train()
     n_batches = 0
 
@@ -262,31 +262,28 @@ def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
             pred_gids = out["group_ids"]
             lid1_loss = ce_loss_fn(out["group_logits"], gids)
 
-        # CTC only on correctly-routed samples, computed PER GROUP with correct
-        # vocab slicing. Without this, log_softmax over the global max_vocab
-        # (e.g., 2245 for han_kana) dilutes probability for smaller vocabs
-        # (e.g., latin at 356) — 1889 zero-padded classes steal ~85% of softmax mass.
+        # CTC per-script with exact vocab slicing. Each script's CTC head
+        # outputs its own vocab size — log_softmax must only cover those classes.
+        # Without this, zero-padded positions steal softmax probability mass.
         valid = (pred_gids == gids) & (tgt_lens <= enc_lengths) & (tgt_lens > 0)
 
         ctc_loss = torch.zeros(1, device=device)
         ctc_samples = 0
-        n_groups = len(group_max_vocabs) if group_max_vocabs else 0
-        for g in range(n_groups):
-            g_mask = valid & (gids == g)
-            g_logits = logits[g_mask]
-            if g_logits.shape[0] == 0:
-                continue
-            # Slice to this group's actual vocab size before log_softmax
-            vs = group_max_vocabs[g]
-            g_log_probs = g_logits[:, :, :vs].float().log_softmax(dim=-1).permute(1, 0, 2)
-            g_ctc = F.ctc_loss(
-                g_log_probs, targets[g_mask],
-                enc_lengths[g_mask], tgt_lens[g_mask],
-                blank=0, reduction="sum", zero_infinity=True,
-            )
-            ctc_loss = ctc_loss + g_ctc
-            ctc_samples += tgt_lens[g_mask].sum()
-        # Average across all characters (like reduction="mean")
+        for g, script_vocabs in enumerate(group_script_vocabs or []):
+            for s, vs in enumerate(script_vocabs):
+                s_mask = valid & (gids == g) & (sids == s)
+                s_logits = logits[s_mask]
+                if s_logits.shape[0] == 0:
+                    continue
+                # Slice to this script's exact vocab size before log_softmax
+                s_log_probs = s_logits[:, :, :vs].float().log_softmax(dim=-1).permute(1, 0, 2)
+                s_ctc = F.ctc_loss(
+                    s_log_probs, targets[s_mask],
+                    enc_lengths[s_mask], tgt_lens[s_mask],
+                    blank=0, reduction="sum", zero_infinity=True,
+                )
+                ctc_loss = ctc_loss + s_ctc
+                ctc_samples += tgt_lens[s_mask].sum()
         if ctc_samples > 0:
             ctc_loss = torch.clamp(ctc_loss / ctc_samples, min=0.0, max=100.0)
 
@@ -739,9 +736,7 @@ def main():
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    # Max vocab per group for per-group CTC slicing
-    group_max_vocabs = [max(vs) for vs in group_script_vocab_sizes]
-    print(f"  Group max vocabs: {group_max_vocabs}")
+    print(f"  Per-script vocab sizes: {group_script_vocab_sizes}")
 
     eff_batch = args.batch_size * args.grad_accum
     print(f"\n{'=' * 60}")
@@ -758,7 +753,7 @@ def main():
             model, train_loader, optimizer, scheduler, scaler,
             group_tokenizers, ce_loss_fn, device, device_type, use_amp, amp_dtype,
             epoch, args.epochs, args.grad_accum, args.log_interval,
-            lid1_weight=args.lid1_weight, group_max_vocabs=group_max_vocabs)
+            lid1_weight=args.lid1_weight, group_script_vocabs=group_script_vocab_sizes)
 
         elapsed = time.time() - t0
 
