@@ -61,9 +61,10 @@ _SCRIPT_EXTRA_FILES = {
               "latvian.txt", "lithuanian.txt", "maltese.txt", "slovak.txt",
               "slovenian.txt", "welsh.txt", "irish.txt", "tagalog.txt"],
     "cyrillic": ["ukrainian.txt"],
-    "devanagari": ["marathi.txt"],
+    "devanagari": ["marathi.txt", "hindi_legal.txt"],
     "arabic": ["persian.txt", "urdu.txt"],
     "han_kana": ["japanese.txt"],
+    # New scripts use their primary file only (no extras)
 }
 
 

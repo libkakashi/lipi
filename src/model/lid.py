@@ -3,20 +3,23 @@ Script Identification (LID).
 
 Single-stage routing based on visual character set similarity:
 
-  LID-1 (after shared SWA): 10 group classification.
+  LID-1 (after shared SWA): 13 group classification.
     Routes to group-specific expert attention + expert MLP + group CTC heads.
 
-Groups (10):
-  1. Latin (~819 chars, 22 languages, ~3B speakers)
-  2. Cyrillic + Greek (~1160 chars, ~300M speakers)
-  3. Arabic (~720 chars incl. Persian/Urdu, ~500M)
-  4. Hebrew (~293 chars, ~9M)
-  5. Han + Kana (~21K chars, Chinese/Japanese, ~1.4B)
-  6. Korean (~5.7K chars, Hangul, ~80M)
-  7. N+E Indian Brahmic (~710 chars, Devanagari/Gurmukhi/Gujarati/Bengali, ~1B+)
-  8. South Indian Brahmic (~536 chars, Kannada/Telugu/Malayalam/Tamil, ~285M)
-  9. SE Asian (~533 chars, Thai/Lao, ~90M)
+Groups (13):
+  1. Latin (~800 chars, 36 languages, ~3B speakers)
+  2. Cyrillic + Greek (~760 chars, ~300M speakers)
+  3. Arabic (~490 chars incl. Persian/Urdu, ~500M)
+  4. Hebrew (~190 chars, ~9M)
+  5. Han + Kana (~2K decomposed tokens, Chinese/Japanese, ~1.4B)
+  6. Korean (~370 decomposed tokens, Hangul, ~80M)
+  7. N+E Indian Brahmic (~850 chars, Devanagari/Gurmukhi/Gujarati/Bengali/Odia, ~1B+)
+  8. South Indian Brahmic (~750 chars, Kannada/Telugu/Malayalam/Tamil/Sinhala, ~300M)
+  9. SE Asian (~770 chars, Thai/Lao/Burmese/Khmer, ~150M)
   10. Emoji (universal)
+  11. Caucasus (~330 chars, Armenian/Georgian, ~10M)
+  12. Ethiopic (~520 chars, Amharic, ~57M)
+  13. Tibetan (~270 chars, ~6M)
 """
 
 import torch
@@ -32,7 +35,7 @@ SCRIPTS = [
     # Group 2: Cyrillic + Greek
     "cyrillic",    # 1
     "greek",       # 2
-    # Group 3: Arabic (incl. Urdu, Persian extensions)
+    # Group 3: Arabic (incl. Urdu, Persian)
     "arabic",      # 3
     # Group 4: Hebrew
     "hebrew",      # 4
@@ -45,35 +48,49 @@ SCRIPTS = [
     "gurmukhi",    # 8
     "gujarati",    # 9
     "bengali",     # 10
-    # Group 8: South Indian Brahmic (incl. Tamil)
-    "kannada",     # 11
-    "telugu",      # 12
-    "malayalam",   # 13
-    "tamil",       # 14
-    # Group 9: SE Asian Brahmic
-    "thai",        # 15
-    "lao",         # 16
+    "odia",        # 11
+    # Group 8: South Indian Brahmic
+    "kannada",     # 12
+    "telugu",      # 13
+    "malayalam",   # 14
+    "tamil",       # 15
+    "sinhala",     # 16
+    # Group 9: SE Asian
+    "thai",        # 17
+    "lao",         # 18
+    "burmese",     # 19
+    "khmer",       # 20
     # Group 10: Emoji
-    "emoji",       # 17
+    "emoji",       # 21
+    # Group 11: Caucasus
+    "armenian",    # 22
+    "georgian",    # 23
+    # Group 12: Ethiopic
+    "ethiopic",    # 24
+    # Group 13: Tibetan
+    "tibetan",     # 25
 ]
 
 SCRIPT_TO_ID = {name: i for i, name in enumerate(SCRIPTS)}
 NUM_SCRIPTS = len(SCRIPTS)
 
 
-# --- Groups (10 families) ---
+# --- Groups (13 families) ---
 
 GROUPS = [
-    "latin",             # 0  ~819 chars (22 languages)
-    "cyrillic_greek",    # 1  ~668+492 chars
-    "arabic",            # 2  ~720 chars
-    "hebrew",            # 3  ~293 chars
-    "han_kana",          # 4  ~21K chars (Chinese ideographs + Japanese kana)
-    "korean",            # 5  ~5.7K chars (Hangul syllables)
-    "ne_indic",          # 6  ~710 chars (Devanagari, Gurmukhi, Gujarati, Bengali)
-    "south_indic",       # 7  ~536 chars (Kannada, Telugu, Malayalam, Tamil)
-    "southeast_asian",   # 8  ~533 chars (Thai, Lao)
+    "latin",             # 0
+    "cyrillic_greek",    # 1
+    "arabic",            # 2
+    "hebrew",            # 3
+    "han_kana",          # 4
+    "korean",            # 5
+    "ne_indic",          # 6
+    "south_indic",       # 7
+    "southeast_asian",   # 8
     "emoji",             # 9
+    "caucasus",          # 10
+    "ethiopic",          # 11
+    "tibetan",           # 12
 ]
 
 GROUP_TO_ID = {name: i for i, name in enumerate(GROUPS)}
@@ -92,13 +109,21 @@ SCRIPT_TO_GROUP = {
     "gurmukhi": "ne_indic",
     "gujarati": "ne_indic",
     "bengali": "ne_indic",
+    "odia": "ne_indic",
     "kannada": "south_indic",
     "telugu": "south_indic",
     "malayalam": "south_indic",
     "tamil": "south_indic",
+    "sinhala": "south_indic",
     "thai": "southeast_asian",
     "lao": "southeast_asian",
+    "burmese": "southeast_asian",
+    "khmer": "southeast_asian",
     "emoji": "emoji",
+    "armenian": "caucasus",
+    "georgian": "caucasus",
+    "ethiopic": "ethiopic",
+    "tibetan": "tibetan",
 }
 
 GROUP_SCRIPTS = {
@@ -108,10 +133,13 @@ GROUP_SCRIPTS = {
     "hebrew": ["hebrew"],
     "han_kana": ["han_kana"],
     "korean": ["korean"],
-    "ne_indic": ["devanagari", "gurmukhi", "gujarati", "bengali"],
-    "south_indic": ["kannada", "telugu", "malayalam", "tamil"],
-    "southeast_asian": ["thai", "lao"],
+    "ne_indic": ["devanagari", "gurmukhi", "gujarati", "bengali", "odia"],
+    "south_indic": ["kannada", "telugu", "malayalam", "tamil", "sinhala"],
+    "southeast_asian": ["thai", "lao", "burmese", "khmer"],
     "emoji": ["emoji"],
+    "caucasus": ["armenian", "georgian"],
+    "ethiopic": ["ethiopic"],
+    "tibetan": ["tibetan"],
 }
 
 
@@ -151,5 +179,3 @@ class LIDCoarse(nn.Module):
         probs = torch.softmax(logits, dim=-1)
         confidences, group_ids = probs.max(dim=-1)
         return group_ids, confidences
-
-
