@@ -747,7 +747,7 @@ class TestDecomposition:
 
     def test_decompose_groups_constant(self):
         from src.data.decompose import DECOMPOSE_GROUPS
-        assert DECOMPOSE_GROUPS == frozenset({"han_kana", "korean"})
+        assert DECOMPOSE_GROUPS == frozenset({"sino_japanese", "korean"})
 
 
 # ---------------------------------------------------------------------------

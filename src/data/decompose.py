@@ -291,19 +291,19 @@ def reconstruct_han_kana(tokens: list[str]) -> str:
 # Public API
 # =========================================================================
 
-DECOMPOSE_GROUPS = frozenset({"han_kana", "korean"})
+DECOMPOSE_GROUPS = frozenset({"sino_japanese", "korean"})
 
 
 def decompose_text(text: str, group: str) -> str:
     """Decompose text into component tokens.
 
-    han_kana: CJK → depth-2 components, kana unchanged.
+    sino_japanese: CJK → depth-2 components, kana unchanged.
     korean: common syllables whole, rare → jamo.
     Others: unchanged.
     """
     if group == "korean":
         return decompose_korean(text)
-    if group == "han_kana":
+    if group == "sino_japanese":
         return decompose_han_kana(text)
     return text
 
@@ -312,7 +312,7 @@ def reconstruct_text(text: str, group: str) -> str:
     """Reconstruct original characters from decomposed token string."""
     if group == "korean":
         return reconstruct_korean(list(text))
-    if group == "han_kana":
+    if group == "sino_japanese":
         return reconstruct_han_kana(list(text))
     return text
 
@@ -324,7 +324,7 @@ def get_vocab_tokens(group: str) -> list[str]:
         tokens |= _common_hangul or set()
         return sorted(tokens)
 
-    if group == "han_kana":
+    if group == "sino_japanese":
         _load_ids()
         tokens = set()
 

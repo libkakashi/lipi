@@ -11,7 +11,7 @@ Groups (13):
   2. Cyrillic + Greek (~760 chars, ~300M speakers)
   3. Arabic (~490 chars incl. Persian/Urdu, ~500M)
   4. Hebrew (~190 chars, ~9M)
-  5. Han + Kana (~2K decomposed tokens, Chinese/Japanese, ~1.4B)
+  5. Sino-Japanese (~2K decomposed tokens, Chinese/Japanese, ~1.4B)
   6. Korean (~370 decomposed tokens, Hangul, ~80M)
   7. N+E Indian Brahmic (~850 chars, Devanagari/Gurmukhi/Gujarati/Bengali/Odia, ~1B+)
   8. South Indian Brahmic (~750 chars, Kannada/Telugu/Malayalam/Tamil/Sinhala, ~300M)
@@ -82,11 +82,11 @@ GROUPS = [
     "cyrillic_greek",    # 1
     "arabic",            # 2
     "hebrew",            # 3
-    "han_kana",          # 4
+    "sino_japanese",     # 4
     "korean",            # 5
     "ne_indic",          # 6
     "south_indic",       # 7
-    "southeast_asian",   # 8
+    "se_asian",          # 8
     "emoji",             # 9
     "caucasus",          # 10
     "ethiopic",          # 11
@@ -103,7 +103,7 @@ SCRIPT_TO_GROUP = {
     "greek": "cyrillic_greek",
     "arabic": "arabic",
     "hebrew": "hebrew",
-    "han_kana": "han_kana",
+    "han_kana": "sino_japanese",
     "korean": "korean",
     "devanagari": "ne_indic",
     "gurmukhi": "ne_indic",
@@ -115,10 +115,10 @@ SCRIPT_TO_GROUP = {
     "malayalam": "south_indic",
     "tamil": "south_indic",
     "sinhala": "south_indic",
-    "thai": "southeast_asian",
-    "lao": "southeast_asian",
-    "burmese": "southeast_asian",
-    "khmer": "southeast_asian",
+    "thai": "se_asian",
+    "lao": "se_asian",
+    "burmese": "se_asian",
+    "khmer": "se_asian",
     "emoji": "emoji",
     "armenian": "caucasus",
     "georgian": "caucasus",
@@ -131,11 +131,11 @@ GROUP_SCRIPTS = {
     "cyrillic_greek": ["cyrillic", "greek"],
     "arabic": ["arabic"],
     "hebrew": ["hebrew"],
-    "han_kana": ["han_kana"],
+    "sino_japanese": ["han_kana"],
     "korean": ["korean"],
     "ne_indic": ["devanagari", "gurmukhi", "gujarati", "bengali", "odia"],
     "south_indic": ["kannada", "telugu", "malayalam", "tamil", "sinhala"],
-    "southeast_asian": ["thai", "lao", "burmese", "khmer"],
+    "se_asian": ["thai", "lao", "burmese", "khmer"],
     "emoji": ["emoji"],
     "caucasus": ["armenian", "georgian"],
     "ethiopic": ["ethiopic"],
