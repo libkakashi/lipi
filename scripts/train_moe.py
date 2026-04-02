@@ -320,7 +320,7 @@ def main():
     start_epoch = 1
     if args.resume:
         print(f"\nResuming from {args.resume}...")
-        ckpt = torch.load(args.resume, map_location=device, weights_only=False)
+        ckpt = torch.load(args.resume, map_location="cpu", weights_only=False)
         # Partial load: skip mismatched layers (e.g., CTC proj after vocab change)
         model_state = ckpt["model"]
         current_state = model.state_dict()
@@ -366,6 +366,7 @@ def main():
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 base_optimizer, T_max=max(remaining_steps, 1), eta_min=1e-6)
 
+        del ckpt
         print(f"  Resumed at epoch {start_epoch}, lr={base_optimizer.param_groups[0]['lr']:.2e}")
         torch.cuda.empty_cache()
         vram("after resume")
