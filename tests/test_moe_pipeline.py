@@ -322,6 +322,55 @@ class TestWordLists:
             for w in words:
                 assert "\t" not in w, f"{script}: tab in word {repr(w[:10])}"
 
+    def test_no_mixed_script_words(self, script_word_lists):
+        """Every word must contain only its own script's chars + shared (digits, punct).
+        No mixing Latin letters into Devanagari words, etc."""
+        from src.data.script_detect import _SCRIPT_RANGES
+        import unicodedata
+
+        def is_shared(cp):
+            if 0x0020 <= cp <= 0x007E:
+                return True
+            cat = unicodedata.category(chr(cp))
+            return cat.startswith('Z') or cat.startswith('P') or cat == 'Nd'
+
+        def in_script(cp, script):
+            for s, e in _SCRIPT_RANGES.get(script, []):
+                if s <= cp <= e:
+                    return True
+            return False
+
+        # Scripts that share ranges with others (skip cross-checks for these)
+        skip = {"emoji", "latin"}  # Latin chars are shared punctuation
+        failures = []
+
+        for script, words in script_word_lists.items():
+            if script in skip:
+                continue
+            ranges = _SCRIPT_RANGES.get(script, [])
+            if not ranges:
+                continue
+
+            foreign_words = 0
+            for w in words:
+                for ch in w:
+                    cp = ord(ch)
+                    if is_shared(cp):
+                        continue
+                    if in_script(cp, script):
+                        continue
+                    # This char is from a different script
+                    foreign_words += 1
+                    break
+
+            if foreign_words > 0:
+                pct = foreign_words / len(words) * 100
+                failures.append(
+                    f"{script}: {foreign_words}/{len(words)} ({pct:.1f}%) words have foreign script chars")
+
+        assert not failures, (
+            "Mixed-script words found:\n  " + "\n  ".join(failures))
+
 
 # ---------------------------------------------------------------------------
 # 4. Vocab ↔ Word List Coverage

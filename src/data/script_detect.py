@@ -47,6 +47,7 @@ _SCRIPT_RANGES = {
         (0x3040, 0x309F),   # Hiragana
         (0x30A0, 0x30FF),   # Katakana
         (0x3000, 0x303F),   # CJK Symbols
+        (0xFF00, 0xFFEF),   # Fullwidth Forms (CJK punctuation)
     ],
     "korean": [
         (0xAC00, 0xD7AF),  # Hangul Syllables
