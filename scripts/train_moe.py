@@ -37,7 +37,7 @@ from src.training.moe_eval import evaluate
 # Training
 # ---------------------------------------------------------------------------
 
-def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
+def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, scaler,
                     ce_loss_fn, device, device_type, use_amp, amp_dtype,
                     epoch, total_epochs, grad_accum, log_interval,
                     lid1_weight, group_script_vocabs):
@@ -90,10 +90,10 @@ def train_one_epoch(model, train_loader, optimizer, scheduler, scaler,
         scaler.scale(loss).backward()
 
         if (batch_idx + 1) % grad_accum == 0 or (batch_idx + 1) == len(train_loader):
-            scaler.unscale_(optimizer)
+            scaler.unscale_(base_optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=25.0)
             old_scale = scaler.get_scale()
-            scaler.step(optimizer)
+            optimizer.step()
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
             if scaler.get_scale() >= old_scale:
@@ -271,10 +271,12 @@ def main():
         model = torch.compile(model)
 
     # --- Optimizer + Scheduler ---
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
+    base_optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
     if args.cpu_offload and device_type == "cuda":
-        optimizer = CPUOffloadOptimizer(optimizer)
+        optimizer = CPUOffloadOptimizer(base_optimizer)
         print("Optimizer states offloaded to CPU (~5-7GB VRAM freed)")
+    else:
+        optimizer = base_optimizer
 
     use_amp = device_type in ("cuda", "mps")
     if device_type == "cuda":
@@ -291,11 +293,11 @@ def main():
     total_steps = steps_per_epoch * args.epochs
     warmup_steps = min(steps_per_epoch, total_steps // 10)
     warmup = torch.optim.lr_scheduler.LinearLR(
-        optimizer, start_factor=0.01, end_factor=1.0, total_iters=max(warmup_steps, 1))
+        base_optimizer, start_factor=0.01, end_factor=1.0, total_iters=max(warmup_steps, 1))
     cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=max(total_steps - warmup_steps, 1), eta_min=1e-6)
+        base_optimizer, T_max=max(total_steps - warmup_steps, 1), eta_min=1e-6)
     scheduler = torch.optim.lr_scheduler.SequentialLR(
-        optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps])
+        base_optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps])
 
     # Resume
     start_epoch = 1
@@ -332,22 +334,22 @@ def main():
         if ckpt_lr is not None and args.lr != ckpt_lr:
             print(f"  LR override: checkpoint had {ckpt_lr}, using {args.lr}")
             print(f"  Rebuilding scheduler from epoch {start_epoch}")
-            for pg in optimizer.param_groups:
+            for pg in base_optimizer.param_groups:
                 pg["lr"] = args.lr
             remaining_steps = steps_per_epoch * (args.epochs - start_epoch + 1)
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, T_max=max(remaining_steps, 1), eta_min=1e-6)
+                base_optimizer, T_max=max(remaining_steps, 1), eta_min=1e-6)
         elif "scheduler" in ckpt and not skipped:
             scheduler.load_state_dict(ckpt["scheduler"])
         else:
             print(f"  Rebuilding scheduler from epoch {start_epoch}")
-            for pg in optimizer.param_groups:
+            for pg in base_optimizer.param_groups:
                 pg["lr"] = args.lr
             remaining_steps = steps_per_epoch * (args.epochs - start_epoch + 1)
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, T_max=max(remaining_steps, 1), eta_min=1e-6)
+                base_optimizer, T_max=max(remaining_steps, 1), eta_min=1e-6)
 
-        print(f"  Resumed at epoch {start_epoch}, lr={optimizer.param_groups[0]['lr']:.2e}")
+        print(f"  Resumed at epoch {start_epoch}, lr={base_optimizer.param_groups[0]['lr']:.2e}")
 
     # --- Train ---
     ce_loss_fn = nn.CrossEntropyLoss()
@@ -367,7 +369,7 @@ def main():
         t0 = time.time()
 
         metrics = train_one_epoch(
-            model, train_loader, optimizer, scheduler, scaler,
+            model, train_loader, optimizer, base_optimizer, scheduler, scaler,
             ce_loss_fn, device, device_type, use_amp, amp_dtype,
             epoch, args.epochs, args.grad_accum, args.log_interval,
             lid1_weight=args.lid1_weight,
