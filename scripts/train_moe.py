@@ -335,10 +335,16 @@ def main():
             if len(skipped) > 5:
                 print(f"    ... and {len(skipped) - 5} more")
         model.load_state_dict(model_state, strict=False)
-        if not skipped:
+        # Skip optimizer state if layers were skipped OR if checkpoint was
+        # from a different dtype (e.g., bf16 model → fp32 model)
+        ckpt_dtype = next(iter(model_state.values())).dtype if model_state else None
+        model_dtype = next(model.parameters()).dtype
+        dtype_changed = ckpt_dtype is not None and ckpt_dtype != model_dtype
+        if not skipped and not dtype_changed:
             optimizer.load_state_dict(ckpt["optimizer"])
         else:
-            print("  Skipping optimizer state (vocab changed, momentum shapes stale)")
+            reason = "vocab changed" if skipped else f"dtype changed ({ckpt_dtype}→{model_dtype})"
+            print(f"  Skipping optimizer state ({reason})")
         if "scaler" in ckpt:
             scaler.load_state_dict(ckpt["scaler"])
 
