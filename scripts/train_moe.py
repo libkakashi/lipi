@@ -281,9 +281,9 @@ def main():
     p0 = next(model.parameters())
     print(f"Model: {total_params / 1e6:.1f}M params ({n_groups} groups), dtype={p0.dtype}")
 
-    if device_type == "cuda" and not args.no_compile:
-        print("Compiling model with torch.compile...")
-        model = torch.compile(model)
+    # NOTE: torch.compile moved AFTER optimizer creation + resume.
+    # Compiling before optimizer changes parameter structure, breaking
+    # optimizer state dict loading from non-compiled checkpoints.
 
     # --- Optimizer + Scheduler ---
     vram("before optimizer")
@@ -370,6 +370,12 @@ def main():
         print(f"  Resumed at epoch {start_epoch}, lr={base_optimizer.param_groups[0]['lr']:.2e}")
         torch.cuda.empty_cache()
         vram("after resume")
+
+    # torch.compile after optimizer + resume (avoids param group mismatch)
+    if device_type == "cuda" and not args.no_compile:
+        print("Compiling model with torch.compile...")
+        model = torch.compile(model)
+        vram("after compile")
 
     # --- Train ---
     ce_loss_fn = nn.CrossEntropyLoss()
