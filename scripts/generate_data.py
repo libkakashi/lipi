@@ -77,6 +77,9 @@ def _generate_word_batch(args_tuple):
 
     images, labels = [], []
     attempts = 0
+    # First 30% clean, rest augmented — guarantees clean examples
+    clean_target = int(count * 0.3)
+
     while len(images) < count and attempts < count * 5:
         attempts += 1
         if script == "emoji":
@@ -91,12 +94,12 @@ def _generate_word_batch(args_tuple):
             continue
 
         img = resize_or_pad(img, h, mw)
-        if aug is not None:
-            img = aug(img)
 
-        # Final check after augmentation — aggressive augmentation can destroy content
-        if not image_has_ink(img, min_ink_pixels=5):
-            continue
+        # First 30% of images are clean (no augmentation)
+        if aug is not None and len(images) >= clean_target:
+            img = aug(img)
+            if not image_has_ink(img, min_ink_pixels=5):
+                continue
 
         images.append(rgb_to_input(img))
         labels.append(label)
@@ -138,11 +141,13 @@ def _generate_char_batch(args_tuple):
             got_any = True
 
             img = resize_or_pad(img, h, mw)
-            if aug is not None:
+
+            # First rep clean, rest augmented
+            if aug is not None and rep > 0:
                 img = aug(img)
-            # Post-augmentation check
-            if not image_has_ink(img, min_ink_pixels=5):
-                continue
+                if not image_has_ink(img, min_ink_pixels=5):
+                    continue
+
             images.append(rgb_to_input(img))
             labels.append(ch)
         if not got_any:
