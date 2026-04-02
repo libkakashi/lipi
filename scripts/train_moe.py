@@ -263,21 +263,32 @@ def main():
         head_hidden=args.head_hidden,
     ).to(device)
 
-    # Cast to bf16 — halves param + gradient memory (~5 GB saved).
-    # Autocast alone only casts computations; params stay fp32 by default.
+    def vram(label=""):
+        if device_type == "cuda":
+            a = torch.cuda.memory_allocated() / 1e9
+            r = torch.cuda.memory_reserved() / 1e9
+            print(f"  VRAM [{label}]: {a:.2f} GB allocated, {r:.2f} GB reserved")
+
+    vram("after model to device (fp32)")
+
+    # Cast to bf16 — halves param + gradient memory.
     if device_type == "cuda" and torch.cuda.is_bf16_supported():
         model = model.to(torch.bfloat16)
-        print("Model cast to bf16")
+        torch.cuda.empty_cache()
+        vram("after bf16 cast")
 
     total_params = sum(p.numel() for p in model.parameters())
-    print(f"Model: {total_params / 1e6:.1f}M params ({n_groups} groups)")
+    p0 = next(model.parameters())
+    print(f"Model: {total_params / 1e6:.1f}M params ({n_groups} groups), dtype={p0.dtype}")
 
     if device_type == "cuda" and not args.no_compile:
         print("Compiling model with torch.compile...")
         model = torch.compile(model)
 
     # --- Optimizer + Scheduler ---
+    vram("before optimizer")
     base_optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
+    vram("after optimizer init")
     if args.cpu_offload and device_type == "cuda":
         optimizer = CPUOffloadOptimizer(base_optimizer)
         print("Optimizer states offloaded to CPU (~5-7GB VRAM freed)")
@@ -356,6 +367,8 @@ def main():
                 base_optimizer, T_max=max(remaining_steps, 1), eta_min=1e-6)
 
         print(f"  Resumed at epoch {start_epoch}, lr={base_optimizer.param_groups[0]['lr']:.2e}")
+        torch.cuda.empty_cache()
+        vram("after resume")
 
     # --- Train ---
     ce_loss_fn = nn.CrossEntropyLoss()
