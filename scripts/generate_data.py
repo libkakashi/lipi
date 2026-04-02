@@ -48,7 +48,8 @@ def _get_script_chars(script: str) -> list[str]:
     """
     group = SCRIPT_TO_GROUP[script]
     vocab = build_script_vocab(script, group)
-    return [ch for ch in vocab if ch.strip() and ord(ch) > 32]
+    from src.data.bigrams import BLANK_TOKEN
+    return [ch for ch in vocab if ch.strip() and ord(ch) > 32 and ch != BLANK_TOKEN]
 
 
 def _image_has_ink(img: Image.Image, min_ink_pixels: int = 10) -> bool:
