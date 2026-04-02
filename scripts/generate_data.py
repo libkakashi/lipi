@@ -87,12 +87,16 @@ def _generate_word_batch(args_tuple):
             img = render_word(word, random.choice(fonts), h)
             label = word
 
-        if img is None:
+        if img is None or not image_has_ink(img):
             continue
 
         img = resize_or_pad(img, h, mw)
         if aug is not None:
             img = aug(img)
+
+        # Final check after augmentation — aggressive augmentation can destroy content
+        if not image_has_ink(img, min_ink_pixels=5):
+            continue
 
         images.append(rgb_to_input(img))
         labels.append(label)
@@ -136,6 +140,9 @@ def _generate_char_batch(args_tuple):
             img = resize_or_pad(img, h, mw)
             if aug is not None:
                 img = aug(img)
+            # Post-augmentation check
+            if not image_has_ink(img, min_ink_pixels=5):
+                continue
             images.append(rgb_to_input(img))
             labels.append(ch)
         if not got_any:
