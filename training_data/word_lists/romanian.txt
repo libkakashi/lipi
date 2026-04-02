@@ -40,7 +40,6 @@ Balancing
 Bassett
 Bechet
 Belina
-Bellmore⁠
 Belu
 Biblical
 Bibliografie
@@ -167,7 +166,6 @@ Foundation
 Four
 Fox
 Franța
-Frobenius⁠
 Galat
 Garden
 Gawain
@@ -627,7 +625,6 @@ creată
 creezi
 cripta
 cu
-cubic⁠
 cum
 cunoscut
 cunoscute
@@ -960,7 +957,6 @@ mulți
 murit
 mute
 muște
-mâinilor⁠
 măsura
 naștere
 național
@@ -1375,10 +1371,6 @@ zveze
 știe
 științelor
 știință
-Αχέρων
-Єрчицька
-рада
-сільська
 „Cele
 „Copilul
 „Creative
@@ -1447,11 +1439,9 @@ Bagdad
 Balduin
 Bantanges
 Bardot
-Bartolomeu⁠
 Batrachion
 Bellona
 Bellona”
-Belt⁠
 Berîslav
 Betts
 Biblia
@@ -1810,7 +1800,6 @@ Sihastrul
 Single
 Singurul
 Sion
-Site⁠
 Situată
 Situl
 Socorro
@@ -1822,7 +1811,6 @@ Stanisław
 Stankówna
 Stat
 Stavi
-Sud⁠
 Survey
 Tanakh
 Teatru
@@ -2729,21 +2717,6 @@ zone
 țarinei
 țarul
 ținut
-Александровна
-Кисоричі
-Лиманець
-Мария
-המלך
-הסוערים
-ימיו
-מְנַשֶּׁה
-מנשה
-של
-كربغا
-นฤมล
-วัยอกหัก
-เวียง
-แฟนเก่ากลับใจ
 „Big
 „Bătălii
 „Czasopisma
@@ -2955,14 +2928,6 @@ zis
 încoace
 însemnând
 șlepuri
-κελλία
-Анкудінове
-Білгородський
-Кубаний
-Кілійське
-Отнойно
-Очаківське
-Пісчаний
 „Harpianon
 „Thiagola”
 „câmpul
@@ -3570,7 +3535,6 @@ FAR
 FARM
 FC
 FCSB
-FC™
 FIFA
 FIRST
 FM
@@ -7042,7 +7006,6 @@ roȚările
 ro„Cheia
 ro„Fiica
 ro„O
-ro⬇
 rudelor
 rugat
 rugată
@@ -7738,8 +7701,6 @@ zâmbesc
 țină
 țițeiului
 țări
-ньюс
-тарантас
 ‘I
 ‘Not
 ‘dangerous’
@@ -7894,4 +7855,3 @@ zâmbesc
 „În
 „Învățați
 „îngropat”
-🗽Marvell

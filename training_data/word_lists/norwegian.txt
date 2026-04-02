@@ -194,7 +194,6 @@ Clematis
 Cliffs
 Close
 Cloverfield
-Cl−
 Cockerill
 Colchis
 Coleoptera
@@ -2269,9 +2268,6 @@ zw
 ’lĕh
 ’nérd
 ’skin
-中国美术学院
-中國美術學院
-國美
 Adversus
 Aftenposten
 Akademien
@@ -3827,11 +3823,6 @@ world
 ødeleggende
 øst
 øvelsen
-Алекса́ндр
-Бори́сов
-Иакинф
-Кроткая
-Фёдорович
 -a
 -abel
 -aktig
@@ -17329,8 +17320,6 @@ zoologi
 øvre
 øya
 øye
-நாமக்கல்
-மாவட்டம்
 †Illolampra
 AB
 ABG
@@ -19889,8 +19878,6 @@ zoster
 økt
 ønsket
 øvelse
-ньюс
-тарантас
 ‘Birna’
 ‘culpably
 “AI

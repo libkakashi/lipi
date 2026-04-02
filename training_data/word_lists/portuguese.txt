@@ -2486,9 +2486,6 @@ zona
 único
 únicos
 čas
-Александр
-Викторович
-Коршунов
 “El
 ACT
 Academia
@@ -3471,7 +3468,6 @@ await
 açucena
 ações
 aí
-aˈʁɛn
 bairro
 banais
 bancos
@@ -4708,11 +4704,9 @@ zaratustra
 úgrica
 úgricos
 única
-ˈɦaːrə
 &c
 &c.
 'cê
-+/-
 +QD+
 -a
 -able
@@ -4744,8 +4738,6 @@ zaratustra
 1.ª pessoa
 1.º
 10.º
-10/10
-100
 100 por cento
 10º
 11.º
@@ -4761,7 +4753,6 @@ zaratustra
 16.º
 16º
 17.º
-171
 17º
 18.º
 18º
@@ -4783,9 +4774,7 @@ zaratustra
 2.º
 20.º
 20º
-24
 24 horas
-24/7
 25 de Abril
 2ª pessoa
 2º
@@ -4806,7 +4795,6 @@ zaratustra
 5ª série
 5º
 6.º
-69
 6º
 7 de Setembro
 7.º
@@ -9849,10 +9837,6 @@ você
 álveo
 álvidro
 êxito
-πενταετηρίδες
-اخلاقی
-داوود
-صفا
 Comer
 Durão
 Grata
@@ -9957,7 +9941,6 @@ Architects
 Arctic
 Area
 Ariana
-ArmorSeal™
 Arrow
 Arsenal
 Arte
@@ -10914,7 +10897,6 @@ Márcio
 Mário
 Médio
 Métrica
-M€
 NASDAQ
 NATO
 NBC
@@ -12815,7 +12797,6 @@ pentacampeão
 people
 pequenas
 percorre
-perdas🗽Marvell
 perde
 perder
 perdida
@@ -13425,4 +13406,3 @@ zomba
 “senhor
 “silêncio
 “É
-澳門特別行政區政府入口網站

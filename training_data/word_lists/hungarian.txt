@@ -157,7 +157,6 @@ Camillo
 Campania
 Carey
 Center
-Center◄►Lake
 Championship
 Charlie
 Chevalier
@@ -2849,8 +2848,6 @@ zömök
 ősember
 őt
 űrben
-الفاشر
-مطار
 „Bigyó”
 „Cipő”
 „Gian
@@ -2861,12 +2858,6 @@ zömök
 „utolsó
 „Éljen”
 „új”
-►Beaverton
-►Goose
-►McMinnville
-►Parkrose
-►Sam
-茄汁
 Aachenben
 Abella
 Acadèmia
@@ -5018,9 +5009,6 @@ zászlót
 őket
 őszéig
 Űrkutató
-Сол
-Сіль
-Сӯль
 „Algo
 „Bobo“
 „Como
@@ -5031,16 +5019,6 @@ zászlót
 „Nunca
 „Szolya
 „védnökség”
-吉屋信子
-女人平家
-安宅家の人々
-屋根裏の二處女
-徳川の夫人たち
-洛阳
-瑞鶴
-良人の貞操
-花物語
-鬼火
 ACH
 AI
 AIRportal
@@ -8590,8 +8568,6 @@ zúzza
 üzletet
 üzleti
 üzlettársa
-ایران
-اینترنشنال
 ‘Coalition
 ‘it
 ‘one

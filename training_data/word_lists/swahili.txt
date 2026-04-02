@@ -1419,7 +1419,6 @@ Frida
 Friedenthal
 From
 Fryde
-F₂
 GONG
 Garden
 George
@@ -1706,7 +1705,6 @@ Rousseau
 Routledge
 Roy
 Russell
-SF₆
 SLUB
 Sagana
 Saint
@@ -2264,7 +2262,6 @@ kubariki
 kubatizwa
 kubishana
 kucha
-kuchaguaː
 kuchemka
 kucheza
 kuchukua

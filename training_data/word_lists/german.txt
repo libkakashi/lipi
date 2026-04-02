@@ -1544,18 +1544,12 @@ zählt
 ägyptischen
 übrig“
 šar
-Τεκελία
-πόλεις
-Նեմեսիս
-գործողություն
 „Früher
 „Kontinent“
 „König
 „Vampirkrabben“
 „Vormittag“
 „…nachdem
-浩二
-菅野
 AMaj
 AN
 APL
@@ -6365,7 +6359,6 @@ zwingen
 Żurawnica
 Żywiec
 Żywiecki
-ˈæməɹænθ
 „Academy
 „Atlantischen
 „Beratenden
@@ -8297,7 +8290,6 @@ zwölf
 'ner
 's
 'türlich
--'
 -'s
 -'sch
 -abel
@@ -8310,9 +8302,6 @@ zwölf
 -ämie
 0-fach
 0-mal
-0.
-08/15
-0815
 1-Cent-Münze
 1-Cent-Stück
 1-Euro-Job
@@ -8330,7 +8319,6 @@ zwölf
 1-mal
 1-minütig
 1-tägig
-1.
 10-Cent-Münze
 10-Cent-Stück
 10-DM-Banknote
@@ -8353,8 +8341,6 @@ zwölf
 10-teilig
 10-tägig
 10-wöchig
-10.
-100
 100-DM-Banknote
 100-Euro-Schein
 100-Mark-Schein
@@ -8376,7 +8362,6 @@ zwölf
 11-monatig
 11-tägig
 11-wöchig
-11.
 12-Eck
 12-Flächner
 12-Jährige
@@ -8393,7 +8378,6 @@ zwölf
 12-stündig
 12-tägig
 12-wöchig
-12.
 13-Eck
 13-Flächner
 13-Jähriger
@@ -8407,7 +8391,6 @@ zwölf
 13-stündig
 13-tägig
 13-wöchig
-13.
 14-Eck
 14-Jährige
 14-Jähriger
@@ -8507,7 +8490,6 @@ zwölf
 2-monatlich
 2-stündig
 2-tägig
-2.
 20-Cent-Münze
 20-Cent-Stück
 20-DM-Banknote
@@ -8529,7 +8511,6 @@ zwölf
 20-teilig
 20-tägig
 20-wöchig
-20.
 200-Euro-Schein
 200-jährig
 20ste
@@ -8545,7 +8526,6 @@ zwölf
 21-stündig
 21-tägig
 21-wöchig
-21.
 22-Eck
 22-Jährige
 22-Jähriger
@@ -8557,7 +8537,6 @@ zwölf
 22-minütig
 22-stündig
 22-wöchig
-22.
 23-Jährige
 23-Jähriger
 23-fach
@@ -8567,7 +8546,6 @@ zwölf
 23-minütig
 23-stündig
 23-wöchig
-23.
 24-Eck
 24-Jährige
 24-Jähriger
@@ -8581,7 +8559,6 @@ zwölf
 24-stündig
 24-tägig
 24-wöchig
-24.
 25-Jährige
 25-Jähriger
 25-fach
@@ -8591,7 +8568,6 @@ zwölf
 25-minütig
 25-stündig
 25-wöchig
-25.
 26-Jährige
 26-Jähriger
 26-fach
@@ -8601,7 +8577,6 @@ zwölf
 26-minütig
 26-stündig
 26-wöchig
-26.
 27-Eck
 27-Jährige
 27-Jähriger
@@ -8614,7 +8589,6 @@ zwölf
 27-stündig
 27-tägig
 27-wöchig
-27.
 28-Eck
 28-Jährige
 28-Jähriger
@@ -8627,7 +8601,6 @@ zwölf
 28-stündig
 28-tägig
 28-wöchig
-28.
 29-Jährige
 29-Jähriger
 29-fach
@@ -8637,7 +8610,6 @@ zwölf
 29-stündig
 29-tägig
 29-wöchig
-29.
 2G
 3-Eck
 3-Jährige
@@ -8658,7 +8630,6 @@ zwölf
 3-teilig
 3-tägig
 3-wöchig
-3.
 30-Eck
 30-Jährige
 30-Jähriger
@@ -8671,7 +8642,6 @@ zwölf
 30-monatig
 30-stündig
 30-tägig
-30.
 300-jährig
 31-Eck
 31-Jährige
@@ -8683,7 +8653,6 @@ zwölf
 31-minütig
 31-stündig
 31-tägig
-31.
 31er
 32-Eck
 32-Jährige
@@ -8695,7 +8664,6 @@ zwölf
 32-minütig
 32-stündig
 32-tägig
-32.
 33-Jährige
 33-Jähriger
 33-fach
@@ -8703,7 +8671,6 @@ zwölf
 33-mal
 33-minütig
 33-tägig
-33.
 34-Eck
 34-Jährige
 34-Jähriger
@@ -8713,7 +8680,6 @@ zwölf
 34-mal
 34-minütig
 34-tägig
-34.
 35-Jährige
 35-Jähriger
 35-fach
@@ -8721,7 +8687,6 @@ zwölf
 35-mal
 35-minütig
 35-stündig
-35.
 36-Eck
 36-Jährige
 36-Jähriger
@@ -8732,28 +8697,24 @@ zwölf
 36-minütig
 36-monatig
 36-stündig
-36.
 37-Jährige
 37-Jähriger
 37-fach
 37-jährig
 37-mal
 37-minütig
-37.
 38-Jährige
 38-Jähriger
 38-fach
 38-jährig
 38-mal
 38-minütig
-38.
 39-Jährige
 39-Jähriger
 39-fach
 39-jährig
 39-mal
 39-minütig
-39.
 3G
 4-Eck
 4-Flächner
@@ -8771,7 +8732,6 @@ zwölf
 4-saitig
 4-stündig
 4-teilig
-4.
 40-Eck
 40-Jährige
 40-Jähriger
@@ -8785,7 +8745,6 @@ zwölf
 40-stündig
 40-tägig
 40-wöchig
-40.
 400-jährig
 41-Jährige
 41-Jähriger
@@ -8793,28 +8752,24 @@ zwölf
 41-jährig
 41-mal
 41-minütig
-41.
 42-Jährige
 42-Jähriger
 42-fach
 42-jährig
 42-mal
 42-minütig
-42.
 43-Jährige
 43-Jähriger
 43-fach
 43-jährig
 43-mal
 43-minütig
-43.
 44-Jährige
 44-Jähriger
 44-fach
 44-jährig
 44-mal
 44-minütig
-44.
 45-Jährige
 45-Jähriger
 45-fach
@@ -8823,7 +8778,6 @@ zwölf
 45-minütig
 45-stündig
 45-tägig
-45.
 46-Jährige
 46-Jähriger
 46-fach
@@ -8831,14 +8785,12 @@ zwölf
 46-mal
 46-minütig
 46-stündig
-46.
 47-Jährige
 47-Jähriger
 47-fach
 47-jährig
 47-mal
 47-minütig
-47.
 48-Eck
 48-Jährige
 48-Jähriger
@@ -8852,14 +8804,12 @@ zwölf
 48-stündig
 48-tägig
 48-wöchig
-48.
 49-Jährige
 49-Jähriger
 49-fach
 49-jährig
 49-mal
 49-minütig
-49.
 5-%-Hürde
 5-%-Klausel
 5-Cent-Münze
@@ -8888,7 +8838,6 @@ zwölf
 5-stündig
 5-teilig
 5-tägig
-5.
 50-Cent-Münze
 50-Cent-Stück
 50-DM-Banknote
@@ -8908,7 +8857,6 @@ zwölf
 50-stündig
 50-tägig
 50-wöchig
-50.
 500-DM-Banknote
 500-Euro-Schein
 500-Mark-Schein
@@ -8921,35 +8869,30 @@ zwölf
 51-jährig
 51-mal
 51-minütig
-51.
 52-Jährige
 52-Jähriger
 52-fach
 52-jährig
 52-mal
 52-minütig
-52.
 53-Jährige
 53-Jähriger
 53-fach
 53-jährig
 53-mal
 53-minütig
-53.
 54-Jährige
 54-Jähriger
 54-fach
 54-jährig
 54-mal
 54-minütig
-54.
 55-Jährige
 55-Jähriger
 55-fach
 55-jährig
 55-mal
 55-minütig
-55.
 56-fach
 56-jährig
 56-mal
@@ -8980,7 +8923,6 @@ zwölf
 6-saitig
 6-stündig
 6-tägig
-6.
 60-Eck
 60-eckig
 60-fach
@@ -9015,7 +8957,6 @@ zwölf
 7-stündig
 7-tägig
 7-wöchig
-7.
 70-Eck
 70-eckig
 70-fach
@@ -9043,7 +8984,6 @@ zwölf
 8-saitig
 8-tägig
 8-wöchig
-8.
 80-Eck
 80-eckig
 80-fach
@@ -9067,7 +9007,6 @@ zwölf
 9-monatlich
 9-tägig
 9-wöchig
-9.
 90-fach
 90-jährig
 90-mal
@@ -12237,7 +12176,6 @@ Dietmarhopp
 Dietrichrex
 Diffusor
 Digitalisat
-Dikanʹka
 Dimai
 Dimethylamino
 Dimitrov
@@ -12781,7 +12719,6 @@ Gänge
 Gödel
 Günterseeber
 Günther
-Gǃkúnǁʼhòmdímà
 HAR
 Haan
 Haapavesi
@@ -13488,7 +13425,6 @@ Lipschutz
 Liriope
 Lise
 Lishizhen
-Listʹev
 Littlewood
 Litva
 Livadia
@@ -13740,7 +13676,6 @@ Mielikki
 Miesvanrohe
 Mikawa
 Mikewong
-Mikhelʹson
 Mikkola
 Mikula
 Mila
@@ -13932,7 +13867,6 @@ Niilo
 Nikifor
 Nikifors
 Niklauswirth
-Nikolʹskij
 Nikonov
 Nina
 Ninas
@@ -13955,7 +13889,6 @@ Nonenal
 Nonie
 Nonna
 Noordung
-Noragalʹ
 Nordenskiöld
 Norman
 Normans
@@ -14082,7 +14015,6 @@ Palatia
 Pallas
 Palma
 Palva
-Palʹchikov
 Panacea
 Panarea
 Panchengdong
@@ -14270,7 +14202,6 @@ Privatschule
 ProCyclingStats
 Produzent
 Progressive
-Prokofʹev
 Pronik
 Proserpina
 Proskurin
@@ -15081,7 +15012,6 @@ Ulrikababiaková
 Ultrajectum
 Ulugbek
 Ulyanov
-Ulʹyanin
 Umriss
 Under
 Underhill
@@ -15202,7 +15132,6 @@ Vizbor
 Viète
 Viña
 Vladisvyat
-Vladvasilʹev
 Vladvysotskij
 Vltava
 Volgo
@@ -17272,8 +17201,6 @@ zuzuordnen
 Šumava
 Švankmajer
 Šíma
-ʻOʻo
-வில்லு
 ’Amarneh
 “Ancient
 „AJ“
@@ -23014,7 +22941,6 @@ fühlt
 führende
 führender
 führen“
-f�
 games
 garantierte
 geehrt

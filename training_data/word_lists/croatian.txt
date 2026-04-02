@@ -3287,7 +3287,6 @@ standarde
 standardno
 stanovnici
 stanovnika
-stanovnikа
 stanovništva
 stanovništvom
 stara
@@ -3906,11 +3905,6 @@ zw
 županija
 županijska
 žute
-μέλας
-νῆσος
-Іванчук
-Василь
-Михайлович
 „Bok
 „Majstorski
 „Pitanje
@@ -6287,13 +6281,9 @@ zračne
 život
 životu
 župna
-הֲקוֹדֶשׁ
-לֶשׁוֹן
 ’caesarean’
 „Cuzara”
 „Vodiča
-如一
-桜沢
 AL
 AST
 Abell
@@ -6911,7 +6901,6 @@ Kosova
 Kosovo
 Kovač
 Kowalski
-Koʻolaua
 Krajem
 Kramerom
 Kresák
@@ -9475,13 +9464,6 @@ zvuka
 ženskog
 ženu
 živi
-Чукотское
-иконостас
-красный
-море
-писать
-угол
-שושנה
 ”Pod
 „Amerikanci“
 „Kama”

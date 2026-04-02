@@ -2365,13 +2365,8 @@ ytterligare
 överfördes
 övriga
 ŽOK
-Интурист
-иностранный
-турист
 ”accidentism”
 &c.
--"-
--:
 -a
 -a-
 -ad
@@ -2408,7 +2403,6 @@ ytterligare
 -ell
 -else
 .jo
-08
 08:a
 1 Joh
 1 Kor
@@ -2429,7 +2423,6 @@ ytterligare
 100-lapp
 10:e
 10:o
-112
 11:e
 11:o
 12:e
@@ -2442,7 +2435,6 @@ ytterligare
 15:o
 16:o
 17:o
-180
 18:o
 19:o
 1:a
@@ -3482,7 +3474,6 @@ aftonbön
 aftonfalk
 aftonklänning
 aftonstjärna
-afſkraͤckt
 ag
 aga
 agaförbud
@@ -6213,7 +6204,6 @@ bayrare
 bazooka
 bazz
 bazza
-baͤdda
 bd
 be
 be om ursäkt
@@ -6297,7 +6287,6 @@ befallning
 befara
 befatta
 befattning
-befaͤl
 befinna
 befintlig
 befintlighet
@@ -6590,7 +6579,6 @@ bepryda
 bepröva
 beprövad
 beqväm
-beraͤtta
 bereda
 beredare
 beredd
@@ -12530,7 +12518,6 @@ Extra
 Extrakonsert
 Eyevinn
 FC
-FC™
 FIIA
 FILIPPA
 FMV
@@ -15187,8 +15174,6 @@ yrkeshögskola
 överraskande
 övertänd
 överväger
-ньюс
-тарантас
 ‘Astoundingly
 ‘interest
 “An

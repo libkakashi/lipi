@@ -871,7 +871,6 @@ Ramsey
 Reason
 Reich
 Riga
-Rəhimov
 Saeima
 Seconde
 Seine
@@ -1312,7 +1311,6 @@ stéréotypes
 superficie
 supertall
 sur
-suˈxɔduu̯
 sécession
 sécurité
 série
@@ -1385,7 +1383,6 @@ wiejska
 évolue
 Łódź
 œuvres
-Долиће
 AA
 AC
 AG
@@ -3031,7 +3028,6 @@ Léger
 Lüneburg
 Lüst
 L’essentiel
-L☉
 MA
 MBendi
 MC
@@ -3259,7 +3255,6 @@ Mérida
 Méridionale
 Mérope
 Mühlhausen
-M☉
 NA
 NAOJ
 NASA
@@ -3321,7 +3316,6 @@ Nigeria
 Nigerian
 Nigéria
 Nigérians
-Nikdollezhalʹ
 Ninigi
 Nishi
 Nishiharima
@@ -3782,7 +3776,6 @@ République
 Résurrection
 Rôle
 Rübezahl
-R☉
 SA
 SB
 SC
@@ -3823,7 +3816,6 @@ Salvatore
 Salvia
 Samedi
 Samoilov
-Samusʹ
 Sanctuary
 Sanctus
 Sanden
@@ -7634,72 +7626,6 @@ zur
 České
 œillets
 ūf
-Εἱρμῶν
-Εἶδον
-Καὶ
-Κύριον
-Λειτουργίας
-Νῦν
-Τοῦ
-αἱ
-δείπνου
-διαφόρων
-δοξολογίαις
-δυνάμεις
-εἰς
-εὐταξίας
-θρόνου
-καθ
-καθήμενον
-καλλοφωνικῶν
-καὶ
-μελοποιηθὲν
-μετὰ
-μουσικῆς
-μυστικοῦ
-νεωτέρων
-οὐρανῶν
-παρὰ
-περιέχον
-περὶ
-σου
-ταῖς
-τοῦ
-τὴν
-τὸ
-τὸν
-τῆς
-τῇ
-τῶν
-χερουβικόν
-χερουβικὸς
-Рѫководство
-Херȣвімскаѧ
-восточната
-за
-изучване
-музика
-на
-практическото
-пҍснь
-теоретическо
-църковна
-ἀκολουθίαν
-ἀπαντησάντων
-ἀρχαίων
-ἄνθος
-ἐκκλησίᾳ
-ἐκκλησιαστικῆς
-ἐν
-ἐπηρμένου
-ἐπὶ
-Ἐσπερινοῦ
-Ἓν
-Ἔπαινος
-ἡμᾶς
-Ὅρθρου
-ὑψηλοῦ
-ὕμνος
 ADSL
 AFA
 ASJ
@@ -9142,19 +9068,9 @@ wraith
 Œufs
 Śiva
 Žagars
-Агала
-Квинт
-Крће
-Мале
-Сервилий
-Следопыт
-года
-до
-консул
 & cetera
 &c.
 'a
-*69
 -able
 -acé
 -acée
@@ -9176,7 +9092,6 @@ wraith
 -amment
 -ance
 /s
-06
 1 Chroniques
 1 Corinthiens
 1 Jean
@@ -9185,7 +9100,6 @@ wraith
 1 Rois
 1 Samuel
 1 Timothée
-100
 100 mètres
 1000e
 100e
@@ -9227,49 +9141,31 @@ wraith
 2ème
 3 Amigos
 3 Jean
-3-1-1
-311
-36
-3615
 3F
 3e
 3o
 4 nages
 4 × 4
-4-1-1
 400 mètres
-404
-411
 4L
 4e
 4o
 4x4
 5 à 7
 5-à-7
-514
 51e État
-5@7
 5e
 5o
 5pa
 5à7
-67
-69
 6e
 6o
 6ter
 7e
 7o
-8-1-1
 800 mètres
-810
-811
 8e
 8o
-9-1-1
-9-3
-911
-93
 9e
 9o
 A+
@@ -10503,7 +10399,6 @@ Eure
 Europa
 Evelyn
 Evening
-Evgalvasilʹev
 Evidence
 Evil
 Ewers
@@ -10717,7 +10612,6 @@ Griesser
 Griffinjayne
 Griffioen
 Grigery
-Grigorʹev
 Gringauz
 Griqua
 Gritsavage
@@ -12652,7 +12546,6 @@ Vries
 Vyšší
 Väte
 Vérité
-Vʹyus
 WC
 WD
 WE
@@ -17196,7 +17089,6 @@ web
 étudié
 évaluateur
 île
-ချယ်ရီဇာဟောင်
 AECI
 AMV
 ATP
@@ -19717,10 +19609,6 @@ zóna
 îles
 Štěpánov
 živote
-学部
-琉大
-琉球大学
-研究科
 Dégringole
 Mortel
 Respecte

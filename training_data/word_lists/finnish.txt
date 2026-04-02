@@ -4528,9 +4528,6 @@ zw
 äänittämä
 öljynjalostamo
 česká
-Φάσις
-рф
-ფოთი
 ”Katupoikien
 ”Sam”
 ”Scooter
@@ -4544,7 +4541,6 @@ zw
 ”modit”
 ”mod”
 ”trilby”
-三个代表重要思想
 Academic
 Adolf
 Aechmea
@@ -7664,13 +7660,6 @@ yrityksessä
 Šostakovitšin
 Žeravja
 Živago
-Αθηνών
-Γαλλική
-Σχολή
-Васи́льевич
-Дени́сов
-Избо́рск
-Эдисо́н
 “suuri
 ”All
 ”Ateenan
@@ -7756,17 +7745,13 @@ yrityksessä
 1. Tim.
 10 000 metriä
 100 metriä
-100.
-1000.
 1000:s
-112
 18-trisomia
 1:nen
 2. Aik.
 2. Moos.
 2. Sam.
 200 metriä
-24/7
 2:nen
 3. Moos.
 3:s
@@ -9009,7 +8994,6 @@ Guo
 Gwen
 Göring
 Günter
-Gǃkúnǁʼhòmdímà
 HOME
 HPK
 HS
@@ -18478,7 +18462,6 @@ azerinkielinen
 azerintaa
 azukipapu
 aškenasi
-aˈɾatʰ
 baana
 baari
 baariapulainen
@@ -18519,7 +18502,6 @@ bahaisti
 bahamalainen
 bahamanhutia
 bahamansupi
-bahaʼi-usko
 bahrainilainen
 bahá'í-usko
 baijeri
@@ -20382,7 +20364,6 @@ remixiä
 rengas
 repiä
 resursseja
-resˈpʰuplik
 reteintä
 reunaehdot
 riippui
@@ -20964,7 +20945,6 @@ täydellistä
 töitä
 törkeäksi
 tšekkiläinen
-tʰɯˈʋa
 uhanalaisia
 uhanalaisuus
 uhanneen
@@ -21324,21 +21304,12 @@ yönä
 äänieristävyys
 öljyntuotantoon
 šamanismin
-Εὔβοια
-Арат
-Республик
-Тыва
-قريشي
-قریشی
-مصطفی
-مُصطفي
 ’n’
 ”Cloudbusting”
 ”Hounds
 ”Running
 ”massiivisesta
 ”vahingossa”
-ポッ拳
 AI
 AKK
 ANGRY
@@ -21626,7 +21597,6 @@ Evolving
 Ex
 Expanding
 FBI
-FC™
 FIIA
 FINLAND
 FITech
@@ -21946,7 +21916,6 @@ Konkurssiin
 Konsta
 Kosovolla
 Kouvolan
-Kremlinʼs
 Kremlin’s
 Kriisiapua
 Kriisikeskukset
@@ -22299,7 +22268,6 @@ Pyrin
 Päijät
 Päällikkö
 Pörsseissä
-Quadrant™
 RD
 RFID
 RISTEILY
@@ -22369,7 +22337,6 @@ SPARC
 SPORT
 SPORTIN
 SPORTS
-SPORTS™
 STM
 STT
 Saari
@@ -25091,4 +25058,3 @@ zettabyte
 ”sekoilua”
 ”suomalaiseen”
 ”Älytön
-朝日新聞

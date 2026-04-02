@@ -207,7 +207,6 @@ Askania
 Asmitakumar
 Association
 Asta
-Astafʹev
 Aster
 Astrid
 Astronautica
@@ -903,7 +902,6 @@ Eumaios
 Europy
 Eurowizji
 Evere
-Evgalvasilʹev
 Ewa
 Ewers
 Eötvös
@@ -1812,7 +1810,6 @@ Liebermann
 Lignes
 Lilith
 Lilium
-Liliʻuokalani
 Lille
 Lilofee
 Lima
@@ -2206,7 +2203,6 @@ Niemieckie
 Nieprecyzyjny
 Niewątpliwym
 Niezależnych
-Nikdollezhalʹ
 Nikko
 Nikolova
 Nikt
@@ -2812,7 +2808,6 @@ Samolot
 Samra
 Samuel
 Samuele
-Samusʹ
 Sandro
 Sanguinettiego
 Sani
@@ -6873,13 +6868,6 @@ złotej
 żyłeś
 żyło
 żyły
-Дзержиново
-Дзяржынава
-Королівка
-Орден
-СЕПТЕМВРИ
-ми
-септември
 „Bieszczadzkie
 „Bird
 „Brylantowe
@@ -6910,8 +6898,6 @@ złotej
 „Yapa”
 „Zamczysko”
 „Île
-岸和田市
-離れキリシタン
 ASP
 Abbasa
 Abbasydzi
@@ -9621,7 +9607,6 @@ złą
 żydowską
 żółty
 żądali
-Лугове
 „Barometr”
 „Diablo”
 „Dragon”
@@ -9647,8 +9632,6 @@ złą
 „wymazania”
 „złych”
 „Życiu
-万葉
-日比
 AL
 Braun
 Diagram
@@ -9765,15 +9748,6 @@ znajdująca
 łącząca
 świeckości
 Żyżyca
-Балтийский
-Великие
-Карта
-Луки
-Ржев
-России
-Участок
-Яндекс
-карта
 Jakiśtam
 Mięczak
 Pierdnąłem
@@ -13260,7 +13234,6 @@ złudzeniu
 żywnościowej
 żółte
 żądają
-БелТА
 ‘Don’t
 ‘Not
 ’Airport

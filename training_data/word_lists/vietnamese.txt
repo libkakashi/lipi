@@ -2809,9 +2809,6 @@ xếp
 đời
 đức
 ước
-Васильевич
-Вдовиченко
-Николай
 ảnh
 Ấn
 Ủy
@@ -3321,7 +3318,6 @@ bết
 bọc
 bọn
 bốc
-bố̀
 bổ
 bức
 bữa
@@ -3698,14 +3694,8 @@ yếu
 độc
 đợt
 đứng
-ทศพร
-ศรีเรือง
 ấy
 “nhật
-小笠原国立公园
-无人
-24/24
-44
 9x
 A Di Đà
 A Di Đà Phật
@@ -4678,7 +4668,6 @@ zeheri
 ảo ảnh
 Ấu
 ủy
-武汉市中心医院
 AAC
 AK
 Abell
@@ -5666,7 +5655,6 @@ Nha
 Nhiều
 Nicholas
 Nihil
-Nikdollezhalʹ
 Nishi
 Nishiharima
 Nishimoto
@@ -10515,11 +10503,6 @@ zw
 đốt
 độn
 đột
-˚C
-γαλαξίας
-рф
-ລໍວັນໄຊ
-ສີສົມພອນ
 Ấn giáo
 Ấn Độ
 Ấn Độ Dương
@@ -10585,12 +10568,6 @@ zw
 ẳm
 ẵm bồng
 ủng
-天河
-天漢
-星系
-銀河
-銀河系
-雲漢
 Bagan
 Bên
 Chùa
@@ -10616,8 +10593,6 @@ tu
 tọa
 východ
 đáo
-စု
-ဘုရား
 Gâu
 Nữa
 Sai

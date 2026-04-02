@@ -4536,8 +4536,6 @@ yngre
 “Gamle
 ”Wembley
 ”opsamlings”
--'
--'-
 -abel
 -age
 -agtig
@@ -4600,11 +4598,9 @@ yngre
 1'er
 1-værelses
 10'er
-10.
 11-meterplet
 12-talspige
 2'er
-20.
 3'er
 4'er
 5'er
@@ -5081,7 +5077,6 @@ Bülow
 CCA
 CET
 CFR
-CO₂
 CP
 CPB
 CPR
@@ -17145,7 +17140,6 @@ kølige
 kønnene
 kønnenes
 kønsafhængige
-labɛm
 ladet
 lady
 lag
@@ -19451,18 +19445,6 @@ zünftig
 øvede
 điển
 Žižka
-ʻOumuamua
-ˈnad
-ˈroudɲɪtsɛ
-นิรมล
-บรมนาถบพิตร
-พลเอกหญิง
-วงศ์วชิราภักดิ์
-วชิราลงกรณ
-วชิราลงกรณ์
-สินีนาฏ
-อยุธยา
-อุ่นพรม
 ’er
 ’’Kvinders
 “He
@@ -22286,8 +22268,6 @@ zoster
 økning
 økt
 øvelse
-ньюс
-тарантас
 ‘Birna’
 ‘culpably
 “AI

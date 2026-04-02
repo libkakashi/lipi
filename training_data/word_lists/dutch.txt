@@ -843,7 +843,6 @@ Kaiserslautern
 Kalf
 Kalfje
 Kamek
-Kamoʻoalewa
 Kampioenschap
 Kamtsjatka
 Kan
@@ -3291,11 +3290,6 @@ zw
 één
 ÷x
 česká
-бг
-рф
-срб
-укр
-қаз
 AF
 ARP
 Abdel
@@ -5007,8 +5001,6 @@ zwartheid
 Épieds
 ânov
 überhaupt
-μm
-חָם
 ḥm
 ‘Andalusische’
 ‘geheuld’
@@ -5456,7 +5448,6 @@ Exposure
 Extinction
 Extreme
 Eén
-FC™
 FEI
 FIRSTT
 FOTO’S
@@ -6243,7 +6234,6 @@ SMA
 SOLAR
 SPIE
 SPORTS
-SPORTS™
 Sabien
 Sabrina
 Sadílek
@@ -8725,5 +8715,3 @@ z’n
 “Thanks
 “You
 “but
-★★
-★★★★
