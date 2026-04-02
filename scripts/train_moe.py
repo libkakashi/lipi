@@ -271,11 +271,10 @@ def main():
 
     vram("after model to device (fp32)")
 
-    # Cast to bf16 — halves param + gradient memory.
-    if device_type == "cuda" and torch.cuda.is_bf16_supported():
-        model = model.to(torch.bfloat16)
-        torch.cuda.empty_cache()
-        vram("after bf16 cast")
+    # NOTE: Do NOT cast model to bf16. Autocast handles bf16 forward/backward
+    # while keeping fp32 params for optimizer precision. Casting to bf16
+    # makes Adam's m/v states bf16 (7-bit mantissa) — not enough precision
+    # for stable convergence.
 
     total_params = sum(p.numel() for p in model.parameters())
     p0 = next(model.parameters())
