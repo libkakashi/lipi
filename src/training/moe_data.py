@@ -22,7 +22,7 @@ def load_shards(shard_dir: Path):
     print(f"  {len(shard_files)} shards")
 
     all_imgs, all_labels, all_sids, all_gids = [], [], [], []
-    with ThreadPoolExecutor(max_workers=16) as pool:
+    with ThreadPoolExecutor(max_workers=min(64, len(shard_files))) as pool:
         for shard in pool.map(lambda p: torch.load(p, weights_only=False), shard_files):
             all_imgs.append(shard["images"])
             all_labels.extend(shard["labels"])
@@ -85,18 +85,28 @@ def encode_labels(
         target_tensor: (N, max_len) padded token IDs
         target_len_tensor: (N,) actual lengths
     """
+    # Pre-build lookup tables to avoid per-sample dict lookups
+    decompose_groups = set()
+    group_names = []
+    for g, gname in enumerate(active_groups):
+        group_names.append(gname)
+        if gname in DECOMPOSE_GROUPS:
+            decompose_groups.add(g)
+
+    gids = group_ids.tolist()
+    lsids = local_script_ids.tolist()
+
     max_len = 0
     encoded = []
-    for label, gid, lsid in zip(labels, group_ids.tolist(), local_script_ids.tolist()):
-        group_name = active_groups[gid] if gid < len(active_groups) else ""
-        if group_name in DECOMPOSE_GROUPS:
-            label_tokens = decompose_text(label, group_name)
-        else:
-            label_tokens = label
-        tok = group_tokenizers[gid][lsid]
-        ids = tok.encode(label_tokens)
+    for i in range(len(labels)):
+        gid = gids[i]
+        text = labels[i]
+        if gid in decompose_groups:
+            text = decompose_text(text, group_names[gid])
+        ids = group_tokenizers[gid][lsids[i]].encode(text)
         encoded.append(ids)
-        max_len = max(max_len, len(ids))
+        if len(ids) > max_len:
+            max_len = len(ids)
 
     if max_len == 0:
         max_len = 1
