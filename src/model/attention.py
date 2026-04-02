@@ -218,50 +218,6 @@ class ShiftedWindowAttention(nn.Module):
         return out
 
 
-class GlobalAttention(nn.Module):
-    """Standard multi-head self-attention for 1D sequences.
-
-    Used in Stage 3 after height collapse. Applies RoPE-1D.
-    """
-
-    def __init__(self, dim: int, num_heads: int):
-        super().__init__()
-        self.dim = dim
-        self.num_heads = num_heads
-        self.head_dim = dim // num_heads
-        self.scale = self.head_dim ** -0.5
-
-        self.qkv = nn.Linear(dim, 3 * dim, bias=True)
-        self.proj = nn.Linear(dim, dim, bias=True)
-        self.rope = RoPE1D(dim=self.head_dim)
-
-    def forward(self, x: Tensor, seq_len: int) -> Tensor:
-        """
-        Args:
-            x: (B, T, C) — 1D sequence features.
-            seq_len: T, the sequence length.
-
-        Returns: (B, T, C)
-        """
-        B, T, C = x.shape
-
-        qkv = self.qkv(x).reshape(B, T, 3, self.num_heads, self.head_dim)
-        qkv = qkv.permute(2, 0, 3, 1, 4)  # (3, B, heads, T, head_dim)
-        q, k, v = qkv.unbind(0)
-
-        # Apply RoPE-1D
-        q = self.rope(q, seq_len=T)
-        k = self.rope(k, seq_len=T)
-
-        # Scaled dot-product attention
-        attn = (q @ k.transpose(-2, -1)) * self.scale
-        attn = F.softmax(attn, dim=-1)
-        out = attn @ v  # (B, heads, T, head_dim)
-
-        out = out.transpose(1, 2).reshape(B, T, C)
-        return self.proj(out)
-
-
 class MLP(nn.Module):
     """Two-layer MLP with GELU activation.
 
@@ -401,27 +357,3 @@ class FullyExpertSWABlock(nn.Module):
         return x_sorted[sorted_idx.argsort()]
 
 
-class GlobalBlock(nn.Module):
-    """Global self-attention block with pre-norm residual.
-
-    Used in Stage 3 after height collapse.
-    """
-
-    def __init__(self, dim: int, num_heads: int, mlp_ratio: int = 4):
-        super().__init__()
-        self.norm1 = nn.LayerNorm(dim)
-        self.attn = GlobalAttention(dim, num_heads)
-        self.norm2 = nn.LayerNorm(dim)
-        self.mlp = MLP(dim, mlp_ratio)
-
-    def forward(self, x: Tensor, seq_len: int) -> Tensor:
-        """
-        Args:
-            x: (B, T, C)
-            seq_len: T.
-
-        Returns: (B, T, C)
-        """
-        x = x + self.attn(self.norm1(x), seq_len)
-        x = x + self.mlp(self.norm2(x))
-        return x
