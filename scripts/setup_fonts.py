@@ -113,40 +113,105 @@ FONTS = {
     (f"{NOTO}/NotoSansLao/full/ttf/NotoSansLao-Bold.ttf", "NotoSansLao-Bold.ttf"),
     (f"{NOTO}/NotoSerifLao/full/ttf/NotoSerifLao-Regular.ttf", "NotoSerifLao-Regular.ttf"),
     (f"{GFONTS}/phetsarathot/PhetsarathOT-Regular.ttf", "PhetsarathOT-Regular.ttf"),
-    # Odia
+    # === CJK handwriting + variety (biggest gap) ===
+    (f"{GFONTS}/hachimarupop/HachiMaruPop-Regular.ttf", "HachiMaruPop-Regular.ttf"),
+    (f"{GFONTS}/kleeone/KleeOne-Regular.ttf", "KleeOne-Regular.ttf"),
+    (f"{GFONTS}/yomogi/Yomogi-Regular.ttf", "Yomogi-Regular.ttf"),
+    (f"{GFONTS}/mashanzheng/MaShanZheng-Regular.ttf", "MaShanZheng-Regular.ttf"),
+    (f"{GFONTS}/liujianmaocao/LiuJianMaoCao-Regular.ttf", "LiuJianMaoCao-Regular.ttf"),
+    (f"{GFONTS}/longcang/LongCang-Regular.ttf", "LongCang-Regular.ttf"),
+    (f"{GFONTS}/zhimangxing/ZhiMangXing-Regular.ttf", "ZhiMangXing-Regular.ttf"),
+    (f"{GFONTS}/shipporimincho/ShipporiMincho-Regular.ttf", "ShipporiMincho-Regular.ttf"),
+    (f"{GFONTS}/zenmarugothic/ZenMaruGothic-Regular.ttf", "ZenMaruGothic-Regular.ttf"),
+    (f"{GFONTS}/zenkurenaido/ZenKurenaido-Regular.ttf", "ZenKurenaido-Regular.ttf"),
+    (f"{GFONTS}/zcoolqingkehuangyou/ZCOOLQingKeHuangYou-Regular.ttf", "ZCOOLQingKeHuangYou-Regular.ttf"),
+    (f"{GFONTS}/zcoolkuaile/ZCOOLKuaiLe-Regular.ttf", "ZCOOLKuaiLe-Regular.ttf"),
+    # === Bengali (need handwriting + display) ===
+    (f"{GFONTS}/atma/Atma-Regular.ttf", "Atma-Regular.ttf"),
+    (f"{GFONTS}/galada/Galada-Regular.ttf", "Galada-Regular.ttf"),
+    (f"{GFONTS}/mina/Mina-Regular.ttf", "Mina-Regular.ttf"),
+    (f"{GFONTS}/balooda2/BalooDa2%5Bwght%5D.ttf", "BalooDa2[wght].ttf"),
+    # === Gurmukhi (was only 3 fonts!) ===
+    (f"{GFONTS}/muktamahee/MuktaMahee-Regular.ttf", "MuktaMahee-Regular.ttf"),
+    (f"{GFONTS}/baloopaaji2/BalooPaaji2%5Bwght%5D.ttf", "BalooPaaji2[wght].ttf"),
+    (f"{GFONTS}/langar/Langar-Regular.ttf", "Langar-Regular.ttf"),
+    # === Tamil (need handwriting) ===
+    (f"{GFONTS}/kavivanar/Kavivanar-Regular.ttf", "Kavivanar-Regular.ttf"),
+    (f"{GFONTS}/catamaran/Catamaran%5Bwght%5D.ttf", "Catamaran[wght].ttf"),
+    (f"{GFONTS}/hindmadurai/HindMadurai-Regular.ttf", "HindMadurai-Regular.ttf"),
+    (f"{GFONTS}/muktamalar/MuktaMalar-Regular.ttf", "MuktaMalar-Regular.ttf"),
+    (f"{GFONTS}/baloothambi2/BalooThambi2%5Bwght%5D.ttf", "BalooThambi2[wght].ttf"),
+    # === Telugu (need handwriting + variety) ===
+    (f"{GFONTS}/lakkireddy/LakkiReddy-Regular.ttf", "LakkiReddy-Regular.ttf"),
+    (f"{GFONTS}/hindguntur/HindGuntur-Regular.ttf", "HindGuntur-Regular.ttf"),
+    (f"{GFONTS}/mandali/Mandali-Regular.ttf", "Mandali-Regular.ttf"),
+    (f"{GFONTS}/ramabhadra/Ramabhadra-Regular.ttf", "Ramabhadra-Regular.ttf"),
+    (f"{GFONTS}/balootammudu2/BalooTammudu2%5Bwght%5D.ttf", "BalooTammudu2[wght].ttf"),
+    (f"{GFONTS}/peddana/Peddana-Regular.ttf", "Peddana-Regular.ttf"),
+    # === Kannada (need variety) ===
+    (f"{GFONTS}/akayakanadaka/AkayaKanadaka-Regular.ttf", "AkayaKanadaka-Regular.ttf"),
+    (f"{GFONTS}/benne/Benne-Regular.ttf", "Benne-Regular.ttf"),
+    (f"{GFONTS}/hindmysuru/HindMysuru-Regular.ttf", "HindMysuru-Regular.ttf"),
+    (f"{GFONTS}/balootamma2/BalooTamma2%5Bwght%5D.ttf", "BalooTamma2[wght].ttf"),
+    # === Malayalam (need variety) ===
+    (f"{GFONTS}/manjari/Manjari-Regular.ttf", "Manjari-Regular.ttf"),
+    (f"{GFONTS}/gayathri/Gayathri-Regular.ttf", "Gayathri-Regular.ttf"),
+    (f"{GFONTS}/baloochettan2/BalooChettan2%5Bwght%5D.ttf", "BalooChettan2[wght].ttf"),
+    # === Hebrew (need handwriting) ===
+    (f"{GFONTS}/heebo/Heebo%5Bwght%5D.ttf", "Heebo[wght].ttf"),
+    (f"{GFONTS}/assistant/Assistant%5Bwght%5D.ttf", "Assistant[wght].ttf"),
+    (f"{GFONTS}/suezone/SuezOne-Regular.ttf", "SuezOne-Regular.ttf"),
+    (f"{GFONTS}/davidlibre/DavidLibre-Regular.ttf", "DavidLibre-Regular.ttf"),
+    (f"{GFONTS}/karantina/Karantina-Regular.ttf", "Karantina-Regular.ttf"),
+    # === Odia ===
     (f"{NOTO}/NotoSansOriya/full/ttf/NotoSansOriya-Regular.ttf", "NotoSansOriya-Regular.ttf"),
     (f"{NOTO}/NotoSansOriya/full/ttf/NotoSansOriya-Bold.ttf", "NotoSansOriya-Bold.ttf"),
-    # Sinhala
+    (f"{GFONTS}/baloobhaina2/BalooBhaina2%5Bwght%5D.ttf", "BalooBhaina2[wght].ttf"),
+    # === Sinhala ===
     (f"{NOTO}/NotoSansSinhala/full/ttf/NotoSansSinhala-Regular.ttf", "NotoSansSinhala-Regular.ttf"),
     (f"{NOTO}/NotoSansSinhala/full/ttf/NotoSansSinhala-Bold.ttf", "NotoSansSinhala-Bold.ttf"),
     (f"{NOTO}/NotoSerifSinhala/full/ttf/NotoSerifSinhala-Regular.ttf", "NotoSerifSinhala-Regular.ttf"),
-    # Burmese / Myanmar
+    (f"{GFONTS}/abhayalibre/AbhayaLibre-Regular.ttf", "AbhayaLibre-Regular.ttf"),
+    (f"{GFONTS}/yaldevi/Yaldevi%5Bwght%5D.ttf", "Yaldevi[wght].ttf"),
+    (f"{GFONTS}/gemunulibre/GemunuLibre%5Bwght%5D.ttf", "GemunuLibre[wght].ttf"),
+    # === Burmese / Myanmar ===
     (f"{NOTO}/NotoSansMyanmar/full/ttf/NotoSansMyanmar-Regular.ttf", "NotoSansMyanmar-Regular.ttf"),
     (f"{NOTO}/NotoSansMyanmar/full/ttf/NotoSansMyanmar-Bold.ttf", "NotoSansMyanmar-Bold.ttf"),
     (f"{NOTO}/NotoSerifMyanmar/full/ttf/NotoSerifMyanmar-Regular.ttf", "NotoSerifMyanmar-Regular.ttf"),
     (f"{GFONTS}/padauk/Padauk-Regular.ttf", "Padauk-Regular.ttf"),
     (f"{GFONTS}/padauk/Padauk-Bold.ttf", "Padauk-Bold.ttf"),
-    # Khmer
+    # === Khmer (rich on Google Fonts!) ===
     (f"{NOTO}/NotoSansKhmer/full/ttf/NotoSansKhmer-Regular.ttf", "NotoSansKhmer-Regular.ttf"),
     (f"{NOTO}/NotoSansKhmer/full/ttf/NotoSansKhmer-Bold.ttf", "NotoSansKhmer-Bold.ttf"),
     (f"{NOTO}/NotoSerifKhmer/full/ttf/NotoSerifKhmer-Regular.ttf", "NotoSerifKhmer-Regular.ttf"),
     (f"{GFONTS}/battambang/Battambang-Regular.ttf", "Battambang-Regular.ttf"),
-    # Armenian
+    (f"{GFONTS}/hanuman/Hanuman%5Bwght%5D.ttf", "Hanuman[wght].ttf"),
+    (f"{GFONTS}/moul/Moul-Regular.ttf", "Moul-Regular.ttf"),
+    (f"{GFONTS}/siemreap/Siemreap.ttf", "Siemreap.ttf"),
+    (f"{GFONTS}/koulen/Koulen-Regular.ttf", "Koulen-Regular.ttf"),
+    (f"{GFONTS}/fasthand/Fasthand-Regular.ttf", "Fasthand-Regular.ttf"),
+    (f"{GFONTS}/freehand/Freehand-Regular.ttf", "Freehand-Regular.ttf"),
+    (f"{GFONTS}/dangrek/Dangrek-Regular.ttf", "Dangrek-Regular.ttf"),
+    (f"{GFONTS}/bayon/Bayon-Regular.ttf", "Bayon-Regular.ttf"),
+    (f"{GFONTS}/content/Content-Regular.ttf", "Content-Regular.ttf"),
+    # === Armenian ===
     (f"{NOTO}/NotoSansArmenian/full/ttf/NotoSansArmenian-Regular.ttf", "NotoSansArmenian-Regular.ttf"),
     (f"{NOTO}/NotoSansArmenian/full/ttf/NotoSansArmenian-Bold.ttf", "NotoSansArmenian-Bold.ttf"),
     (f"{NOTO}/NotoSerifArmenian/full/ttf/NotoSerifArmenian-Regular.ttf", "NotoSerifArmenian-Regular.ttf"),
-    # Georgian
+    # === Georgian ===
     (f"{NOTO}/NotoSansGeorgian/full/ttf/NotoSansGeorgian-Regular.ttf", "NotoSansGeorgian-Regular.ttf"),
     (f"{NOTO}/NotoSansGeorgian/full/ttf/NotoSansGeorgian-Bold.ttf", "NotoSansGeorgian-Bold.ttf"),
     (f"{NOTO}/NotoSerifGeorgian/full/ttf/NotoSerifGeorgian-Regular.ttf", "NotoSerifGeorgian-Regular.ttf"),
-    # Ethiopic / Amharic
+    # === Ethiopic / Amharic ===
     (f"{NOTO}/NotoSansEthiopic/full/ttf/NotoSansEthiopic-Regular.ttf", "NotoSansEthiopic-Regular.ttf"),
     (f"{NOTO}/NotoSansEthiopic/full/ttf/NotoSansEthiopic-Bold.ttf", "NotoSansEthiopic-Bold.ttf"),
     (f"{NOTO}/NotoSerifEthiopic/full/ttf/NotoSerifEthiopic-Regular.ttf", "NotoSerifEthiopic-Regular.ttf"),
-    # Tibetan
+    (f"{GFONTS}/abyssinicasil/AbyssinicaSIL-Regular.ttf", "AbyssinicaSIL-Regular.ttf"),
+    # === Tibetan ===
     (f"{NOTO}/NotoSansTibetan/full/ttf/NotoSansTibetan-Regular.ttf", "NotoSansTibetan-Regular.ttf"),
     (f"{NOTO}/NotoSansTibetan/full/ttf/NotoSansTibetan-Bold.ttf", "NotoSansTibetan-Bold.ttf"),
     (f"{NOTO}/NotoSerifTibetan/full/ttf/NotoSerifTibetan-Regular.ttf", "NotoSerifTibetan-Regular.ttf"),
+    (f"{GFONTS}/jomolhari/Jomolhari-Regular.ttf", "Jomolhari-Regular.ttf"),
     # Handwriting / Display (Latin)
     (f"{GFONTS}/caveat/Caveat%5Bwght%5D.ttf", "Caveat[wght].ttf"),
     (f"{GFONTS}/dancingscript/DancingScript%5Bwght%5D.ttf", "DancingScript[wght].ttf"),
