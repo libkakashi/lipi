@@ -490,7 +490,6 @@
 ژئومورفولوژی
 ژئوتکنیک
 ژنوم
-Foxx؛
 آبادی
 آراگاتسوتن،
 آزار
@@ -1269,18 +1268,6 @@ Foxx؛
 یوگسلاوی
 یکی
 “مردی
-Cobrin؛
-Coelho؛
-Egnot؛
-Gianelli؛
-Hamelin؛
-Kari،
-Langton؛
-Ordon؛
-Silfverstrand؛
-Stenson؛
-Yeboah؛
-team،
 آئورت
 آئین
 آئینه
@@ -8877,7 +8864,6 @@ team،
 یکبار
 یکسان
 یکم
-Caesonia؛
 آبرتیس
 آتلانتیک
 آتیا
@@ -9460,7 +9446,6 @@ Caesonia؛
 یوبی
 یون
 ییلاقات
-Abragam؛
 آبراهام
 آبراگام
 آد
@@ -10641,9 +10626,6 @@ Abragam؛
 یکسره
 یکم،
 یکپارچه
-Carion؛
-Star،
-Zedadka؛
 آبکی،
 آدنوم
 آرایهٔ
