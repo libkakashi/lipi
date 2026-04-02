@@ -159,6 +159,11 @@ class LIDCoarse(nn.Module):
             nn.Tanh(),
             nn.Linear(64, 1),
         )
+        # Zero-init last layer → constant attention scores → uniform weights
+        # → equivalent to mean pooling at init. Lets attention learn gradually
+        # without breaking LID-1 when resuming from a mean-pooling checkpoint.
+        nn.init.zeros_(self.pool_attn[2].weight)
+        nn.init.zeros_(self.pool_attn[2].bias)
         hidden = in_channels * 2
         self.classifier = nn.Sequential(
             nn.Linear(in_channels, hidden),
