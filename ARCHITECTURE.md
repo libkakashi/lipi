@@ -55,7 +55,7 @@ ColorProjection:     Conv2d(2→32→16→1, 1×1)     641 params
 ResNet Stem:         depth=3, 64ch, stride 4×    526K params
 Shared SWA 4×4:      8 blocks, dim=288           8.0M params
 Shared SWA 4×16:     4 blocks, dim=288           4.0M params
-LID-1 Classifier:    mean pool → MLP 288→576→288→13    336K params
+LID-1 Classifier:    attn pool (288→64→1) → MLP 288→576→288→13    354K params
 ```
 
 ### Expert Path (1 of 13 active, ~52M per group)

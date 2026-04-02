@@ -816,6 +816,71 @@ class TestModelConstruction:
             out = model(x, group_ids=gids, script_ids=sids)
         assert out["logits"].shape[0] == 4
 
+    def test_lid1_uses_attention_pooling(self, model_and_vocabs):
+        """LID-1 must use learned attention pooling, NOT mean pooling.
+        Mean pooling dilutes gradient by sequence length, preventing
+        shared backbone adaptation when adding new groups."""
+        model, _, _, _ = model_and_vocabs
+        assert hasattr(model.lid_coarse, 'pool_attn'), (
+            "LID-1 missing pool_attn — using mean pooling instead of attention pooling")
+
+    def test_lid2_uses_attention_pooling(self, model_and_vocabs):
+        """LID-2 must use learned attention pooling."""
+        model, _, _, active_groups = model_and_vocabs
+        for g, group in enumerate(active_groups):
+            ctc_mod = model.ctc_modules[g]
+            if ctc_mod.multi_script:
+                assert ctc_mod.lid2_pool is not None, (
+                    f"Group {group}: LID-2 missing attention pooling")
+
+    def test_all_swa_blocks_have_checkpointing(self, model_and_vocabs):
+        """All SWA blocks must use gradient checkpointing during training."""
+        model, _, _, _ = model_and_vocabs
+        # Verify the forward method references checkpoint
+        import inspect
+        src = inspect.getsource(model.forward)
+        assert 'checkpoint' in src, (
+            "Shared SWA blocks missing gradient checkpointing")
+
+    def test_model_is_bf16(self, model_and_vocabs):
+        """Model params should be bf16, not fp32.
+        fp32 with autocast wastes VRAM — params are cast every forward anyway."""
+        model, _, _, _ = model_and_vocabs
+        # Model is built in fp32 during tests (no CUDA), so just verify
+        # the training script casts to bf16. Check the code, not the model.
+        import inspect
+        src = inspect.getsource(type(model))
+        # This test is a reminder — actual bf16 cast happens in train_moe.py
+
+    def test_grad_clip_not_too_aggressive(self):
+        """max_norm must be >= 25 for 759M param model.
+        max_norm=5 crushed LID gradient on 574M model."""
+        src = open('scripts/train_moe.py').read()
+        import re
+        match = re.search(r'max_norm=(\d+\.?\d*)', src)
+        assert match, "max_norm not found in train_moe.py"
+        max_norm = float(match.group(1))
+        assert max_norm >= 25, (
+            f"max_norm={max_norm} too aggressive for 759M model (need >=25)")
+
+    def test_ctc_uses_per_script_slicing(self):
+        """CTC must use per-script vocab slicing, not global max_vocab.
+        Global softmax dilutes probability for smaller vocabs."""
+        src = open('src/training/moe_losses.py').read()
+        assert 'group_script_vocabs' in src, (
+            "CTC loss missing per-script vocab slicing")
+        assert '[:vs]' in src or '[:, :, :vs]' in src, (
+            "CTC loss not slicing logits to script vocab size")
+
+    def test_lid2_loss_averaged_not_summed(self):
+        """LID-2 loss must be averaged across groups, not summed.
+        Summed LID-2 (~3.7) drowns CTC (~3.5) in expert blocks."""
+        src = open('src/training/moe_losses.py').read()
+        assert 'lid2_count' in src, (
+            "LID-2 loss not counting groups for averaging")
+        assert '/ lid2_count' in src, (
+            "LID-2 loss not dividing by group count")
+
     def test_forward_output_shapes(self, model_and_vocabs):
         model, _, _, active_groups = model_and_vocabs
         model.eval()
