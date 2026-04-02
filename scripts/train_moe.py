@@ -317,10 +317,31 @@ def main():
             print("  Skipping optimizer state (vocab changed, momentum shapes stale)")
         if "scaler" in ckpt:
             scaler.load_state_dict(ckpt["scaler"])
-        if "scheduler" in ckpt:
-            scheduler.load_state_dict(ckpt["scheduler"])
+
         start_epoch = ckpt.get("epoch", 0) + 1
-        print(f"  Resumed at epoch {start_epoch}")
+
+        # --lr with --resume: rebuild scheduler fresh from start_epoch
+        # (don't restore checkpoint's decayed LR — new heads need full LR)
+        ckpt_lr = ckpt.get("args", {}).get("lr")
+        if ckpt_lr is not None and args.lr != ckpt_lr:
+            print(f"  LR override: checkpoint had {ckpt_lr}, using {args.lr}")
+            print(f"  Rebuilding scheduler from epoch {start_epoch}")
+            for pg in optimizer.param_groups:
+                pg["lr"] = args.lr
+            remaining_steps = steps_per_epoch * (args.epochs - start_epoch + 1)
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=max(remaining_steps, 1), eta_min=1e-6)
+        elif "scheduler" in ckpt and not skipped:
+            scheduler.load_state_dict(ckpt["scheduler"])
+        else:
+            print(f"  Rebuilding scheduler from epoch {start_epoch}")
+            for pg in optimizer.param_groups:
+                pg["lr"] = args.lr
+            remaining_steps = steps_per_epoch * (args.epochs - start_epoch + 1)
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=max(remaining_steps, 1), eta_min=1e-6)
+
+        print(f"  Resumed at epoch {start_epoch}, lr={optimizer.param_groups[0]['lr']:.2e}")
 
     # --- Train ---
     ce_loss_fn = nn.CrossEntropyLoss()
