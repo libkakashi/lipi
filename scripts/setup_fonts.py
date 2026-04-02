@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download fonts for all 18 scripts. Fast, parallel, reliable."""
+"""Download fonts for all 26 scripts. Fast, parallel, reliable."""
 
 import os
 import sys
@@ -113,6 +113,40 @@ FONTS = {
     (f"{NOTO}/NotoSansLao/full/ttf/NotoSansLao-Bold.ttf", "NotoSansLao-Bold.ttf"),
     (f"{NOTO}/NotoSerifLao/full/ttf/NotoSerifLao-Regular.ttf", "NotoSerifLao-Regular.ttf"),
     (f"{GFONTS}/phetsarathot/PhetsarathOT-Regular.ttf", "PhetsarathOT-Regular.ttf"),
+    # Odia
+    (f"{NOTO}/NotoSansOriya/full/ttf/NotoSansOriya-Regular.ttf", "NotoSansOriya-Regular.ttf"),
+    (f"{NOTO}/NotoSansOriya/full/ttf/NotoSansOriya-Bold.ttf", "NotoSansOriya-Bold.ttf"),
+    # Sinhala
+    (f"{NOTO}/NotoSansSinhala/full/ttf/NotoSansSinhala-Regular.ttf", "NotoSansSinhala-Regular.ttf"),
+    (f"{NOTO}/NotoSansSinhala/full/ttf/NotoSansSinhala-Bold.ttf", "NotoSansSinhala-Bold.ttf"),
+    (f"{NOTO}/NotoSerifSinhala/full/ttf/NotoSerifSinhala-Regular.ttf", "NotoSerifSinhala-Regular.ttf"),
+    # Burmese / Myanmar
+    (f"{NOTO}/NotoSansMyanmar/full/ttf/NotoSansMyanmar-Regular.ttf", "NotoSansMyanmar-Regular.ttf"),
+    (f"{NOTO}/NotoSansMyanmar/full/ttf/NotoSansMyanmar-Bold.ttf", "NotoSansMyanmar-Bold.ttf"),
+    (f"{NOTO}/NotoSerifMyanmar/full/ttf/NotoSerifMyanmar-Regular.ttf", "NotoSerifMyanmar-Regular.ttf"),
+    (f"{GFONTS}/padauk/Padauk-Regular.ttf", "Padauk-Regular.ttf"),
+    (f"{GFONTS}/padauk/Padauk-Bold.ttf", "Padauk-Bold.ttf"),
+    # Khmer
+    (f"{NOTO}/NotoSansKhmer/full/ttf/NotoSansKhmer-Regular.ttf", "NotoSansKhmer-Regular.ttf"),
+    (f"{NOTO}/NotoSansKhmer/full/ttf/NotoSansKhmer-Bold.ttf", "NotoSansKhmer-Bold.ttf"),
+    (f"{NOTO}/NotoSerifKhmer/full/ttf/NotoSerifKhmer-Regular.ttf", "NotoSerifKhmer-Regular.ttf"),
+    (f"{GFONTS}/battambang/Battambang-Regular.ttf", "Battambang-Regular.ttf"),
+    # Armenian
+    (f"{NOTO}/NotoSansArmenian/full/ttf/NotoSansArmenian-Regular.ttf", "NotoSansArmenian-Regular.ttf"),
+    (f"{NOTO}/NotoSansArmenian/full/ttf/NotoSansArmenian-Bold.ttf", "NotoSansArmenian-Bold.ttf"),
+    (f"{NOTO}/NotoSerifArmenian/full/ttf/NotoSerifArmenian-Regular.ttf", "NotoSerifArmenian-Regular.ttf"),
+    # Georgian
+    (f"{NOTO}/NotoSansGeorgian/full/ttf/NotoSansGeorgian-Regular.ttf", "NotoSansGeorgian-Regular.ttf"),
+    (f"{NOTO}/NotoSansGeorgian/full/ttf/NotoSansGeorgian-Bold.ttf", "NotoSansGeorgian-Bold.ttf"),
+    (f"{NOTO}/NotoSerifGeorgian/full/ttf/NotoSerifGeorgian-Regular.ttf", "NotoSerifGeorgian-Regular.ttf"),
+    # Ethiopic / Amharic
+    (f"{NOTO}/NotoSansEthiopic/full/ttf/NotoSansEthiopic-Regular.ttf", "NotoSansEthiopic-Regular.ttf"),
+    (f"{NOTO}/NotoSansEthiopic/full/ttf/NotoSansEthiopic-Bold.ttf", "NotoSansEthiopic-Bold.ttf"),
+    (f"{NOTO}/NotoSerifEthiopic/full/ttf/NotoSerifEthiopic-Regular.ttf", "NotoSerifEthiopic-Regular.ttf"),
+    # Tibetan
+    (f"{NOTO}/NotoSansTibetan/full/ttf/NotoSansTibetan-Regular.ttf", "NotoSansTibetan-Regular.ttf"),
+    (f"{NOTO}/NotoSansTibetan/full/ttf/NotoSansTibetan-Bold.ttf", "NotoSansTibetan-Bold.ttf"),
+    (f"{NOTO}/NotoSerifTibetan/full/ttf/NotoSerifTibetan-Regular.ttf", "NotoSerifTibetan-Regular.ttf"),
     # Handwriting / Display (Latin)
     (f"{GFONTS}/caveat/Caveat%5Bwght%5D.ttf", "Caveat[wght].ttf"),
     (f"{GFONTS}/dancingscript/DancingScript%5Bwght%5D.ttf", "DancingScript[wght].ttf"),
