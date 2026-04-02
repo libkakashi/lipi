@@ -144,15 +144,21 @@ GROUP_SCRIPTS = {
 
 
 class LIDCoarse(nn.Module):
-    """LID-1: Coarse group classifier with mean pooling.
+    """LID-1: Coarse group classifier with learned attention pooling.
 
-    Mean pooling gives a stable representation from step 1, avoiding the
-    chicken-and-egg problem of learned attention pooling (random attention
-    → noisy features → classifier can't learn → attention can't improve).
+    Learns which token positions are most informative for script
+    identification. A single distinctive character (like Ж or ψ)
+    can dominate the classification — concentrates gradient on
+    informative positions rather than diluting across all T positions.
     """
 
     def __init__(self, in_channels: int = 288, num_groups: int = NUM_GROUPS):
         super().__init__()
+        self.pool_attn = nn.Sequential(
+            nn.Linear(in_channels, 64),
+            nn.Tanh(),
+            nn.Linear(64, 1),
+        )
         hidden = in_channels * 2
         self.classifier = nn.Sequential(
             nn.Linear(in_channels, hidden),
@@ -164,7 +170,9 @@ class LIDCoarse(nn.Module):
 
     def forward_seq(self, x: Tensor) -> Tensor:
         """Classify from sequence features (B, T, C) — used by moe_encoder."""
-        pooled = x.mean(dim=1)                              # (B, C)
+        attn_scores = self.pool_attn(x)                    # (B, T, 1)
+        attn_weights = torch.softmax(attn_scores, dim=1)   # (B, T, 1)
+        pooled = (x * attn_weights).sum(dim=1)             # (B, C)
         return self.classifier(pooled)
 
     def forward(self, features: Tensor) -> Tensor:
