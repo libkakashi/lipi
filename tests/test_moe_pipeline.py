@@ -682,6 +682,17 @@ class TestScriptGroupDefinitions:
     def test_groups_list_matches_group_scripts_keys(self, lid_config):
         assert set(lid_config["groups"]) == set(lid_config["group_scripts"].keys())
 
+    def test_every_script_has_detect_ranges(self, lid_config):
+        """Every script in SCRIPTS must have Unicode ranges in script_detect."""
+        from src.data.script_detect import _SCRIPT_RANGES
+        for script in lid_config["scripts"]:
+            if script == "emoji":
+                continue
+            assert script in _SCRIPT_RANGES, (
+                f"{script}: missing from script_detect._SCRIPT_RANGES")
+            assert len(_SCRIPT_RANGES[script]) > 0, (
+                f"{script}: empty ranges in script_detect")
+
 
 # ---------------------------------------------------------------------------
 # 7. Decomposition Tests

@@ -54,18 +54,36 @@ def find_system_fonts() -> list[str]:
 
 def find_fonts_for_script(script: str) -> list[str]:
     """Find fonts that contain glyphs for a given script."""
+    import unicodedata
     from src.data.script_detect import _SCRIPT_RANGES
 
     if script not in _SCRIPT_RANGES:
         return []
 
-    # Get a sample codepoint from the script's range
+    # Find a valid (assigned) sample codepoint from the script's range.
+    # Can't use midpoint blindly — it might be unassigned.
     ranges = _SCRIPT_RANGES[script]
     sample_cp = None
     for start, end in ranges:
-        mid = (start + end) // 2
-        sample_cp = chr(mid)
-        break
+        for cp in range(start, end + 1):
+            ch = chr(cp)
+            cat = unicodedata.category(ch)
+            if cat != "Cn" and cat not in ("Mn", "Mc"):
+                # Prefer a base letter, not a combining mark
+                sample_cp = ch
+                break
+        if sample_cp:
+            break
+
+    if sample_cp is None:
+        # Fallback: accept combining marks too
+        for start, end in ranges:
+            for cp in range(start, end + 1):
+                if unicodedata.category(chr(cp)) != "Cn":
+                    sample_cp = chr(cp)
+                    break
+            if sample_cp:
+                break
 
     if sample_cp is None:
         return []

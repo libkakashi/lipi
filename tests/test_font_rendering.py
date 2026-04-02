@@ -79,6 +79,32 @@ class TestFontDiscovery:
                 missing.append(script)
         assert not missing, f"No fonts found for: {missing}"
 
+    def test_font_discovery_uses_valid_codepoint(self):
+        """Font discovery sample codepoint must be assigned, not Cn.
+        Previously Sinhala/Lao/Georgian/Ethiopic used unassigned midpoints."""
+        from src.data.script_detect import _SCRIPT_RANGES
+        failures = []
+        for script in SCRIPTS:
+            if script == "emoji":
+                continue
+            ranges = _SCRIPT_RANGES.get(script, [])
+            if not ranges:
+                failures.append(f"{script}: no ranges in script_detect")
+                continue
+            # Verify the first assigned codepoint the function would pick
+            found = False
+            for start, end in ranges:
+                for cp in range(start, end + 1):
+                    cat = unicodedata.category(chr(cp))
+                    if cat != "Cn":
+                        found = True
+                        break
+                if found:
+                    break
+            if not found:
+                failures.append(f"{script}: no assigned codepoints in ranges")
+        assert not failures, "\n  ".join(failures)
+
     def test_weighted_font_list_not_empty(self):
         for script in SCRIPTS:
             if script == "emoji":
