@@ -864,7 +864,7 @@ class TestRoutingMasks:
 class TestCharGeneration:
 
     def test_no_blank_in_chars(self):
-        from scripts.generate_data import _get_script_chars
+        from scripts.generate_data import get_renderable_chars as _get_script_chars
         from src.data.bigrams import BLANK_TOKEN
         from src.model.lid import SCRIPTS
         for script in SCRIPTS:
@@ -874,7 +874,7 @@ class TestCharGeneration:
             assert BLANK_TOKEN not in chars
 
     def test_no_space_in_chars(self):
-        from scripts.generate_data import _get_script_chars
+        from scripts.generate_data import get_renderable_chars as _get_script_chars
         from src.model.lid import SCRIPTS
         for script in SCRIPTS:
             if script == "emoji":
@@ -883,7 +883,7 @@ class TestCharGeneration:
             assert " " not in chars
 
     def test_chars_subset_of_vocab(self):
-        from scripts.generate_data import _get_script_chars
+        from scripts.generate_data import get_renderable_chars as _get_script_chars
         from src.data.vocab import build_script_vocab
         from src.model.lid import SCRIPTS, SCRIPT_TO_GROUP
         for script in SCRIPTS:
@@ -895,7 +895,7 @@ class TestCharGeneration:
             assert not outside
 
     def test_chars_are_printable(self):
-        from scripts.generate_data import _get_script_chars
+        from scripts.generate_data import get_renderable_chars as _get_script_chars
         from src.model.lid import SCRIPTS
         for script in SCRIPTS:
             if script == "emoji":
