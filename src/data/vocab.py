@@ -11,8 +11,10 @@ Each vocab includes:
   - For decomposed scripts: decomposition tokens instead of raw chars
 """
 
+from pathlib import Path
+
 from src.data.bigrams import BASE_CHARS, BLANK_TOKEN
-from src.data.decompose import get_vocab_tokens, DECOMPOSE_GROUPS
+from src.data.decompose import DECOMPOSE_GROUPS
 
 # Unicode ranges per script (same as script_detect.py)
 _SCRIPT_RANGES = {
@@ -51,10 +53,19 @@ _SCRIPT_RANGES = {
     "emoji": [],  # emoji uses synthetic renders, not character vocab
 }
 
-# Groups that use decomposition (vocab from decompose.py, not Unicode ranges)
-# han_kana: IDS depth-2 components + kana
-# korean: jamo + top-250 common syllables
-_DECOMPOSED_GROUPS = {"han_kana", "korean"}
+# Frozen decomposition vocabs — loaded once from pre-computed files.
+# These were generated from the IDS database + Korean jamo/syllable analysis.
+# They do NOT depend on training data.
+_FROZEN_VOCAB_DIR = Path(__file__).parent / "frozen_vocabs"
+_frozen_cache: dict[str, list[str]] = {}
+
+
+def _load_frozen_vocab(group: str) -> list[str]:
+    """Load frozen vocab tokens for a decomposed group."""
+    if group not in _frozen_cache:
+        path = _FROZEN_VOCAB_DIR / f"{group}_vocab.txt"
+        _frozen_cache[group] = path.read_text(encoding="utf-8").strip().split("\n")
+    return _frozen_cache[group]
 
 
 def _chars_from_ranges(ranges: list[tuple[int, int]]) -> list[str]:
@@ -76,9 +87,9 @@ def build_script_vocab(script: str, group: str) -> list[str]:
     """
     tokens = set(BASE_CHARS)
 
-    if group in _DECOMPOSED_GROUPS:
-        # Decomposed: vocab defined by decomposition rules
-        tokens.update(get_vocab_tokens(group))
+    if group in DECOMPOSE_GROUPS:
+        # Decomposed: vocab from frozen pre-computed files
+        tokens.update(_load_frozen_vocab(group))
     else:
         # Non-decomposed: vocab defined by Unicode ranges
         if script in _SCRIPT_RANGES:
