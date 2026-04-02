@@ -69,12 +69,15 @@ def _load_frozen_vocab(group: str) -> list[str]:
 
 
 def _chars_from_ranges(ranges: list[tuple[int, int]]) -> list[str]:
-    """Get all printable characters from Unicode ranges."""
+    """Get all assigned, printable characters from Unicode ranges."""
+    import unicodedata
     chars = []
     for start, end in ranges:
         for cp in range(start, end + 1):
             ch = chr(cp)
-            if ch.strip():  # skip whitespace/control chars
+            cat = unicodedata.category(ch)
+            # Skip unassigned (Cn), control (Cc), and whitespace
+            if cat != 'Cn' and not cat.startswith('C') and ch.strip():
                 chars.append(ch)
     return chars
 
