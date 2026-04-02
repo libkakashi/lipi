@@ -413,13 +413,14 @@ class TestPerScriptRendering:
 
 @skip_no_fonts
 class TestCharRenderingCoverage:
-    """Test that script-specific characters can actually be rendered."""
+    """Exhaustive tests: render ALL vocab chars, not just samples."""
 
-    def test_script_chars_renderable(self):
-        """For each script, >80% of vocab chars should be renderable by at least one font."""
+    def test_every_script_char_has_cmap_font(self):
+        """Every renderable char in every script must have at least one font
+        with a cmap entry. Chars with zero fonts = guaranteed tofu in training."""
         from scripts.generate_data import get_renderable_chars
 
-        low_coverage = []
+        failures = []
         for script in SCRIPTS:
             if script == "emoji":
                 continue
@@ -429,40 +430,162 @@ class TestCharRenderingCoverage:
                 continue
 
             chars = get_renderable_chars(script)
-            if not chars:
+            no_font = []
+            for ch in chars:
+                has_any = False
+                for font in fonts[:20]:  # check up to 20 fonts
+                    if font_has_codepoint(font, ch):
+                        has_any = True
+                        break
+                if not has_any:
+                    no_font.append(f"U+{ord(ch):04X}")
+
+            if no_font:
+                pct = len(no_font) / len(chars) * 100
+                failures.append(
+                    f"{script}: {len(no_font)}/{len(chars)} chars ({pct:.1f}%) "
+                    f"have no font: {no_font[:5]}")
+
+        assert not failures, (
+            "Chars with zero cmap-supporting fonts:\n  " + "\n  ".join(failures))
+
+    def test_render_all_vocab_chars_have_ink(self):
+        """Actually render every vocab char for every script and verify ink.
+        This catches fonts that have cmap entries but render blank/invisible."""
+        from scripts.generate_data import get_renderable_chars
+
+        failures = []
+        for script in SCRIPTS:
+            if script == "emoji":
                 continue
 
-            # Check cmap coverage
-            renderable = 0
-            for ch in chars[:50]:  # sample 50 chars
-                for font in fonts[:10]:  # check up to 10 fonts
-                    if font_has_codepoint(font, ch):
-                        renderable += 1
-                        break
-
-            sampled = min(len(chars), 50)
-            coverage = renderable / sampled if sampled > 0 else 0
-            if coverage < 0.8:
-                low_coverage.append(f"{script}: {coverage:.0%} ({renderable}/{sampled})")
-
-        assert not low_coverage, (
-            f"Scripts with <80% char coverage: {low_coverage}")
-
-    def test_no_tofu_for_cmap_passed_chars(self):
-        """If cmap says a char is supported, the render should have ink."""
-        for script in ["latin", "devanagari", "arabic"]:
             fonts = find_fonts_for_script(script)
             if not fonts:
                 continue
 
-            chars = _get_sample_chars(script, 5)
-            font = fonts[0]
+            chars = get_renderable_chars(script)
+            blank_chars = []
+            tested = 0
 
             for ch in chars:
-                if not font_has_codepoint(font, ch):
+                # Find a font that claims to support this char
+                font = None
+                for f in fonts[:20]:
+                    if font_has_codepoint(f, ch):
+                        font = f
+                        break
+                if font is None:
                     continue
+
                 img = render_word(ch, font, height=32)
-                if img is not None:
-                    assert image_has_ink(img), (
-                        f"{script}: font claims to support U+{ord(ch):04X} "
-                        f"but render has no ink")
+                tested += 1
+                if img is None or not image_has_ink(img):
+                    blank_chars.append(f"U+{ord(ch):04X}")
+
+            if blank_chars:
+                pct = len(blank_chars) / max(tested, 1) * 100
+                failures.append(
+                    f"{script}: {len(blank_chars)}/{tested} chars ({pct:.1f}%) "
+                    f"render blank: {blank_chars[:5]}")
+
+        # Allow up to 5% blank (some combining chars legitimately have no visible ink alone)
+        real_failures = []
+        for f in failures:
+            pct = float(f.split("(")[1].split("%")[0])
+            if pct > 5.0:
+                real_failures.append(f)
+
+        assert not real_failures, (
+            "Scripts with >5% blank renders:\n  " + "\n  ".join(real_failures))
+
+    def test_render_sample_words_every_script(self):
+        """Render 20 words per script and verify all have ink."""
+        failures = []
+        for script in SCRIPTS:
+            if script == "emoji":
+                continue
+
+            fonts = find_fonts_for_script(script)
+            words = _get_sample_words(script, 20)
+            if not fonts or not words:
+                continue
+
+            weighted = build_weighted_font_list(fonts, words[0])
+            if not weighted:
+                continue
+
+            blank = 0
+            for word in words:
+                font = weighted[len(word) % len(weighted)]  # deterministic pick
+                img = render_word(word, font, height=32)
+                if img is None or not image_has_ink(img):
+                    blank += 1
+
+            if blank > 0:
+                failures.append(f"{script}: {blank}/{len(words)} words render blank")
+
+        assert not failures, (
+            "Scripts with blank word renders:\n  " + "\n  ".join(failures))
+
+    def test_combining_chars_render_with_base(self):
+        """Combining/dependent characters should render with their base character.
+        E.g., Devanagari vowel signs need a consonant to display properly."""
+        import unicodedata
+
+        for script in ["devanagari", "bengali", "tamil", "arabic"]:
+            fonts = find_fonts_for_script(script)
+            if not fonts:
+                continue
+
+            words = _get_sample_words(script, 10)
+            if not words:
+                continue
+
+            weighted = build_weighted_font_list(fonts, words[0])
+            if not weighted:
+                continue
+
+            # Render actual words (which naturally contain combining chars)
+            rendered = 0
+            for word in words[:5]:
+                img = render_word(word, weighted[0], height=32)
+                if img is not None and image_has_ink(img):
+                    rendered += 1
+
+            assert rendered >= 3, (
+                f"{script}: only {rendered}/5 words with combining chars rendered")
+
+    def test_no_tofu_for_cmap_passed_chars_all_scripts(self):
+        """For EVERY script: if cmap says a char is supported, render must have ink."""
+        failures = []
+        for script in SCRIPTS:
+            if script == "emoji":
+                continue
+
+            fonts = find_fonts_for_script(script)
+            if not fonts:
+                continue
+
+            chars = _get_sample_chars(script, 20)
+            tofu = 0
+            tested = 0
+
+            for ch in chars:
+                font = None
+                for f in fonts[:10]:
+                    if font_has_codepoint(f, ch):
+                        font = f
+                        break
+                if font is None:
+                    continue
+
+                tested += 1
+                img = render_word(ch, font, height=32)
+                if img is not None and not image_has_ink(img):
+                    tofu += 1
+
+            if tofu > 0:
+                failures.append(f"{script}: {tofu}/{tested} cmap-passed chars have no ink")
+
+        assert not failures, (
+            "Cmap-passed but blank renders:\n  " + "\n  ".join(failures))
