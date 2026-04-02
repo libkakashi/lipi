@@ -29,6 +29,7 @@ from src.training.moe_data import (
 )
 from src.training.moe_losses import compute_lid1_loss, compute_lid2_loss, compute_ctc_loss
 from src.training.routing import get_predicted_script_ids, build_routing_masks
+from src.training.cpu_offload import CPUOffloadOptimizer
 from src.training.moe_eval import evaluate
 
 
@@ -166,6 +167,8 @@ def main():
     parser.add_argument("--head-hidden", type=int, default=384)
     parser.add_argument("--no-compile", action="store_true")
     parser.add_argument("--lid1-weight", type=float, default=1.0)
+    parser.add_argument("--cpu-offload", action="store_true",
+                        help="Offload optimizer states to CPU (frees ~5-7GB VRAM)")
     args = parser.parse_args()
 
     # Device
@@ -269,6 +272,9 @@ def main():
 
     # --- Optimizer + Scheduler ---
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
+    if args.cpu_offload and device_type == "cuda":
+        optimizer = CPUOffloadOptimizer(optimizer)
+        print("Optimizer states offloaded to CPU (~5-7GB VRAM freed)")
 
     use_amp = device_type in ("cuda", "mps")
     if device_type == "cuda":
