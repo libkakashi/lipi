@@ -9,8 +9,9 @@ import torch
 from torch.utils.data import Dataset
 
 from src.model.lid import SCRIPTS, SCRIPT_TO_GROUP, SCRIPT_TO_ID, GROUP_TO_ID
-from src.data.bigrams import LipiTokenizer, BASE_CHARS, BLANK_TOKEN
-from src.data.decompose import decompose_text, get_vocab_tokens, DECOMPOSE_GROUPS
+from src.data.bigrams import LipiTokenizer, BLANK_TOKEN
+from src.data.decompose import decompose_text, DECOMPOSE_GROUPS
+from src.data.vocab import get_all_script_vocabs
 
 
 def load_shards(shard_dir: Path):
@@ -36,70 +37,39 @@ def load_shards(shard_dir: Path):
     return images, all_labels, script_ids, group_ids, meta
 
 
-def build_tokenizer(words: list[str]) -> LipiTokenizer:
-    """Build vocab from training words."""
-    chars = set(BASE_CHARS)
-    for word in words:
-        for ch in word:
-            chars.add(ch)
-    vocab = [BLANK_TOKEN] + sorted(chars)
-    return LipiTokenizer(vocab=vocab, bigrams=set())
-
-
 def build_script_tokenizers(
-    labels: list[str], script_ids: torch.Tensor,
-    active_scripts: list[str], active_groups: list[str],
-    global_to_local_group: dict[int, int],
+    active_scripts: list[str],
+    active_groups: list[str],
 ) -> tuple[list[list[LipiTokenizer]], list[list[int]], list[list[str]]]:
-    """Build per-script tokenizers organized by group.
+    """Build per-script tokenizers with fixed vocabs (not data-dependent).
+
+    Vocabs are defined by Unicode ranges and decomposition rules.
+    This prevents dirty word lists from inflating vocab sizes.
 
     Returns:
         group_tokenizers[g][s]: tokenizer for script s in group g
         group_script_vocab_sizes[g][s]: vocab size
         group_script_names[g][s]: script name
     """
-    # Collect words per script
-    script_words: dict[str, list[str]] = {s: [] for s in active_scripts}
-    active_set = set(active_scripts)
-    for label, sid in zip(labels, script_ids.tolist()):
-        script = SCRIPTS[sid] if sid < len(SCRIPTS) else None
-        if script and script in active_set:
-            script_words[script].append(label)
+    print("  Building fixed vocabs from Unicode ranges + decomposition rules...")
+    group_vocabs, group_vocab_sizes = get_all_script_vocabs(active_scripts, active_groups)
 
     group_tokenizers = []
-    group_script_vocab_sizes = []
     group_script_names = []
 
     for g, group_name in enumerate(active_groups):
         scripts_in_group = [s for s in active_scripts
                             if SCRIPT_TO_GROUP.get(s) == group_name]
         tokenizers = []
-        vocab_sizes = []
-
-        for script in scripts_in_group:
-            words = script_words.get(script, [])
-            if group_name in DECOMPOSE_GROUPS:
-                vocab_tokens = get_vocab_tokens(group_name)
-                all_tokens = set(BASE_CHARS) | set(vocab_tokens)
-                for word in words:
-                    for ch in decompose_text(word, group_name):
-                        all_tokens.add(ch)
-                vocab = [BLANK_TOKEN] + sorted(all_tokens)
-                tok = LipiTokenizer(vocab=vocab, bigrams=set())
-                tag = "decomposed"
-            else:
-                tok = build_tokenizer(words)
-                tag = "chars"
+        for s, script in enumerate(scripts_in_group):
+            vocab = group_vocabs[g][s]
+            tok = LipiTokenizer(vocab=vocab, bigrams=set())
             tokenizers.append(tok)
-            vocab_sizes.append(tok.vocab_size)
-            print(f"    Group {g} ({group_name}) / {script}: "
-                  f"{tok.vocab_size} {tag}, {len(words)} words")
 
         group_tokenizers.append(tokenizers)
-        group_script_vocab_sizes.append(vocab_sizes)
         group_script_names.append(scripts_in_group)
 
-    return group_tokenizers, group_script_vocab_sizes, group_script_names
+    return group_tokenizers, group_vocab_sizes, group_script_names
 
 
 def encode_labels(

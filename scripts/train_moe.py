@@ -203,10 +203,10 @@ def main():
     group_ids, local_script_ids, global_to_local_group = remap_ids(
         active_scripts, active_groups, script_ids_global, group_ids_global)
 
-    # Tokenizers
+    # Tokenizers (fixed vocabs from Unicode ranges, not data-dependent)
     print("\nBuilding per-script tokenizers...")
     group_tokenizers, group_script_vocab_sizes, group_script_names = build_script_tokenizers(
-        labels, script_ids_global, active_scripts, active_groups, global_to_local_group)
+        active_scripts, active_groups)
     print(f"  Per-script vocab sizes: {group_script_vocab_sizes}")
 
     # Encode labels
