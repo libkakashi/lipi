@@ -143,15 +143,22 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
     lid2_acc = 100 * lid2_correct / max(lid2_total, 1)
     ctc_acc = 100 * ctc_correct / max(ctc_total, 1)
     char_acc = 100 * correct_chars / max(total_chars, 1)
-    print(f"  LID-1: {lid1_acc:.1f}%  |  LID-2: {lid2_acc:.1f}%  |  "
-          f"Word: {ctc_acc:.1f}%  |  Char: {char_acc:.1f}%")
-    print(f"  Per group/script:")
+
+    print(f"\n  ┌──────────────────────────────────────────────┐")
+    print(f"  │  LID-1: {lid1_acc:5.1f}%   LID-2: {lid2_acc:5.1f}%              │")
+    print(f"  │  Word:  {ctc_acc:5.1f}%   Char:  {char_acc:5.1f}%              │")
+    print(f"  └──────────────────────────────────────────────┘")
+
+    print(f"\n  {'Group / Script':<20s} {'LID1':>6s} {'Word':>6s} {'Char':>6s} {'LID2':>6s}")
+    print(f"  {'─' * 50}")
+
     for g in range(n_groups):
         lid_g = 100 * g_lid_correct[g] / max(g_lid_total[g], 1)
         word_g = 100 * g_word_correct[g] / max(g_word_total[g], 1)
         char_g = 100 * g_char_correct[g] / max(g_char_total[g], 1)
         name = active_groups[g] if g < len(active_groups) else f"group{g}"
-        print(f"    {name:18s} LID1:{lid_g:5.1f}%  Word:{word_g:5.1f}%  Char:{char_g:5.1f}%")
+        print(f"  {name:<20s} {lid_g:5.1f}% {word_g:5.1f}% {char_g:5.1f}%")
+
         scripts = group_script_names[g] if g < len(group_script_names) else []
         for ls, sname in enumerate(scripts):
             key = (g, ls)
@@ -163,8 +170,10 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
             lid2_str = ""
             if key in s_lid2_total:
                 lid2_s = 100 * s_lid2_correct.get(key, 0) / max(s_lid2_total[key], 1)
-                lid2_str = f"  LID2:{lid2_s:5.1f}%"
-            print(f"      {sname:16s} Word:{word_s:5.1f}%  Char:{char_s:5.1f}%{lid2_str}")
+                lid2_str = f"{lid2_s:5.1f}%"
+            print(f"    {sname:<18s} {'':>6s} {word_s:5.1f}% {char_s:5.1f}% {lid2_str}")
+
+    print(f"  {'─' * 50}")
 
     return {"lid1_acc": lid1_acc, "lid2_acc": lid2_acc,
             "word_acc": ctc_acc, "char_acc": char_acc}
