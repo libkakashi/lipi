@@ -322,6 +322,80 @@ class TestWordLists:
             for w in words:
                 assert "\t" not in w, f"{script}: tab in word {repr(w[:10])}"
 
+    def test_no_duplicate_words_per_file(self):
+        """No individual word list file should have significant duplicates.
+        (Cross-file duplicates are expected for multi-language scripts like Latin.)"""
+        from src.data.word_lists import WORD_LIST_DIR
+        failures = []
+        for f in WORD_LIST_DIR.glob("*.txt"):
+            words = [l.strip() for l in f.read_text(
+                encoding="utf-8", errors="ignore").splitlines() if l.strip()]
+            unique = len(set(words))
+            dupes = len(words) - unique
+            pct = dupes / max(len(words), 1) * 100
+            if pct > 5:
+                failures.append(f"{f.name}: {dupes}/{len(words)} ({pct:.1f}%) duplicates")
+        assert not failures, (
+            "Files with >5% duplicates:\n  " + "\n  ".join(failures))
+
+    def test_words_have_script_chars(self, script_word_lists):
+        """Every word must have at least one script-specific character.
+        Words of only digits/punctuation are useless for training."""
+        from src.data.script_detect import _SCRIPT_RANGES
+
+        skip = {"emoji"}
+        failures = []
+        for script, words in script_word_lists.items():
+            if script in skip:
+                continue
+            ranges = _SCRIPT_RANGES.get(script, [])
+            if not ranges:
+                continue
+
+            no_script_char = 0
+            for w in words:
+                has_script = any(
+                    any(s <= ord(ch) <= e for s, e in ranges)
+                    for ch in w
+                )
+                if not has_script:
+                    no_script_char += 1
+
+            if no_script_char > 0:
+                failures.append(
+                    f"{script}: {no_script_char} words with no script-specific chars")
+
+        assert not failures, (
+            "Words with only shared chars:\n  " + "\n  ".join(failures))
+
+    def test_script_detect_agrees_with_label(self, script_word_lists):
+        """detect_script(word) should return the same script the word list claims."""
+        from src.data.script_detect import detect_script
+
+        skip = {"emoji", "latin"}  # Latin is the default fallback
+        failures = []
+        for script, words in script_word_lists.items():
+            if script in skip:
+                continue
+
+            mismatches = 0
+            sampled = min(len(words), 200)
+            for w in words[:sampled]:
+                detected = detect_script(w)
+                # detect_script returns the script name, which should match
+                # OR be in the same group (e.g., odia detected as bengali is wrong,
+                # but han_kana detecting as han_kana is right)
+                if detected != script:
+                    mismatches += 1
+
+            pct = mismatches / sampled * 100
+            if pct > 10:
+                failures.append(
+                    f"{script}: {mismatches}/{sampled} ({pct:.0f}%) detected as wrong script")
+
+        assert not failures, (
+            "Script detection mismatches:\n  " + "\n  ".join(failures))
+
     def test_no_mixed_script_words(self, script_word_lists):
         """Every word must contain only its own script's chars + shared (digits, punct).
         No mixing Latin letters into Devanagari words, etc."""
@@ -493,6 +567,32 @@ class TestTokenizers:
                     decoded = reconstruct_text(decoded, group)
                 assert decoded == w, (
                     f"{script}: {repr(w)} -> {ids[:5]}... -> {repr(decoded)}")
+
+    def test_full_decomposition_roundtrip(self, all_tokenizers, script_word_lists):
+        """Test ALL words (not just 100) for decomposed scripts.
+        han_kana and korean have special decomposition that must roundtrip."""
+        from src.data.decompose import decompose_text, reconstruct_text, DECOMPOSE_GROUPS
+        from src.model.lid import SCRIPT_TO_GROUP
+
+        for script, tok in all_tokenizers.items():
+            group = SCRIPT_TO_GROUP[script]
+            if group not in DECOMPOSE_GROUPS:
+                continue
+            words = script_word_lists.get(script, [])
+            failures = 0
+            total = len(words)
+            for w in words:
+                text = decompose_text(w, group)
+                ids = tok.encode(text)
+                decoded = tok.decode(ids)
+                decoded = reconstruct_text(decoded, group)
+                if decoded != w:
+                    failures += 1
+
+            pct = failures / max(total, 1) * 100
+            assert pct < 1, (
+                f"{script}: {failures}/{total} ({pct:.1f}%) decomposition "
+                f"roundtrip failures (must be <1%)")
 
     def test_vocab_size_matches(self, all_tokenizers, all_vocabs):
         for script in all_tokenizers:
