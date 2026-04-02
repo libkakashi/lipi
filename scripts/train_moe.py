@@ -263,6 +263,12 @@ def main():
         head_hidden=args.head_hidden,
     ).to(device)
 
+    # Cast to bf16 — halves param + gradient memory (~5 GB saved).
+    # Autocast alone only casts computations; params stay fp32 by default.
+    if device_type == "cuda" and torch.cuda.is_bf16_supported():
+        model = model.to(torch.bfloat16)
+        print("Model cast to bf16")
+
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Model: {total_params / 1e6:.1f}M params ({n_groups} groups)")
 
