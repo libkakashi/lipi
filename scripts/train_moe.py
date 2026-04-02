@@ -93,7 +93,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             scaler.unscale_(base_optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=25.0)
             old_scale = scaler.get_scale()
-            optimizer.step()
+            scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
             if scaler.get_scale() >= old_scale:
