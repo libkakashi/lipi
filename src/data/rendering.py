@@ -94,6 +94,22 @@ def resize_or_pad(img: Image.Image, height: int, max_width: int) -> Image.Image:
 # Word rendering
 # ---------------------------------------------------------------------------
 
+def font_covers_text(font_path: str, text: str) -> bool:
+    """Check that a font has cmap entries for ALL characters in text.
+
+    Prevents partial renders where some chars display and others show tofu.
+    Skips shared chars (digits, punctuation, space) since all fonts have those.
+    """
+    for ch in text:
+        cp = ord(ch)
+        # Skip ASCII shared chars — every font has these
+        if 0x0020 <= cp <= 0x007E:
+            continue
+        if not font_has_codepoint(font_path, ch):
+            return False
+    return True
+
+
 def render_word(text: str, font_path: str, height: int = 32) -> Image.Image | None:
     """Render a word with random ink and paper colors."""
     for _ in range(5):

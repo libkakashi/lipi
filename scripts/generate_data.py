@@ -24,7 +24,7 @@ from src.data.augmentation import RandAugmentOCR
 from src.data.vocab import build_script_vocab
 from src.data.rendering import (
     render_word, render_emoji, image_has_ink,
-    resize_or_pad, filter_fonts_by_cmap,
+    resize_or_pad, filter_fonts_by_cmap, font_covers_text,
 )
 from src.data.fonts import find_fonts_for_script, build_weighted_font_list
 from src.data.word_lists import load_all_word_lists
@@ -87,7 +87,11 @@ def _generate_word_batch(args_tuple):
             label = "emoji"
         else:
             word = random.choice(words)
-            img = render_word(word, random.choice(fonts), h)
+            font = random.choice(fonts)
+            # Verify font can render ALL chars in the word (prevents partial renders)
+            if not font_covers_text(font, word):
+                continue
+            img = render_word(word, font, h)
             label = word
 
         if img is None or not image_has_ink(img):
