@@ -33,20 +33,22 @@ from src.model.lid import SCRIPTS, SCRIPT_TO_GROUP, GROUP_TO_ID, SCRIPT_TO_ID
 from src.data.color import rgb_to_input
 from src.data.augmentation import RandAugmentOCR
 from src.data.renderer import font_has_codepoint
+from src.data.vocab import build_script_vocab
 from scripts.train_lid import (
     find_fonts_for_script, font_can_render, render_word, render_emoji,
     SCRIPT_SAMPLES, load_all_script_samples,
 )
 
 
-def _get_script_chars(script: str, words: list[str]) -> list[str]:
-    """Get all unique characters from a script's word list."""
-    chars = set()
-    for word in words:
-        for ch in word:
-            if ch.strip() and ord(ch) > 32:
-                chars.add(ch)
-    return sorted(chars)
+def _get_script_chars(script: str) -> list[str]:
+    """Get renderable characters from the frozen vocab for a script.
+
+    Excludes blank token and non-printable chars (space, control chars).
+    These are the characters we generate single-char training images for.
+    """
+    group = SCRIPT_TO_GROUP[script]
+    vocab = build_script_vocab(script, group)
+    return [ch for ch in vocab if ch.strip() and ord(ch) > 32]
 
 
 def _image_has_ink(img: Image.Image, min_ink_pixels: int = 10) -> bool:
@@ -345,8 +347,7 @@ def main():
             if script == "emoji":
                 continue
             fonts = script_fonts[script]
-            words = SCRIPT_SAMPLES.get(script, [])
-            chars = _get_script_chars(script, words)
+            chars = _get_script_chars(script)
             if not chars:
                 continue
 
