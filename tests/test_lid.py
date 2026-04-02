@@ -1,11 +1,11 @@
 """
-Tests for hierarchical LID (LIDCoarse + LIDFine).
+Tests for LIDCoarse.
 """
 
 import pytest
 import torch
 
-from src.model.lid import LIDCoarse, LIDFine, SCRIPTS, GROUPS, NUM_SCRIPTS, NUM_GROUPS
+from src.model.lid import LIDCoarse, SCRIPTS, GROUPS, NUM_SCRIPTS, NUM_GROUPS
 
 
 class TestLIDCoarse:
@@ -33,33 +33,3 @@ class TestLIDCoarse:
     def test_num_groups(self):
         assert NUM_GROUPS == 10
         assert len(GROUPS) == 10
-
-
-class TestLIDFine:
-
-    def test_output_shape(self):
-        lid = LIDFine(in_dim=288, num_scripts=NUM_SCRIPTS)
-        x = torch.randn(4, 128, 288)  # (B, H*W, C)
-        logits = lid(x)
-        assert logits.shape == (4, NUM_SCRIPTS)
-
-    def test_predict(self):
-        lid = LIDFine(in_dim=192)
-        x = torch.randn(2, 64, 192)
-        script_ids, confidences = lid.predict(x)
-        assert script_ids.shape == (2,)
-        assert confidences.shape == (2,)
-
-    def test_num_scripts(self):
-        assert NUM_SCRIPTS == len(SCRIPTS)
-
-    def test_gradient_flow(self):
-        lid = LIDFine(in_dim=192)
-        lid.train()
-        x = torch.randn(2, 64, 192)
-        logits = lid(x)
-        loss = logits.sum()
-        loss.backward()
-        for name, param in lid.named_parameters():
-            if param.requires_grad:
-                assert param.grad is not None, f"No gradient for {name}"

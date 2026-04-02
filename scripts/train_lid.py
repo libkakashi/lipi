@@ -37,10 +37,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.model.stem import ConvNeXtStem, ResNetStem
 from src.model.lid import (
-    LIDCoarse, LIDFine,
+    LIDCoarse,
     SCRIPTS, SCRIPT_TO_ID, NUM_SCRIPTS,
     GROUPS, GROUP_TO_ID, NUM_GROUPS,
-    SCRIPT_TO_GROUP, GROUP_SCRIPTS, script_to_group_id,
+    SCRIPT_TO_GROUP, GROUP_SCRIPTS,
 )
 from src.data.color import rgb_to_input, INPUT_CHANNELS, ColorProjection
 from src.data.augmentation import RandAugmentOCR

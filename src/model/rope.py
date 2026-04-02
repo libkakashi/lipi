@@ -1,8 +1,7 @@
 """
-RoPE (Rotary Position Embedding) for 2D and 1D sequences.
+RoPE (Rotary Position Embedding) for 2D sequences.
 
-RoPE-2D: Applied in Stage 1 and Stage 2 where spatial height > 1.
-RoPE-1D: Applied in Stage 3 after height collapse to a 1D sequence.
+RoPE-2D: Applied where spatial height > 1.
 
 All ops are standard PyTorch (no custom CUDA) for clean ONNX export.
 Frequency tables are computed inline (no dict caching) to avoid
@@ -101,29 +100,6 @@ class RoPE2D(nn.Module):
         Returns: same shape as x, with rotary embeddings applied.
         """
         freqs = build_freqs_2d(h, w, self.dim, self.theta).to(
-            device=x.device, dtype=x.dtype
-        )
-        return apply_rope(x, freqs)
-
-
-class RoPE1D(nn.Module):
-    """Rotary Position Embedding for 1D sequences (after height collapse)."""
-
-    def __init__(self, dim: int, theta: float = 10000.0):
-        super().__init__()
-        self.dim = dim
-        self.theta = theta
-
-    def forward(self, x: Tensor, seq_len: int) -> Tensor:
-        """Apply 1D RoPE.
-
-        Args:
-            x: (B, num_heads, seq_len, head_dim) or (B, seq_len, dim)
-            seq_len: length of the sequence.
-
-        Returns: same shape as x, with rotary embeddings applied.
-        """
-        freqs = build_freqs_1d(seq_len, self.dim, self.theta).to(
             device=x.device, dtype=x.dtype
         )
         return apply_rope(x, freqs)

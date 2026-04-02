@@ -1,15 +1,10 @@
 """
 Convolutional Stems for OCR encoder.
 
-Two variants:
-  ConvNeXtStem: lightweight (70K params) — for 12.5M backbone
-  ResNetStem: heavier with residual blocks (500K+ params) — for 50M backbone
-
-Both output stride 4×4: (B, C_in, 32, W) → (B, out_channels, 8, W/4)
+Output stride 4×4: (B, C_in, 32, W) → (B, out_channels, 8, W/4)
 Default in_channels comes from src.data.color.INPUT_CHANNELS.
 """
 
-import torch
 import torch.nn as nn
 from torch import Tensor
 

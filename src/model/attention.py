@@ -1,8 +1,8 @@
 """
 Shifted Window Attention and Global Self-Attention blocks.
 
-Stage 1 & 2 use Shifted Window Attention (SWA) with 2D RoPE.
-Stage 3 uses Global Self-Attention with 1D RoPE (after height collapse).
+SWA stages use Shifted Window Attention with 2D RoPE.
+MoE pipeline uses FullyExpertSWABlock (per-group attention + MLP).
 
 All ops are standard PyTorch — no custom CUDA kernels.
 Designed for clean ONNX opset 17 export.
@@ -14,7 +14,7 @@ import torch.nn.functional as F
 import torch.utils.checkpoint as ckpt_util
 from torch import Tensor
 
-from src.model.rope import RoPE2D, RoPE1D
+from src.model.rope import RoPE2D
 
 
 class ShiftedWindowAttention(nn.Module):
@@ -314,62 +314,6 @@ class SWABlock(nn.Module):
         return x
 
 
-class SWABlockMoE(nn.Module):
-    """SWA block with shared + expert MLPs.
-
-    Shared attention: spatial relationships are universal across scripts.
-    Shared MLP: universal characters (digits, punctuation, common symbols).
-    Expert MLPs: script-specific interpretation (one per group).
-
-    All three are additive residuals on the same features.
-    """
-
-    def __init__(
-        self,
-        dim: int,
-        num_heads: int,
-        num_groups: int,
-        window_h: int = 4,
-        window_w: int = 4,
-        shift: bool = False,
-        mlp_ratio: int = 3,
-    ):
-        super().__init__()
-        self.num_groups = num_groups
-        self.norm1 = nn.LayerNorm(dim)
-        self.attn = ShiftedWindowAttention(dim, num_heads, window_h, window_w, shift)
-        self.norm2 = nn.LayerNorm(dim)
-        self.shared_mlp = MLP(dim, mlp_ratio=1)  # small — just digits/punctuation
-        self.norm3 = nn.LayerNorm(dim)
-        self.expert_mlps = nn.ModuleList([MLP(dim, mlp_ratio) for _ in range(num_groups)])
-
-    def forward(self, x: Tensor, h: int, w: int, group_ids: Tensor) -> Tensor:
-        """
-        Args:
-            x: (B, h*w, C)
-            h, w: spatial dimensions.
-            group_ids: (B,) integer group ID per sample.
-
-        Returns: (B, h*w, C)
-        """
-        # Shared attention
-        x = x + self.attn(self.norm1(x), h, w)
-
-        # Shared MLP (universal characters — digits, punctuation)
-        x = x + self.shared_mlp(self.norm2(x))
-
-        # Expert MLP (script-specific interpretation)
-        normed = self.norm3(x)
-        expert_out = torch.zeros_like(x)
-        for g in range(self.num_groups):
-            mask = (group_ids == g)
-            if mask.any():
-                result = self.expert_mlps[g](normed[mask])
-                expert_out[mask] = result.to(expert_out.dtype)
-        x = x + expert_out
-        return x
-
-
 class FullyExpertSWABlock(nn.Module):
     """Fully expert SWA block — per-group attention + per-group MLP.
 
@@ -479,62 +423,5 @@ class GlobalBlock(nn.Module):
         Returns: (B, T, C)
         """
         x = x + self.attn(self.norm1(x), seq_len)
-        x = x + self.mlp(self.norm2(x))
-        return x
-
-
-class ParallelBlock(nn.Module):
-    """VIPTR-style parallel local + global attention block.
-
-    Runs SWA (local) and Global attention in parallel on the same input,
-    then merges their outputs. Each frame gets both fine-grained local
-    detail AND full-sequence context in a single block.
-
-    2x compute per block vs SWA-only, but richer features.
-    Use for 2D stages (before height collapse).
-    """
-
-    def __init__(
-        self,
-        dim: int,
-        num_heads: int,
-        window_h: int = 4,
-        window_w: int = 4,
-        shift: bool = False,
-        mlp_ratio: int = 3,
-    ):
-        super().__init__()
-        # Local branch (SWA)
-        self.norm_local = nn.LayerNorm(dim)
-        self.local_attn = ShiftedWindowAttention(dim, num_heads, window_h, window_w, shift)
-
-        # Global branch
-        self.norm_global = nn.LayerNorm(dim)
-        self.global_attn = GlobalAttention(dim, num_heads)
-
-        # Merge: project concatenated local+global back to dim
-        self.merge = nn.Linear(dim * 2, dim)
-
-        # Shared MLP after merge
-        self.norm2 = nn.LayerNorm(dim)
-        self.mlp = MLP(dim, mlp_ratio)
-
-    def forward(self, x: Tensor, h: int, w: int) -> Tensor:
-        """
-        Args:
-            x: (B, h*w, C)
-            h, w: spatial dimensions.
-
-        Returns: (B, h*w, C)
-        """
-        # Parallel attention
-        local_out = self.local_attn(self.norm_local(x), h, w)
-        global_out = self.global_attn(self.norm_global(x), h * w)
-
-        # Merge local + global
-        merged = torch.cat([local_out, global_out], dim=-1)  # (B, h*w, 2*C)
-        merged = self.merge(merged)  # (B, h*w, C)
-
-        x = x + merged
         x = x + self.mlp(self.norm2(x))
         return x

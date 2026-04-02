@@ -115,28 +115,16 @@ GROUP_SCRIPTS = {
 }
 
 
-def script_to_group_id(script: str) -> int:
-    """Get coarse group ID for a script."""
-    return GROUP_TO_ID[SCRIPT_TO_GROUP[script]]
-
-
 class LIDCoarse(nn.Module):
-    """LID-1: Coarse group classifier with learned attention pooling.
+    """LID-1: Coarse group classifier with mean pooling.
 
-    Instead of mean-pooling, learns which token positions are most
-    informative for script identification. A single distinctive character
-    (like Ж or ψ) can dominate the classification.
+    Mean pooling gives a stable representation from step 1, avoiding the
+    chicken-and-egg problem of learned attention pooling (random attention
+    → noisy features → classifier can't learn → attention can't improve).
     """
 
     def __init__(self, in_channels: int = 288, num_groups: int = NUM_GROUPS):
         super().__init__()
-        # Learned attention pooling: which tokens matter for classification?
-        self.pool_attn = nn.Sequential(
-            nn.Linear(in_channels, 64),
-            nn.Tanh(),
-            nn.Linear(64, 1),
-        )
-        # Classifier MLP
         hidden = in_channels * 2
         self.classifier = nn.Sequential(
             nn.Linear(in_channels, hidden),
@@ -148,9 +136,7 @@ class LIDCoarse(nn.Module):
 
     def forward_seq(self, x: Tensor) -> Tensor:
         """Classify from sequence features (B, T, C) — used by moe_encoder."""
-        attn_scores = self.pool_attn(x)                    # (B, T, 1)
-        attn_weights = torch.softmax(attn_scores, dim=1)   # (B, T, 1)
-        pooled = (x * attn_weights).sum(dim=1)             # (B, C)
+        pooled = x.mean(dim=1)                              # (B, C)
         return self.classifier(pooled)
 
     def forward(self, features: Tensor) -> Tensor:
@@ -165,42 +151,5 @@ class LIDCoarse(nn.Module):
         probs = torch.softmax(logits, dim=-1)
         confidences, group_ids = probs.max(dim=-1)
         return group_ids, confidences
-
-
-class LIDFine(nn.Module):
-    """LID-2: Fine script classifier on Stage 1 features.
-
-    Global average pool + MLP. Distinguishes scripts within groups
-    (e.g., Tamil vs Malayalam, Devanagari vs Bengali).
-
-    MLP needed because Stage 1 output carries rich visual features —
-    script identity is one signal among many. Hidden layer disentangles it.
-    """
-
-    def __init__(self, in_dim: int = 288, num_scripts: int = NUM_SCRIPTS):
-        super().__init__()
-        hidden = max(64, in_dim // 3)
-        self.classifier = nn.Sequential(
-            nn.Linear(in_dim, hidden),
-            nn.ReLU(),
-            nn.Linear(hidden, num_scripts),
-        )
-
-    def forward(self, stage1_features: Tensor) -> Tensor:
-        """
-        Args:
-            stage1_features: (B, H*W, C) from Stage 1 output.
-        Returns:
-            logits: (B, num_scripts)
-        """
-        pooled = stage1_features.mean(dim=1)  # (B, C)
-        return self.classifier(pooled)
-
-    def predict(self, stage1_features: Tensor) -> tuple[Tensor, Tensor]:
-        """Predict script with confidence."""
-        logits = self.forward(stage1_features)
-        probs = torch.softmax(logits, dim=-1)
-        confidences, script_ids = probs.max(dim=-1)
-        return script_ids, confidences
 
 

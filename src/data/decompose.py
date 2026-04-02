@@ -56,11 +56,6 @@ _COMMON_HANGUL_250 = (
 _common_hangul: set[str] = set(_COMMON_HANGUL_250)
 
 
-def _load_common_hangul():
-    """No-op. Common syllables are now a frozen constant."""
-    pass
-
-
 def _is_hangul(ch: str) -> bool:
     return _HANGUL_BASE <= ord(ch) <= _HANGUL_END
 
@@ -82,7 +77,6 @@ def decompose_hangul_char(char: str) -> list[str]:
 
 def decompose_korean(text: str) -> str:
     """Decompose Korean text. Common syllables stay whole, rare → jamo."""
-    _load_common_hangul()
     parts = []
     for ch in text:
         if _is_hangul(ch) and ch not in _common_hangul:
@@ -326,7 +320,6 @@ def reconstruct_text(text: str, group: str) -> str:
 def get_vocab_tokens(group: str) -> list[str]:
     """Get the full set of output tokens for a decomposed group."""
     if group == "korean":
-        _load_common_hangul()
         tokens = set(INITIALS) | set(MEDIALS) | set(f for f in FINALS if f)
         tokens |= _common_hangul or set()
         return sorted(tokens)
