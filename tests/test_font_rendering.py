@@ -132,7 +132,7 @@ class TestWordRendering:
 
             rendered = False
             for word in words:
-                for font in set(weighted)[:3]:
+                for font in list(set(weighted))[:3]:
                     img = render_word(word, font, height=32)
                     if img is not None and image_has_ink(img):
                         rendered = True
