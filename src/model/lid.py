@@ -169,13 +169,11 @@ class LIDCoarse(nn.Module):
             nn.Conv1d(in_channels, in_channels, kernel_size=16,
                       groups=in_channels),                     # 16 → 1
         )
-        hidden = in_channels * 2
+        hidden = in_channels // 2
         self.classifier = nn.Sequential(
             nn.Linear(in_channels, hidden),
             nn.ReLU(),
-            nn.Linear(hidden, hidden // 2),
-            nn.ReLU(),
-            nn.Linear(hidden // 2, num_groups),
+            nn.Linear(hidden, num_groups),
         )
 
     def forward_seq(self, x: Tensor) -> Tensor:
