@@ -30,23 +30,22 @@ from src.model.lid import LIDCoarse, NUM_GROUPS
 
 
 class CTCHead(nn.Module):
-    """Single BiLSTM CTC head for one script/group."""
+    """Linear CTC head for one script/group.
+
+    The encoder (32 SWA blocks) already provides rich contextual features.
+    A simple linear projection to vocab is sufficient — no BiLSTM needed.
+    Saves ~4.7M params per head and removes sequential bottleneck.
+    """
 
     def __init__(self, enc_dim: int, vocab_size: int,
                  hidden_dim: int = 384, num_layers: int = 2, dropout: float = 0.1):
         super().__init__()
         self.vocab_size = vocab_size
-        self.lstm = nn.LSTM(
-            enc_dim, hidden_dim,
-            num_layers=num_layers,
-            dropout=dropout if num_layers > 1 else 0.0,
-            bidirectional=True, batch_first=True,
-        )
-        self.proj = nn.Linear(hidden_dim * 2, vocab_size)
+        # hidden_dim, num_layers, dropout kept in signature for checkpoint compat
+        self.proj = nn.Linear(enc_dim, vocab_size)
 
     def forward(self, features: Tensor) -> Tensor:
-        out, _ = self.lstm(features)
-        return self.proj(out)
+        return self.proj(features)
 
 
 class GroupCTCModule(nn.Module):
