@@ -476,7 +476,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                     ok = lid1_ok[group_mask]
                     if ok.any():
                         pred = script_logits[ok].argmax(-1)
-                        true = sids[ok]
+                        true = sids[group_mask][ok]
                         lid2_correct += (pred == true).sum().item()
                         lid2_total += ok.sum().item()
             lid2_acc = 100 * lid2_correct / max(lid2_total, 1)
