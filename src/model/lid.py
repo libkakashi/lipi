@@ -154,14 +154,14 @@ class LIDCoarse(nn.Module):
 
     def __init__(self, in_channels: int = 288, num_groups: int = NUM_GROUPS):
         super().__init__()
-        # Stride-4 pool reduces T from ~384 to ~96 before attention.
-        # This strengthens the attention gradient 4× (softmax jacobian ∝ 1/T).
-        self.pre_pool = nn.AdaptiveAvgPool1d(96)
         self.pool_attn = nn.Sequential(
             nn.Linear(in_channels, 64),
             nn.Tanh(),
             nn.Linear(64, 1),
         )
+        # Zero-init last layer → constant attention scores → uniform weights
+        # → equivalent to mean pooling at init. Lets attention learn gradually
+        # without breaking LID-1 when resuming from a mean-pooling checkpoint.
         nn.init.zeros_(self.pool_attn[2].weight)
         nn.init.zeros_(self.pool_attn[2].bias)
         hidden = in_channels * 2
@@ -175,11 +175,9 @@ class LIDCoarse(nn.Module):
 
     def forward_seq(self, x: Tensor) -> Tensor:
         """Classify from sequence features (B, T, C) — used by moe_encoder."""
-        # Reduce sequence length for stronger attention gradient
-        x_pooled = self.pre_pool(x.permute(0, 2, 1)).permute(0, 2, 1)  # (B, 96, C)
-        attn_scores = self.pool_attn(x_pooled)              # (B, 96, 1)
-        attn_weights = torch.softmax(attn_scores, dim=1)    # (B, 96, 1)
-        pooled = (x_pooled * attn_weights).sum(dim=1)       # (B, C)
+        attn_scores = self.pool_attn(x)                    # (B, T, 1)
+        attn_weights = torch.softmax(attn_scores, dim=1)   # (B, T, 1)
+        pooled = (x * attn_weights).sum(dim=1)             # (B, C)
         return self.classifier(pooled)
 
     def forward(self, features: Tensor) -> Tensor:
