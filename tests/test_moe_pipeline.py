@@ -822,14 +822,14 @@ class TestModelConstruction:
         assert hasattr(model.lid_coarse, 'spatial_pool'), (
             "LID-1 missing spatial_pool — using mean pooling instead of learned projection")
 
-    def test_lid2_uses_attention_pooling(self, model_and_vocabs):
-        """LID-2 must use learned attention pooling."""
+    def test_lid2_uses_learned_pooling(self, model_and_vocabs):
+        """LID-2 must use learned spatial pooling."""
         model, _, _, active_groups = model_and_vocabs
         for g, group in enumerate(active_groups):
             ctc_mod = model.ctc_modules[g]
             if ctc_mod.multi_script:
                 assert ctc_mod.lid2_pool is not None, (
-                    f"Group {group}: LID-2 missing attention pooling")
+                    f"Group {group}: LID-2 missing spatial pooling")
 
     def test_all_swa_blocks_have_checkpointing(self, model_and_vocabs):
         """All SWA blocks must use gradient checkpointing during training."""

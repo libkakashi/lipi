@@ -71,12 +71,15 @@ class GroupCTCModule(nn.Module):
             for vs in script_vocab_sizes
         ])
 
-        # LID-2 with learned attention pooling (only for multi-script groups)
+        # LID-2 with learned spatial projection (only for multi-script groups)
         if self.multi_script:
+            # Conv1d reduction: T(=48) → 12 → 1. Direct gradient, no softmax.
             self.lid2_pool = nn.Sequential(
-                nn.Linear(enc_dim, 64),
-                nn.Tanh(),
-                nn.Linear(64, 1),
+                nn.Conv1d(enc_dim, enc_dim, kernel_size=4, stride=4,
+                          groups=enc_dim),                     # 48 → 12
+                nn.GELU(),
+                nn.Conv1d(enc_dim, enc_dim, kernel_size=12,
+                          groups=enc_dim),                     # 12 → 1
             )
             self.lid2_classifier = nn.Sequential(
                 nn.Linear(enc_dim, enc_dim // 4),
@@ -102,12 +105,10 @@ class GroupCTCModule(nn.Module):
         """
         N, T, C = features.shape
 
-        # LID-2 with attention pooling
+        # LID-2 with learned spatial projection
         script_logits = None
         if self.multi_script:
-            attn_scores = self.lid2_pool(features)                   # (N, T, 1)
-            attn_weights = torch.softmax(attn_scores, dim=1)        # (N, T, 1)
-            pooled = (features * attn_weights).sum(dim=1)            # (N, C)
+            pooled = self.lid2_pool(features.permute(0, 2, 1)).squeeze(-1)  # (N, C)
             script_logits = self.lid2_classifier(pooled)             # (N, n_scripts)
             if script_ids is None:
                 script_ids = script_logits.argmax(dim=-1)
