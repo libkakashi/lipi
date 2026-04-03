@@ -144,26 +144,31 @@ GROUP_SCRIPTS = {
 
 
 class LIDCoarse(nn.Module):
-    """LID-1: Coarse group classifier with learned attention pooling.
+    """LID-1: Coarse group classifier with learned spatial projection.
 
-    Learns which token positions are most informative for script
-    identification. A single distinctive character (like Ж or ψ)
-    can dominate the classification — concentrates gradient on
-    informative positions rather than diluting across all T positions.
+    Learns a direct projection from T spatial positions to 1, similar
+    to how ColorProjection reduces 2 channels to 1. No softmax
+    bottleneck — gradient flows directly through linear layers.
+
+    Operates on (B, C, T) via 1D convolutions with groups=C, so each
+    feature channel learns its own spatial weighting independently.
     """
 
-    def __init__(self, in_channels: int = 288, num_groups: int = NUM_GROUPS):
+    def __init__(self, in_channels: int = 288, num_groups: int = NUM_GROUPS,
+                 seq_len: int = 384):
         super().__init__()
-        self.pool_attn = nn.Sequential(
-            nn.Linear(in_channels, 64),
-            nn.Tanh(),
-            nn.Linear(64, 1),
+        # Learned spatial reduction: T → 64 → 16 → 1
+        # groups=in_channels: each channel learns independently
+        self.spatial_pool = nn.Sequential(
+            nn.Conv1d(in_channels, in_channels, kernel_size=6, stride=6,
+                      groups=in_channels),                     # 384 → 64
+            nn.GELU(),
+            nn.Conv1d(in_channels, in_channels, kernel_size=4, stride=4,
+                      groups=in_channels),                     # 64 → 16
+            nn.GELU(),
+            nn.Conv1d(in_channels, in_channels, kernel_size=16,
+                      groups=in_channels),                     # 16 → 1
         )
-        # Zero-init last layer → constant attention scores → uniform weights
-        # → equivalent to mean pooling at init. Lets attention learn gradually
-        # without breaking LID-1 when resuming from a mean-pooling checkpoint.
-        nn.init.zeros_(self.pool_attn[2].weight)
-        nn.init.zeros_(self.pool_attn[2].bias)
         hidden = in_channels * 2
         self.classifier = nn.Sequential(
             nn.Linear(in_channels, hidden),
@@ -175,9 +180,8 @@ class LIDCoarse(nn.Module):
 
     def forward_seq(self, x: Tensor) -> Tensor:
         """Classify from sequence features (B, T, C) — used by moe_encoder."""
-        attn_scores = self.pool_attn(x)                    # (B, T, 1)
-        attn_weights = torch.softmax(attn_scores, dim=1)   # (B, T, 1)
-        pooled = (x * attn_weights).sum(dim=1)             # (B, C)
+        x_ct = x.permute(0, 2, 1)                           # (B, C, T)
+        pooled = self.spatial_pool(x_ct).squeeze(-1)         # (B, C)
         return self.classifier(pooled)
 
     def forward(self, features: Tensor) -> Tensor:

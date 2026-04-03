@@ -816,13 +816,11 @@ class TestModelConstruction:
             out = model(x, group_ids=gids, script_ids=sids)
         assert out["logits"].shape[0] == 4
 
-    def test_lid1_uses_attention_pooling(self, model_and_vocabs):
-        """LID-1 must use learned attention pooling, NOT mean pooling.
-        Mean pooling dilutes gradient by sequence length, preventing
-        shared backbone adaptation when adding new groups."""
+    def test_lid1_uses_learned_pooling(self, model_and_vocabs):
+        """LID-1 must use learned spatial pooling, NOT mean pooling."""
         model, _, _, _ = model_and_vocabs
-        assert hasattr(model.lid_coarse, 'pool_attn'), (
-            "LID-1 missing pool_attn — using mean pooling instead of attention pooling")
+        assert hasattr(model.lid_coarse, 'spatial_pool'), (
+            "LID-1 missing spatial_pool — using mean pooling instead of learned projection")
 
     def test_lid2_uses_attention_pooling(self, model_and_vocabs):
         """LID-2 must use learned attention pooling."""
