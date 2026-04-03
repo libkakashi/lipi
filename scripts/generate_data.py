@@ -96,7 +96,12 @@ STYLES = {
 
 
 def filter_fonts_by_style(fonts: list[str], style: str) -> list[str]:
-    """Filter font list by style. Falls back to full list if no matches."""
+    """Filter font list by style. Falls back to full list if too few matches.
+
+    For non-Latin scripts, handwriting/display fonts rarely exist.
+    The augmentation pipeline handles style simulation in those cases.
+    Threshold of 5 unique fonts prevents degenerate font selection.
+    """
     font_filter = STYLES[style]["font_filter"]
     if font_filter == "all":
         return fonts
@@ -108,15 +113,21 @@ def filter_fonts_by_style(fonts: list[str], style: str) -> list[str]:
         is_display = any(k in name for k in _DISPLAY_KEYWORDS)
 
         if font_filter == "regular" and not is_handwriting and not is_display:
-            # Regular includes normal, bold, italic, serif, mono — anything
-            # that's not explicitly handwriting or decorative display
             filtered.append(f)
         elif font_filter == "handwriting" and is_handwriting:
             filtered.append(f)
         elif font_filter == "display" and is_display:
             filtered.append(f)
 
-    return filtered if filtered else fonts
+    # Fall back to regular fonts (not all) if too few style-specific fonts.
+    # For non-Latin scripts, handwriting/display fonts usually can't render
+    # the text anyway — augmentation handles the style simulation.
+    if len(set(filtered)) < 5:
+        regular = [f for f in fonts
+                   if not any(k in Path(f).name.lower() for k in _HANDWRITING_KEYWORDS | _DISPLAY_KEYWORDS)]
+        return regular if regular else fonts
+
+    return filtered
 
 
 # ---------------------------------------------------------------------------
