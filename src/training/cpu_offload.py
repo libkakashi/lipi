@@ -82,3 +82,14 @@ class CPUOffloadOptimizer:
 
     def load_state_dict(self, state_dict):
         self.optimizer.load_state_dict(state_dict)
+
+    def sync_from_gpu(self):
+        """Copy current GPU params to CPU mirrors.
+
+        Must be called after model.load_state_dict() when resuming,
+        otherwise the first optimizer.step() overwrites loaded weights
+        with stale CPU copies from init time.
+        """
+        for gpu_group, cpu_group in zip(self._gpu_params, self._cpu_params):
+            for gpu_p, cpu_p in zip(gpu_group, cpu_group):
+                cpu_p.data.copy_(gpu_p.data.float())

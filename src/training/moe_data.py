@@ -87,6 +87,8 @@ def encode_labels(
     """
     max_len = 0
     encoded = []
+    oov_chars = 0
+    oov_samples = 0
     for label, gid, lsid in zip(labels, group_ids.tolist(), local_script_ids.tolist()):
         group_name = active_groups[gid] if gid < len(active_groups) else ""
         if group_name in DECOMPOSE_GROUPS:
@@ -95,8 +97,15 @@ def encode_labels(
             label_tokens = label
         tok = group_tokenizers[gid][lsid]
         ids = tok.encode(label_tokens)
+        n_dropped = len(label_tokens) - len(ids)
+        if n_dropped > 0:
+            oov_chars += n_dropped
+            oov_samples += 1
         encoded.append(ids)
         max_len = max(max_len, len(ids))
+    if oov_chars > 0:
+        print(f"  WARNING: {oov_chars} OOV chars dropped across {oov_samples} samples "
+              f"({100*oov_samples/len(labels):.1f}% of data has corrupted labels)")
 
     if max_len == 0:
         max_len = 1

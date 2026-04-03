@@ -360,6 +360,9 @@ def main():
             print(f"  Skipping optimizer state ({reason})")
         if "scaler" in ckpt:
             scaler.load_state_dict(ckpt["scaler"])
+        # Sync GPU→CPU mirrors after model load (cpu_offload only)
+        if hasattr(optimizer, "sync_from_gpu"):
+            optimizer.sync_from_gpu()
 
         start_epoch = ckpt.get("epoch", 0) + 1
 
