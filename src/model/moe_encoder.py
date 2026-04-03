@@ -203,7 +203,7 @@ class LipiMoEEncoder(nn.Module):
         self.pool1 = LearnedHeightPooling(channels=stage1_dim, h_in=8, h_out=4)
 
         # Channel projection
-        self.proj2 = nn.Linear(stage1_dim, stage2_dim)
+        self.proj2 = nn.Linear(stage1_dim, stage2_dim) if stage1_dim != stage2_dim else nn.Identity()
 
         # Expert SWA Stage 2
         self.stage2 = nn.ModuleList([

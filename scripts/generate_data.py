@@ -88,6 +88,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--samples-per-script", type=int, default=10000)
     parser.add_argument("--scripts", type=str, default="all")
     parser.add_argument("--balance-groups", action="store_true")
+    parser.add_argument("--vocab-proportional", action="store_true",
+                        help="Scale samples per script by sqrt(vocab_size). "
+                             "Scripts with more characters get more training data.")
     parser.add_argument("--augment", dest="augment", action="store_true", default=True)
     parser.add_argument("--no-augment", dest="augment", action="store_false")
     parser.add_argument("--height", type=int, default=32)
@@ -403,15 +406,35 @@ def main():
     script_fonts, valid_scripts = discover_fonts(active_scripts, word_lists)
 
     # Build per-script targets
-    tasks = []
-    for script in valid_scripts:
-        group = SCRIPT_TO_GROUP[script]
-        if args.balance_groups:
-            scripts_in_group = [s for s in valid_scripts if SCRIPT_TO_GROUP[s] == group]
-            target = args.samples_per_script // len(scripts_in_group)
-        else:
-            target = args.samples_per_script
-        tasks.append((script, target))
+    if args.vocab_proportional:
+        import math
+        script_vocabs = {}
+        for script in valid_scripts:
+            if script == "emoji":
+                script_vocabs[script] = 10  # minimal vocab, fixed budget
+            else:
+                group = SCRIPT_TO_GROUP[script]
+                vocab = build_script_vocab(script, group)
+                script_vocabs[script] = len(vocab)
+        min_vocab = min(script_vocabs.values())
+        print(f"\nVocab-proportional scaling (base={args.samples_per_script}):")
+        tasks = []
+        for script in valid_scripts:
+            scale = math.sqrt(script_vocabs[script] / min_vocab)
+            target = int(args.samples_per_script * scale)
+            tasks.append((script, target))
+            print(f"  {script:<15s} vocab={script_vocabs[script]:>5d}  "
+                  f"scale={scale:.2f}x  samples={target}")
+    else:
+        tasks = []
+        for script in valid_scripts:
+            group = SCRIPT_TO_GROUP[script]
+            if args.balance_groups:
+                scripts_in_group = [s for s in valid_scripts if SCRIPT_TO_GROUP[s] == group]
+                target = args.samples_per_script // len(scripts_in_group)
+            else:
+                target = args.samples_per_script
+            tasks.append((script, target))
 
     shard_dir = Path(args.out)
     shard_dir.mkdir(parents=True, exist_ok=True)
