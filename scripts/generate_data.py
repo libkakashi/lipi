@@ -57,32 +57,39 @@ _DISPLAY_KEYWORDS = {"permanent", "amatic", "lobster", "pacifico", "special",
 
 STYLES = {
     "clean": {
-        "proportion": 0.40,
+        "proportion": 0.10,
         "ops": [],
         "font_filter": "regular",
+        "clean_render": True,   # white bg, black ink, no augmentation
     },
-    "document": {
-        "proportion": 0.20,
+    "printed": {
+        "proportion": 0.35,
         "ops": [jpeg_compress, blur, photocopy, uneven_lighting,
-                fold_crease, bleed_through, aged_document, scanner_edge],
+                fold_crease, bleed_through, aged_document, scanner_edge,
+                exposure_jitter, noise],
         "font_filter": "regular",
+        "clean_render": False,
     },
-    "handwriting": {
-        "proportion": 0.15,
-        "ops": [stroke_variation, smudge, noise, exposure_jitter, rotation],
+    "handwritten": {
+        "proportion": 0.25,
+        "ops": [stroke_variation, smudge, noise, exposure_jitter,
+                rotation, wave_distortion],
         "font_filter": "handwriting",
+        "clean_render": False,
     },
     "signage": {
-        "proportion": 0.15,
+        "proportion": 0.20,
         "ops": [perspective_warp, rotation, exposure_jitter, glare,
                 weather_damage, color_jitter, uneven_lighting],
         "font_filter": "display",
+        "clean_render": False,
     },
     "degraded": {
         "proportion": 0.10,
         "ops": [blur, jpeg_compress, noise, exposure_jitter,
                 low_resolution, rotation, color_jitter],
         "font_filter": "all",
+        "clean_render": False,
     },
 }
 
@@ -373,18 +380,19 @@ def save_metadata(valid_scripts, args, shard_dir):
 def _generate_word_batch(args_tuple):
     """Generate word images for one chunk."""
     script, count, fonts, words, h, mw, do_augment, shard_path, style = args_tuple
+    style_cfg = STYLES.get(style, STYLES["printed"])
     # Style-specific augmentation
-    if not do_augment or style == "clean":
+    if not do_augment or not style_cfg["ops"]:
         aug = None
     else:
-        style_ops = STYLES.get(style, {}).get("ops", None)
-        aug = RandAugmentOCR(n_ops=2, p=0.5, ops=style_ops if style_ops else None)
+        aug = RandAugmentOCR(n_ops=2, p=0.5, ops=style_cfg["ops"])
+    clean_render = style_cfg.get("clean_render", False)
     t0 = time.time()
 
     images, labels = [], []
     attempts = 0
-    # Clean styles get no augmentation; others get first 30% clean
-    clean_target = 0 if style == "clean" else int(count * CLEAN_RATIO)
+    # Clean-render styles get no augmentation at all; others get first 30% clean
+    clean_target = 0 if clean_render else int(count * CLEAN_RATIO)
 
     while len(images) < count and attempts < count * 5:
         attempts += 1
@@ -397,7 +405,7 @@ def _generate_word_batch(args_tuple):
             # Verify font can render ALL chars in the word (prevents partial renders)
             if not font_covers_text(font, word):
                 continue
-            img = render_word(word, font, h)
+            img = render_word(word, font, h, clean=clean_render)
             label = word
 
         if img is None or not image_has_ink(img):

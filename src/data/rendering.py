@@ -110,15 +110,20 @@ def font_covers_text(font_path: str, text: str) -> bool:
     return True
 
 
-def render_word(text: str, font_path: str, height: int = 32) -> Image.Image | None:
-    """Render a word with random ink and paper colors."""
-    for _ in range(5):
-        bg = random_bg_color()
-        ink = random_ink_color()
-        bg_lum = 0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2]
-        ink_lum = 0.299 * ink[0] + 0.587 * ink[1] + 0.114 * ink[2]
-        if abs(bg_lum - ink_lum) > 60:
-            break
+def render_word(text: str, font_path: str, height: int = 32,
+                clean: bool = False) -> Image.Image | None:
+    """Render a word. Clean mode uses white bg + black ink."""
+    if clean:
+        bg = (255, 255, 255)
+        ink = (0, 0, 0)
+    else:
+        for _ in range(5):
+            bg = random_bg_color()
+            ink = random_ink_color()
+            bg_lum = 0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2]
+            ink_lum = 0.299 * ink[0] + 0.587 * ink[1] + 0.114 * ink[2]
+            if abs(bg_lum - ink_lum) > 60:
+                break
 
     font_size = random.randint(18, 26)
     return render_text(
