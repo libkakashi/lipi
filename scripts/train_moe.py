@@ -414,7 +414,23 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
 
         if (batch_idx + 1) % grad_accum == 0 or (batch_idx + 1) == len(train_loader):
             scaler.unscale_(base_optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=25.0)
+            # Clip shared/LID-1 and expert paths separately.
+            # Expert blocks have 40x more params than shared+LID-1,
+            # so a single global clip crushes LID-1's effective lr
+            # (especially early when CTC loss is ~40 and produces huge grads).
+            shared_params = []
+            expert_params = []
+            for name, p in model.named_parameters():
+                if p.grad is None:
+                    continue
+                if any(k in name for k in ("stage1.", "stage2.", "ctc_modules.")):
+                    expert_params.append(p)
+                else:
+                    shared_params.append(p)
+            if shared_params:
+                torch.nn.utils.clip_grad_norm_(shared_params, max_norm=25.0)
+            if expert_params:
+                torch.nn.utils.clip_grad_norm_(expert_params, max_norm=25.0)
             old_scale = scaler.get_scale()
             scaler.step(optimizer)
             scaler.update()
