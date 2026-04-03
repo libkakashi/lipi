@@ -376,6 +376,15 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
     model.train()
     n_batches = 0
 
+    # Cache param split for grad clipping (avoid iterating named_parameters every step)
+    shared_params = []
+    expert_params = []
+    for name, p in model.named_parameters():
+        if any(k in name for k in ("stage1.", "stage2.", "ctc_modules.")):
+            expert_params.append(p)
+        else:
+            shared_params.append(p)
+
     # Accumulate losses on GPU — avoid .item() sync every batch
     ctc_loss_accum = torch.zeros(1, device=device)
     lid1_loss_accum = torch.zeros(1, device=device)
@@ -424,21 +433,8 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
 
         if (batch_idx + 1) % grad_accum == 0 or (batch_idx + 1) == len(train_loader):
             scaler.unscale_(base_optimizer)
-            # Clip shared/LID-1 and expert paths separately.
-            # Expert blocks have 40x more params than shared+LID-1,
-            # so a single global clip crushes LID-1's effective lr
-            # (especially early when CTC loss is ~40 and produces huge grads).
-            shared_params = []
-            expert_params = []
-            for name, p in model.named_parameters():
-                if p.grad is None:
-                    continue
-                if any(k in name for k in ("stage1.", "stage2.", "ctc_modules.")):
-                    expert_params.append(p)
-                else:
-                    shared_params.append(p)
-            shared_norm = torch.nn.utils.clip_grad_norm_(shared_params, max_norm=25.0) if shared_params else 0.0
-            expert_norm = torch.nn.utils.clip_grad_norm_(expert_params, max_norm=25.0) if expert_params else 0.0
+            shared_norm = torch.nn.utils.clip_grad_norm_(shared_params, max_norm=25.0)
+            expert_norm = torch.nn.utils.clip_grad_norm_(expert_params, max_norm=25.0)
             old_scale = scaler.get_scale()
             scaler.step(optimizer)
             scaler.update()
