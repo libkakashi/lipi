@@ -777,7 +777,7 @@ class TestModelConstruction:
         for g, group in enumerate(active_groups):
             ctc_mod = model.ctc_modules[g]
             for s, script in enumerate(group_names[g]):
-                head_vocab = ctc_mod.heads[s].proj.out_features
+                head_vocab = ctc_mod.heads[s].vocab_size
                 frozen_vocab = vocab_sizes[g][s]
                 assert head_vocab == frozen_vocab, (
                     f"{script}: head={head_vocab} vocab={frozen_vocab}")

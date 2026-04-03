@@ -30,22 +30,29 @@ from src.model.lid import LIDCoarse, NUM_GROUPS
 
 
 class CTCHead(nn.Module):
-    """Linear CTC head for one script/group.
+    """MLP CTC head for one script/group.
 
     The encoder (32 SWA blocks) already provides rich contextual features.
-    A simple linear projection to vocab is sufficient — no BiLSTM needed.
-    Saves ~4.7M params per head and removes sequential bottleneck.
+    A 3-layer MLP refines per-timestep features before projecting to vocab.
+    No sequential LSTM bottleneck — fully parallel across timesteps.
     """
 
     def __init__(self, enc_dim: int, vocab_size: int,
                  hidden_dim: int = 384, num_layers: int = 2, dropout: float = 0.1):
         super().__init__()
         self.vocab_size = vocab_size
-        # hidden_dim, num_layers, dropout kept in signature for checkpoint compat
-        self.proj = nn.Linear(enc_dim, vocab_size)
+        self.mlp = nn.Sequential(
+            nn.Linear(enc_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, vocab_size),
+        )
 
     def forward(self, features: Tensor) -> Tensor:
-        return self.proj(features)
+        return self.mlp(features)
 
 
 class GroupCTCModule(nn.Module):
