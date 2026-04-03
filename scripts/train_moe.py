@@ -329,11 +329,18 @@ def main():
                 skipped.append(k)
                 del model_state[k]
         if skipped:
-            print(f"  Skipped {len(skipped)} mismatched layers (vocab changed):")
+            print(f"  Skipped {len(skipped)} shape-mismatched layers:")
             for k in skipped[:5]:
                 print(f"    {k}")
             if len(skipped) > 5:
                 print(f"    ... and {len(skipped) - 5} more")
+        missing = [k for k in current_state if k not in model_state]
+        if missing:
+            print(f"  {len(missing)} layers missing from checkpoint (randomly initialized):")
+            for k in missing[:10]:
+                print(f"    {k}: {current_state[k].shape}")
+            if len(missing) > 10:
+                print(f"    ... and {len(missing) - 10} more")
         model.load_state_dict(model_state, strict=False)
         # Skip optimizer state if layers were skipped OR if checkpoint was
         # from a different dtype (e.g., bf16 model → fp32 model)
