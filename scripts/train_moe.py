@@ -387,26 +387,26 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         gids = gids.to(device, non_blocking=True)
         sids = sids.to(device, non_blocking=True)
 
-        # Forward — predicted routing (LID-1 and LID-2 decide)
+        # Forward — ground truth routing for experts, predicted for LID losses.
+        # LID-1/LID-2 still train from their own predictions (group_logits
+        # and script_logits come from the model's classifiers regardless of
+        # the routing used for expert blocks).
         with torch.amp.autocast(device_type, enabled=use_amp, dtype=amp_dtype):
-            out = model(imgs, group_ids=None, script_ids=None)
+            out = model(imgs, group_ids=gids, script_ids=sids)
 
-        # LID-1 loss (all samples)
+        # LID-1 loss (all samples — learns from its own predictions)
         lid1_loss = compute_lid1_loss(out["group_logits"], gids, ce_loss_fn)
 
-        # Build routing masks
-        pred_sids = get_predicted_script_ids(out["script_logits_per_group"], sids)
-        lid1_ok, ctc_ok = build_routing_masks(
-            out["group_ids"], gids, pred_sids, sids, tgt_lens, out["lengths"])
-
-        # CTC loss (both LID-1 and LID-2 correct, per-script vocab slicing)
+        # CTC loss (all samples — ground truth routing ensures correct expert)
+        all_ok = (tgt_lens <= out["lengths"]) & (tgt_lens > 0)
         ctc_loss = compute_ctc_loss(
             out["logits"], targets, out["lengths"], tgt_lens,
-            ctc_ok, gids, sids, group_script_vocabs)
+            all_ok, gids, sids, group_script_vocabs)
 
-        # LID-2 loss (LID-1 correct, learns from LID-2 mistakes)
+        # LID-2 loss (all samples in multi-script groups)
+        all_true = torch.ones(imgs.shape[0], dtype=torch.bool, device=device)
         lid2_loss = compute_lid2_loss(
-            out["script_logits_per_group"], sids, lid1_ok, ce_loss_fn)
+            out["script_logits_per_group"], sids, all_true, ce_loss_fn)
 
         loss = ctc_loss + lid1_weight * lid1_loss.float() + lid2_loss.float()
 
@@ -460,24 +460,23 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             avg_total = log_total.item() / log_count
             lr = scheduler.get_last_lr()[0]
             steps = len(train_loader)
-            lid1_acc = lid1_ok.float().mean().item() * 100
-            ctc_pct = ctc_ok.float().mean().item() * 100
-            # LID-2 accuracy (only on lid1_ok samples in multi-script groups)
+            # LID-1 accuracy (predicted vs ground truth)
+            pred_gids = out["group_logits"].argmax(-1)
+            lid1_acc = (pred_gids == gids).float().mean().item() * 100
+            # LID-2 accuracy (all samples in multi-script groups)
             lid2_correct = 0
             lid2_total = 0
             for _g, script_logits, group_mask in out["script_logits_per_group"]:
                 if script_logits is not None:
-                    ok = lid1_ok[group_mask]
-                    if ok.any():
-                        pred = script_logits[ok].argmax(-1)
-                        true = sids[group_mask][ok]
-                        lid2_correct += (pred == true).sum().item()
-                        lid2_total += ok.sum().item()
+                    pred = script_logits.argmax(-1)
+                    true = sids[group_mask]
+                    lid2_correct += (pred == true).sum().item()
+                    lid2_total += true.shape[0]
             lid2_acc = 100 * lid2_correct / max(lid2_total, 1)
             print(f"  [{epoch}/{total_epochs}] batch {batch_idx+1}/{steps}  "
                   f"loss={avg_total:.4f} "
                   f"(ctc={avg_ctc:.4f} lid1={avg_lid1:.4f} lid2={avg_lid2:.4f})  "
-                  f"lr={lr:.2e}  lid1={lid1_acc:.0f}% lid2={lid2_acc:.0f}% ctc_ok={ctc_pct:.0f}%")
+                  f"lr={lr:.2e}  lid1={lid1_acc:.0f}% lid2={lid2_acc:.0f}%")
             log_ctc.zero_()
             log_lid1.zero_()
             log_lid2.zero_()
