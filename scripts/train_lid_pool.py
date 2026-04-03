@@ -224,17 +224,17 @@ def main():
         avg_loss = total_loss / n_batches
         print(f"\nEpoch {epoch}: lid1_loss={avg_loss:.4f}  lid1_acc={acc:.1f}%  time={elapsed:.0f}s")
 
-    # --- Save ---
-    save_path = args.save_path or args.resume
-    print(f"\nSaving to {save_path}...")
-    # Merge trained lid_coarse back into full model state
-    full_state = {k: v.cpu() for k, v in model.state_dict().items()}
-    torch.save({
-        "model": full_state,
-        "epoch": 0,  # reset epoch for full training
-        "args": vars(args),
-    }, save_path)
-    print(f"Done. Resume full training with --resume {save_path}")
+        # Save after every epoch
+        save_path = args.save_path or args.resume
+        ckpt_path = save_path.replace(".pt", f"_lid_ep{epoch}.pt") if args.save_path else str(
+            Path(save_path).parent / f"{Path(save_path).stem}_lid_ep{epoch}.pt")
+        full_state = {k: v.cpu() for k, v in model.state_dict().items()}
+        torch.save({
+            "model": full_state,
+            "epoch": 0,
+            "args": vars(args),
+        }, ckpt_path)
+        print(f"  Saved: {ckpt_path}")
 
 
 if __name__ == "__main__":
