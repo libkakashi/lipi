@@ -20,7 +20,16 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.model.lid import SCRIPTS, SCRIPT_TO_GROUP, GROUP_TO_ID, SCRIPT_TO_ID
 from src.data.color import rgb_to_input
-from src.data.augmentation import RandAugmentOCR
+from src.data.augmentation import (
+    RandAugmentOCR,
+    jpeg_compress, blur, low_resolution, photocopy,
+    exposure_jitter, uneven_lighting, glare, striped_shadow,
+    rotation, perspective_warp, wave_distortion,
+    bleed_through, fold_crease, aged_document, scanner_edge, water_stain,
+    stroke_variation, smudge,
+    noise, color_jitter, to_grayscale,
+    occlusion, weather_damage,
+)
 from src.data.vocab import build_script_vocab
 from src.data.rendering import (
     render_word, render_emoji, image_has_ink,
@@ -36,6 +45,68 @@ from src.data.word_lists import load_all_word_lists
 CLEAN_RATIO = 0.3
 CHAR_BUDGET_RATIO = 0.25
 MIN_SHARD_BYTES = 100
+
+# ---------------------------------------------------------------------------
+# Data styles — font selection + augmentation ops per style
+# ---------------------------------------------------------------------------
+
+_HANDWRITING_KEYWORDS = {"caveat", "dancing", "indie", "patrick", "kalam",
+                         "nanumpen", "chilanka", "handwrit", "cursive", "script"}
+_DISPLAY_KEYWORDS = {"permanent", "amatic", "lobster", "pacifico", "special",
+                     "display", "bold", "condensed", "black"}
+
+STYLES = {
+    "clean": {
+        "proportion": 0.40,
+        "ops": [],
+        "font_filter": "regular",
+    },
+    "document": {
+        "proportion": 0.20,
+        "ops": [jpeg_compress, blur, photocopy, uneven_lighting,
+                fold_crease, bleed_through, aged_document, scanner_edge],
+        "font_filter": "regular",
+    },
+    "handwriting": {
+        "proportion": 0.15,
+        "ops": [stroke_variation, smudge, noise, exposure_jitter, rotation],
+        "font_filter": "handwriting",
+    },
+    "signage": {
+        "proportion": 0.15,
+        "ops": [perspective_warp, rotation, exposure_jitter, glare,
+                weather_damage, color_jitter, uneven_lighting],
+        "font_filter": "display",
+    },
+    "degraded": {
+        "proportion": 0.10,
+        "ops": [blur, jpeg_compress, noise, exposure_jitter,
+                low_resolution, rotation, color_jitter],
+        "font_filter": "all",
+    },
+}
+
+
+def filter_fonts_by_style(fonts: list[str], style: str) -> list[str]:
+    """Filter font list by style. Falls back to full list if no matches."""
+    font_filter = STYLES[style]["font_filter"]
+    if font_filter == "all":
+        return fonts
+
+    filtered = []
+    for f in fonts:
+        name = Path(f).name.lower()
+        is_handwriting = any(k in name for k in _HANDWRITING_KEYWORDS)
+        is_display = any(k in name for k in _DISPLAY_KEYWORDS)
+
+        if font_filter == "regular" and not is_handwriting and not is_display:
+            filtered.append(f)
+        elif font_filter == "handwriting" and is_handwriting:
+            filtered.append(f)
+        elif font_filter == "display" and (is_display or is_handwriting):
+            filtered.append(f)
+
+    return filtered if filtered else fonts  # fallback to all if no matches
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +162,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vocab-proportional", action="store_true",
                         help="Scale samples per script by sqrt(vocab_size). "
                              "Scripts with more characters get more training data.")
+    parser.add_argument("--style", type=str, default="all",
+                        choices=list(STYLES.keys()) + ["all"],
+                        help="Data style: clean, document, handwriting, signage, degraded, or all")
     parser.add_argument("--augment", dest="augment", action="store_true", default=True)
     parser.add_argument("--no-augment", dest="augment", action="store_false")
     parser.add_argument("--height", type=int, default=32)
@@ -162,26 +236,30 @@ def discover_fonts(active_scripts, word_lists):
 # Chunk builders
 # ---------------------------------------------------------------------------
 
-def build_word_chunks(tasks, script_fonts, word_lists, args, shard_dir):
+def build_word_chunks(tasks, script_fonts, word_lists, args, shard_dir, styles_to_gen):
     """Build word-image chunks with resume support. Returns (chunks, next_shard_idx, skipped)."""
     chunks = []
     shard_idx = 0
     skipped = 0
-    for script, target in tasks:
-        fonts = script_fonts[script]
-        words = word_lists.get(script, ["placeholder"])
-        chunk_size = min(5000, max(500, target // max(1, args.workers // len(tasks))))
-        remaining = target
-        while remaining > 0:
-            batch = min(chunk_size, remaining)
-            shard_path = str(shard_dir / f"shard_{shard_idx:04d}.pt")
-            if shard_exists(shard_path):
-                skipped += batch
-            else:
-                chunks.append((script, batch, fonts, words,
-                              args.height, args.max_width, args.augment, shard_path))
-            shard_idx += 1
-            remaining -= batch
+    for style in styles_to_gen:
+        proportion = STYLES[style]["proportion"] if len(styles_to_gen) > 1 else 1.0
+        for script, target in tasks:
+            style_target = max(1, int(target * proportion))
+            fonts = filter_fonts_by_style(script_fonts[script], style)
+            words = word_lists.get(script, ["placeholder"])
+            chunk_size = min(5000, max(500, style_target // max(1, args.workers // len(tasks))))
+            remaining = style_target
+            while remaining > 0:
+                batch = min(chunk_size, remaining)
+                shard_path = str(shard_dir / f"shard_{shard_idx:04d}.pt")
+                if shard_exists(shard_path):
+                    skipped += batch
+                else:
+                    chunks.append((script, batch, fonts, words,
+                                  args.height, args.max_width, args.augment,
+                                  shard_path, style))
+                shard_idx += 1
+                remaining -= batch
     return chunks, shard_idx, skipped
 
 
@@ -294,14 +372,19 @@ def save_metadata(valid_scripts, args, shard_dir):
 
 def _generate_word_batch(args_tuple):
     """Generate word images for one chunk."""
-    script, count, fonts, words, h, mw, do_augment, shard_path = args_tuple
-    aug = RandAugmentOCR(n_ops=2, p=0.5) if do_augment else None
+    script, count, fonts, words, h, mw, do_augment, shard_path, style = args_tuple
+    # Style-specific augmentation
+    if not do_augment or style == "clean":
+        aug = None
+    else:
+        style_ops = STYLES.get(style, {}).get("ops", None)
+        aug = RandAugmentOCR(n_ops=2, p=0.5, ops=style_ops if style_ops else None)
     t0 = time.time()
 
     images, labels = [], []
     attempts = 0
-    # First 30% clean, rest augmented — guarantees clean examples
-    clean_target = int(count * CLEAN_RATIO)
+    # Clean styles get no augmentation; others get first 30% clean
+    clean_target = 0 if style == "clean" else int(count * CLEAN_RATIO)
 
     while len(images) < count and attempts < count * 5:
         attempts += 1
@@ -439,8 +522,18 @@ def main():
     shard_dir = Path(args.out)
     shard_dir.mkdir(parents=True, exist_ok=True)
 
+    # Resolve styles
+    if args.style == "all":
+        styles_to_gen = list(STYLES.keys())
+        style_desc = ', '.join(f'{s} ({STYLES[s]["proportion"]:.0%})' for s in styles_to_gen)
+        print(f"\nGenerating all styles: {style_desc}")
+    else:
+        styles_to_gen = [args.style]
+        print(f"\nGenerating style: {args.style}")
+
     # Word images
-    chunks, next_shard_idx, skipped = build_word_chunks(tasks, script_fonts, word_lists, args, shard_dir)
+    chunks, next_shard_idx, skipped = build_word_chunks(
+        tasks, script_fonts, word_lists, args, shard_dir, styles_to_gen)
     if skipped > 0:
         print(f"\nResuming: {skipped} images in existing shards, "
               f"{sum(c[1] for c in chunks)} remaining")

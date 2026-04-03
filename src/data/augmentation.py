@@ -544,14 +544,15 @@ class RandAugmentOCR:
     realistically but preserves text readability.
     """
 
-    def __init__(self, n_ops: int = 2, p: float = 0.5):
+    def __init__(self, n_ops: int = 2, p: float = 0.5, ops: list[Callable] | None = None):
         self.n_ops = n_ops
         self.p = p
+        self.ops = ops if ops is not None else AUGMENT_OPS
 
     def __call__(self, img: Image.Image) -> Image.Image:
         if random.random() > self.p:
             return img
-        ops = random.sample(AUGMENT_OPS, min(self.n_ops, len(AUGMENT_OPS)))
+        ops = random.sample(self.ops, min(self.n_ops, len(self.ops)))
         for op in ops:
             img = op(img)
         return img
