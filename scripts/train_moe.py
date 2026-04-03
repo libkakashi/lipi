@@ -459,10 +459,22 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             steps = len(train_loader)
             lid1_acc = lid1_ok.float().mean().item() * 100
             ctc_pct = ctc_ok.float().mean().item() * 100
+            # LID-2 accuracy (only on lid1_ok samples in multi-script groups)
+            lid2_correct = 0
+            lid2_total = 0
+            for _g, script_logits, group_mask in out["script_logits_per_group"]:
+                if script_logits is not None:
+                    ok = lid1_ok[group_mask]
+                    if ok.any():
+                        pred = script_logits[ok].argmax(-1)
+                        true = sids[ok]
+                        lid2_correct += (pred == true).sum().item()
+                        lid2_total += ok.sum().item()
+            lid2_acc = 100 * lid2_correct / max(lid2_total, 1)
             print(f"  [{epoch}/{total_epochs}] batch {batch_idx+1}/{steps}  "
                   f"loss={avg_total:.4f} "
                   f"(ctc={avg_ctc:.4f} lid1={avg_lid1:.4f} lid2={avg_lid2:.4f})  "
-                  f"lr={lr:.2e}  lid1_acc={lid1_acc:.0f}% ctc_ok={ctc_pct:.0f}%")
+                  f"lr={lr:.2e}  lid1={lid1_acc:.0f}% lid2={lid2_acc:.0f}% ctc_ok={ctc_pct:.0f}%")
             log_ctc.zero_()
             log_lid1.zero_()
             log_lid2.zero_()
