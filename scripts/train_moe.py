@@ -76,6 +76,8 @@ def parse_args():
     parser.add_argument("--routing-penalty", type=float, default=0.0,
                         help="Extra LID-1 weight proportional to misroute rate. "
                              "Effective weight = lid1_weight + penalty * (1 - ctc_ok_frac)")
+    parser.add_argument("--expert-lr", type=float, default=None,
+                        help="Separate learning rate for expert params. Default: same as --lr")
     parser.add_argument("--detach-epochs", type=int, default=0,
                         help="Number of epochs to detach shared→expert gradient. "
                              "LID-1 gets undivided shared encoder, CTC trains experts only.")
@@ -237,7 +239,19 @@ def build_model(args, n_groups, group_script_vocab_sizes, group_script_names, de
 
 def build_optimizer_and_scheduler(args, model, device_type, steps_per_epoch):
     vram("before optimizer", device_type)
-    base_optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
+    expert_lr = args.expert_lr or args.lr
+    if expert_lr != args.lr:
+        shared_params = [p for n, p in model.named_parameters()
+                         if not any(k in n for k in ("stage1.", "stage2.", "ctc_modules."))]
+        expert_params = [p for n, p in model.named_parameters()
+                         if any(k in n for k in ("stage1.", "stage2.", "ctc_modules."))]
+        base_optimizer = torch.optim.AdamW([
+            {"params": shared_params, "lr": args.lr},
+            {"params": expert_params, "lr": expert_lr},
+        ], weight_decay=0.01)
+        print(f"Optimizer: shared lr={args.lr}, expert lr={expert_lr}")
+    else:
+        base_optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
     vram("after optimizer init", device_type)
     if args.cpu_offload and device_type == "cuda":
         optimizer = CPUOffloadOptimizer(base_optimizer)
