@@ -1,9 +1,11 @@
 """
 Font discovery and validation for OCR training data generation.
 
-Finds system fonts that can render each script, validates with cmap
-checks, and builds weighted font lists (70% clean, 20% handwriting,
-10% display) for diverse training data.
+Finds fonts that can render each script using name-based matching.
+Fonts must contain script-relevant keywords (e.g., "Ethiopic", "Tamil")
+to be used for that script. This prevents system fonts (DejaVu, FreeSerif)
+from rendering tofu/garbage for scripts they technically have in their
+cmap but can't actually display.
 """
 
 import os
@@ -34,6 +36,62 @@ _DISPLAY_KEYWORDS = [
     "permanent", "amatic", "lobster", "pacifico", "special", "display",
 ]
 
+# Font name patterns that indicate support for each script.
+# A font must contain at least one of these substrings (case-insensitive)
+# to be considered for that script. This prevents DejaVu/FreeSerif/etc
+# from being used for scripts they have in cmap but render as tofu.
+#
+# "universal" fonts (explicitly designed for broad Unicode) are also listed.
+_SCRIPT_FONT_PATTERNS = {
+    "latin": None,  # None = accept all fonts (Latin is in everything)
+    "cyrillic": None,  # most standard fonts support Cyrillic
+    "greek": None,  # most standard fonts support Greek
+    "arabic": ["arabic", "nastaliq", "naskh", "kufi", "urdu", "persian",
+               "lateef", "scheherazade", "amiri", "harmattan", "alkalami",
+               "reem", "mirza", "markazi", "tajawal", "cairo", "almarai"],
+    "hebrew": ["hebrew", "david", "frank", "miriam"],
+    "han_kana": ["cjk", "japanese", "chinese", "gothic", "mincho", "meiryo",
+                 "hiragino", "kaiti", "songti", "heiti", "fangsong",
+                 "source han", "hachi", "kosugi", "sawarabi",
+                 "zen", "klee", "reggae", "rampart", "rocknroll",
+                 "shippori", "dela", "potta", "yomogi", "yuji", "murecho"],
+    "korean": ["korean", "hangul", "nanum", "gothic", "batang", "gulim",
+               "malgun", "source han", "gamja", "jua",
+               "black han", "do hyeon", "gaegu", "gugi", "hi melody",
+               "poor story", "stylish", "sunflower", "single day"],
+    "devanagari": ["devanagari", "hindi", "marathi", "sanskrit", "mangal",
+                   "kokila", "gargi", "lohit", "baloo",
+                   "tiro", "mukta", "hind", "poppins", "rajdhani",
+                   "yantramanav", "khand", "biryani", "halant", "laila"],
+    "gurmukhi": ["gurmukhi", "punjabi", "raavi", "mukta", "baloo", "tiro"],
+    "gujarati": ["gujarati", "shruti", "mukta", "baloo", "tiro", "hind"],
+    "bengali": ["bengali", "bangla", "vrinda", "shonar", "mukta",
+                "baloo", "tiro", "hind", "galada", "atma", "mina"],
+    "odia": ["odia", "oriya", "kalinga", "baloo", "tiro"],
+    "kannada": ["kannada", "tunga", "baloo", "tiro", "hind"],
+    "telugu": ["telugu", "gautami", "baloo", "tiro", "hind",
+               "mandali", "ramabhadra", "tenali", "gurajada", "lakki"],
+    "malayalam": ["malayalam", "kartika", "rachana", "baloo",
+                  "tiro", "hind", "chilanka", "gayathri", "manjari"],
+    "tamil": ["tamil", "latha", "baloo", "tiro", "hind",
+              "arima", "kavivanar", "meera", "catamaran"],
+    "sinhala": ["sinhala", "sinhalese", "iskoola", "abhaya"],
+    "thai": ["thai", "angsana", "browallia", "cordia",
+             "sarabun", "kanit", "prompt", "mitr", "itim", "charm",
+             "chonburi", "krub", "pridi", "taviraj", "trirong"],
+    "lao": ["lao", "phetsarath", "saysettha"],
+    "burmese": ["myanmar", "burmese", "padauk"],
+    "khmer": ["khmer", "cambodian", "battambang", "bayon",
+              "bokor", "chenla", "dangrek", "fasthand", "freehand",
+              "hanuman", "metal", "moul", "siemreap", "suwannaphum",
+              "taprom", "content"],
+    "emoji": None,
+    "armenian": ["armenian"],
+    "georgian": ["georgian"],
+    "ethiopic": ["ethiopic", "abyssinica"],
+    "tibetan": ["tibetan", "jomolhari"],
+}
+
 
 def find_system_fonts() -> list[str]:
     """Find all .ttf/.otf font files on the system."""
@@ -53,15 +111,18 @@ def find_system_fonts() -> list[str]:
 
 
 def find_fonts_for_script(script: str) -> list[str]:
-    """Find fonts that contain glyphs for a given script."""
+    """Find fonts that can render a given script.
+
+    Uses name-based matching to prevent fonts with broad cmap tables
+    (DejaVu, FreeSerif) from being used for scripts they render as tofu.
+    """
     import unicodedata
     from src.data.script_detect import _SCRIPT_RANGES
 
     if script not in _SCRIPT_RANGES:
         return []
 
-    # Find a valid (assigned) sample codepoint from the script's range.
-    # Can't use midpoint blindly — it might be unassigned.
+    # Find a valid sample codepoint for cmap verification
     ranges = _SCRIPT_RANGES[script]
     sample_cp = None
     for start, end in ranges:
@@ -69,14 +130,11 @@ def find_fonts_for_script(script: str) -> list[str]:
             ch = chr(cp)
             cat = unicodedata.category(ch)
             if cat != "Cn" and cat not in ("Mn", "Mc"):
-                # Prefer a base letter, not a combining mark
                 sample_cp = ch
                 break
         if sample_cp:
             break
-
     if sample_cp is None:
-        # Fallback: accept combining marks too
         for start, end in ranges:
             for cp in range(start, end + 1):
                 if unicodedata.category(chr(cp)) != "Cn":
@@ -84,15 +142,23 @@ def find_fonts_for_script(script: str) -> list[str]:
                     break
             if sample_cp:
                 break
-
     if sample_cp is None:
         return []
 
     all_fonts = find_system_fonts()
+    patterns = _SCRIPT_FONT_PATTERNS.get(script)
+
     valid = []
     for f in all_fonts:
-        if font_has_codepoint(f, sample_cp):
-            valid.append(f)
+        # Must have the codepoint in cmap
+        if not font_has_codepoint(f, sample_cp):
+            continue
+        # If script has font name patterns, font must match at least one
+        if patterns is not None:
+            name_lower = Path(f).name.lower()
+            if not any(p in name_lower for p in patterns):
+                continue
+        valid.append(f)
 
     return valid
 
