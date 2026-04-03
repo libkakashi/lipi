@@ -314,7 +314,9 @@ def resume_from_checkpoint(args, model, optimizer, base_optimizer, scaler, sched
             break
     model_dtype = next(model.parameters()).dtype
     dtype_changed = ckpt_dtype is not None and ckpt_dtype != model_dtype
-    if not skipped and not dtype_changed:
+    if "optimizer" not in ckpt:
+        print("  No optimizer state in checkpoint (fresh optimizer)")
+    elif not skipped and not dtype_changed:
         optimizer.load_state_dict(ckpt["optimizer"])
     else:
         reason = "vocab changed" if skipped else f"dtype changed ({ckpt_dtype}→{model_dtype})"
