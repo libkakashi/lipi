@@ -73,6 +73,9 @@ def parse_args():
     parser.add_argument("--head-hidden", type=int, default=384)
     parser.add_argument("--no-compile", action="store_true")
     parser.add_argument("--lid1-weight", type=float, default=1.0)
+    parser.add_argument("--routing-penalty", type=float, default=0.0,
+                        help="Extra LID-1 weight proportional to misroute rate. "
+                             "Effective weight = lid1_weight + penalty * (1 - ctc_ok_frac)")
     parser.add_argument("--cpu-offload", action="store_true",
                         help="Offload optimizer states to CPU (frees ~5-7GB VRAM)")
     args = parser.parse_args()
@@ -363,7 +366,7 @@ def save_checkpoint(model, optimizer, scheduler, scaler, epoch, args, save_dir):
 def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, scaler,
                     ce_loss_fn, device, device_type, use_amp, amp_dtype,
                     epoch, total_epochs, grad_accum, log_interval,
-                    lid1_weight, group_script_vocabs):
+                    lid1_weight, routing_penalty, group_script_vocabs):
     model.train()
     n_batches = 0
 
@@ -405,14 +408,15 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         lid2_loss = compute_lid2_loss(
             out["script_logits_per_group"], sids, lid1_ok, ce_loss_fn)
 
-        # Scale CTC and LID-2 losses by fraction of contributing samples.
-        # When routing is bad (few ctc_ok), CTC gradient is tiny → LID-1
-        # dominates → routing improves. As routing improves, CTC naturally
-        # ramps up. Automatic curriculum, no manual scheduling.
+        # Fraction-weighted losses with routing penalty.
+        # CTC and LID-2 are scaled by their contributing fraction (automatic
+        # curriculum). LID-1 gets extra weight proportional to the misroute
+        # rate — the model pays a price for every sample CTC couldn't run on.
         B = imgs.shape[0]
         lid1_ok_frac = lid1_ok.sum().float() / B
         ctc_ok_frac = ctc_ok.sum().float() / B
-        loss = (lid1_weight * lid1_loss.float()
+        routing_pressure = lid1_weight + routing_penalty * (1.0 - ctc_ok_frac)
+        loss = (routing_pressure * lid1_loss.float()
                 + lid1_ok_frac * lid2_loss.float()
                 + ctc_ok_frac * ctc_loss)
 
@@ -551,6 +555,7 @@ def main():
             opt["scheduler"], opt["scaler"], ce_loss_fn, device, device_type,
             opt["use_amp"], opt["amp_dtype"], epoch, args.epochs, args.grad_accum,
             args.log_interval, lid1_weight=args.lid1_weight,
+            routing_penalty=args.routing_penalty,
             group_script_vocabs=data["group_script_vocab_sizes"])
 
         elapsed = time.time() - t0
