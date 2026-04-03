@@ -31,5 +31,5 @@ class TestLIDCoarse:
             assert logits.shape == (1, NUM_GROUPS)
 
     def test_num_groups(self):
-        assert NUM_GROUPS == 10
-        assert len(GROUPS) == 10
+        assert NUM_GROUPS == 13
+        assert len(GROUPS) == 13
