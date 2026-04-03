@@ -261,6 +261,7 @@ class LipiMoEEncoder(nn.Module):
         images: Tensor,
         group_ids: Tensor | None = None,
         script_ids: Tensor | None = None,
+        detach_for_experts: bool = False,
     ) -> dict:
         B = images.shape[0]
         W = images.shape[3]
@@ -293,6 +294,12 @@ class LipiMoEEncoder(nn.Module):
         group_logits = self.lid_coarse.forward_seq(x)
         if group_ids is None:
             group_ids = group_logits.argmax(dim=-1)
+
+        # Optionally detach shared features before expert stages.
+        # When True: LID-1 gradient → shared encoder, CTC gradient → experts only.
+        # Prevents CTC from competing with LID-1 for shared features early in training.
+        if detach_for_experts:
+            x = x.detach()
 
         # Project to stage1
         x = self.proj1(x)

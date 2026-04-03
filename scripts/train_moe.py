@@ -76,6 +76,9 @@ def parse_args():
     parser.add_argument("--routing-penalty", type=float, default=0.0,
                         help="Extra LID-1 weight proportional to misroute rate. "
                              "Effective weight = lid1_weight + penalty * (1 - ctc_ok_frac)")
+    parser.add_argument("--detach-epochs", type=int, default=0,
+                        help="Number of epochs to detach shared→expert gradient. "
+                             "LID-1 gets undivided shared encoder, CTC trains experts only.")
     parser.add_argument("--cpu-offload", action="store_true",
                         help="Offload optimizer states to CPU (frees ~5-7GB VRAM)")
     args = parser.parse_args()
@@ -366,7 +369,8 @@ def save_checkpoint(model, optimizer, scheduler, scaler, epoch, args, save_dir):
 def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, scaler,
                     ce_loss_fn, device, device_type, use_amp, amp_dtype,
                     epoch, total_epochs, grad_accum, log_interval,
-                    lid1_weight, routing_penalty, group_script_vocabs):
+                    lid1_weight, routing_penalty, group_script_vocabs,
+                    detach_for_experts=False):
     model.train()
     n_batches = 0
 
@@ -392,7 +396,8 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         # and script_logits come from the model's classifiers regardless of
         # the routing used for expert blocks).
         with torch.amp.autocast(device_type, enabled=use_amp, dtype=amp_dtype):
-            out = model(imgs, group_ids=gids, script_ids=sids)
+            out = model(imgs, group_ids=gids, script_ids=sids,
+                        detach_for_experts=detach_for_experts)
 
         # LID-1 loss (all samples — learns from its own predictions)
         lid1_loss = compute_lid1_loss(out["group_logits"], gids, ce_loss_fn)
@@ -538,13 +543,17 @@ def main():
 
     for epoch in range(start_epoch, args.epochs + 1):
         t0 = time.time()
+        detach = epoch <= args.detach_epochs
+        if detach:
+            print(f"  [detach mode: CTC gradient stops at expert boundary, epoch {epoch}/{args.detach_epochs}]")
         metrics = train_one_epoch(
             model, data["train_loader"], opt["optimizer"], opt["base_optimizer"],
             opt["scheduler"], opt["scaler"], ce_loss_fn, device, device_type,
             opt["use_amp"], opt["amp_dtype"], epoch, args.epochs, args.grad_accum,
             args.log_interval, lid1_weight=args.lid1_weight,
             routing_penalty=args.routing_penalty,
-            group_script_vocabs=data["group_script_vocab_sizes"])
+            group_script_vocabs=data["group_script_vocab_sizes"],
+            detach_for_experts=detach)
 
         elapsed = time.time() - t0
         if metrics:
