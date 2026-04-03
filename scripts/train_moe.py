@@ -405,7 +405,16 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         lid2_loss = compute_lid2_loss(
             out["script_logits_per_group"], sids, lid1_ok, ce_loss_fn)
 
-        loss = ctc_loss + lid1_weight * lid1_loss.float() + lid2_loss.float()
+        # Scale CTC and LID-2 losses by fraction of contributing samples.
+        # When routing is bad (few ctc_ok), CTC gradient is tiny → LID-1
+        # dominates → routing improves. As routing improves, CTC naturally
+        # ramps up. Automatic curriculum, no manual scheduling.
+        B = imgs.shape[0]
+        lid1_ok_frac = lid1_ok.sum().float() / B
+        ctc_ok_frac = ctc_ok.sum().float() / B
+        loss = (lid1_weight * lid1_loss.float()
+                + lid1_ok_frac * lid2_loss.float()
+                + ctc_ok_frac * ctc_loss)
 
         if grad_accum > 1:
             loss = loss / grad_accum
