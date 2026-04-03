@@ -78,15 +78,15 @@ class GroupCTCModule(nn.Module):
 
         # LID-2 with learned spatial projection (only for multi-script groups)
         if self.multi_script:
-            # Conv1d reduction: T(=48) → 12 → mix → 1
+            # Conv1d reduction: T(=48) → 12 → 1
+            # groups=16: cross-channel mixing at every layer
+            g = 16
             self.lid2_pool = nn.Sequential(
                 nn.Conv1d(enc_dim, enc_dim, kernel_size=4, stride=4,
-                          groups=enc_dim),                     # 48 → 12 (per-channel)
-                nn.GELU(),
-                nn.Conv1d(enc_dim, enc_dim, kernel_size=1),   # cross-channel mixing
+                          groups=g),                           # 48 → 12
                 nn.GELU(),
                 nn.Conv1d(enc_dim, enc_dim, kernel_size=12,
-                          groups=enc_dim),                     # 12 → 1
+                          groups=g),                           # 12 → 1
             )
             self.lid2_classifier = nn.Sequential(
                 nn.Linear(enc_dim, enc_dim // 4),

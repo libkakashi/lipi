@@ -157,18 +157,19 @@ class LIDCoarse(nn.Module):
     def __init__(self, in_channels: int = 288, num_groups: int = NUM_GROUPS,
                  seq_len: int = 384):
         super().__init__()
-        # Learned spatial reduction: T → 64 → mix → 16 → 1
+        # Learned spatial reduction: T → 64 → 16 → 1
+        # groups=16: each group mixes 24 channels. Cross-channel mixing
+        # at every layer lets the model learn multi-feature spatial patterns.
+        g = 16
         self.spatial_pool = nn.Sequential(
             nn.Conv1d(in_channels, in_channels, kernel_size=6, stride=6,
-                      groups=in_channels),                     # 384 → 64 (per-channel)
-            nn.GELU(),
-            nn.Conv1d(in_channels, in_channels, kernel_size=1),# cross-channel mixing
+                      groups=g),                               # 384 → 64
             nn.GELU(),
             nn.Conv1d(in_channels, in_channels, kernel_size=4, stride=4,
-                      groups=in_channels),                     # 64 → 16 (per-channel)
+                      groups=g),                               # 64 → 16
             nn.GELU(),
             nn.Conv1d(in_channels, in_channels, kernel_size=16,
-                      groups=in_channels),                     # 16 → 1
+                      groups=g),                               # 16 → 1
         )
         hidden = in_channels // 2
         self.classifier = nn.Sequential(
