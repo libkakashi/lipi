@@ -170,7 +170,7 @@ def build_word_chunks(tasks, script_fonts, word_lists, args, shard_dir):
     for script, target in tasks:
         fonts = script_fonts[script]
         words = word_lists.get(script, ["placeholder"])
-        chunk_size = max(500, target // max(1, args.workers // len(tasks)))
+        chunk_size = min(5000, max(500, target // max(1, args.workers // len(tasks))))
         remaining = target
         while remaining > 0:
             batch = min(chunk_size, remaining)
