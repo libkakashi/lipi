@@ -118,10 +118,12 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             avg_total = log_total.item() / log_count
             lr = scheduler.get_last_lr()[0]
             steps = len(train_loader)
+            lid1_acc = lid1_ok.float().mean().item() * 100
+            ctc_pct = ctc_ok.float().mean().item() * 100
             print(f"  [{epoch}/{total_epochs}] batch {batch_idx+1}/{steps}  "
                   f"loss={avg_total:.4f} "
                   f"(ctc={avg_ctc:.4f} lid1={avg_lid1:.4f} lid2={avg_lid2:.4f})  "
-                  f"lr={lr:.2e}")
+                  f"lr={lr:.2e}  lid1_acc={lid1_acc:.0f}% ctc_ok={ctc_pct:.0f}%")
             log_ctc.zero_()
             log_lid1.zero_()
             log_lid2.zero_()
@@ -344,7 +346,11 @@ def main():
         model.load_state_dict(model_state, strict=False)
         # Skip optimizer state if layers were skipped OR if checkpoint was
         # from a different dtype (e.g., bf16 model → fp32 model)
-        ckpt_dtype = next(iter(model_state.values())).dtype if model_state else None
+        ckpt_dtype = None
+        for v in model_state.values():
+            if v.is_floating_point():
+                ckpt_dtype = v.dtype
+                break
         model_dtype = next(model.parameters()).dtype
         dtype_changed = ckpt_dtype is not None and ckpt_dtype != model_dtype
         if not skipped and not dtype_changed:
