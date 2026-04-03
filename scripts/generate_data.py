@@ -227,7 +227,7 @@ def build_char_chunks(valid_scripts, script_fonts, tasks, args, shard_dir, start
 
 def run_generation_pool(chunks, worker_fn, n_workers, label):
     """Run a generation function over chunks using a multiprocessing pool."""
-    total_est = sum(c[1] for c in chunks)
+    total_est = sum(c[1] if isinstance(c[1], int) else len(c[1]) * c[2] for c in chunks)
     print(f"\nGenerating {total_est} {label} images, {len(chunks)} chunks, "
           f"{min(n_workers, len(chunks))} workers\n")
 
