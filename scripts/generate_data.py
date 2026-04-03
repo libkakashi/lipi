@@ -51,43 +51,44 @@ MIN_SHARD_BYTES = 100
 # ---------------------------------------------------------------------------
 
 _HANDWRITING_KEYWORDS = {"caveat", "dancing", "indie", "patrick", "kalam",
-                         "nanumpen", "chilanka", "handwrit", "cursive", "script"}
+                         "nanumpen", "chilanka", "handwrit", "cursive"}
 _DISPLAY_KEYWORDS = {"permanent", "amatic", "lobster", "pacifico", "special",
-                     "display", "bold", "condensed", "black"}
+                     "display", "condensed"}
 
 STYLES = {
     "clean": {
         "proportion": 0.10,
         "ops": [],
         "font_filter": "regular",
-        "clean_render": True,   # white bg, black ink, no augmentation
+        "clean_render": True,
     },
     "printed": {
         "proportion": 0.35,
         "ops": [jpeg_compress, blur, photocopy, uneven_lighting,
                 fold_crease, bleed_through, aged_document, scanner_edge,
-                exposure_jitter, noise],
+                water_stain, exposure_jitter, noise, to_grayscale],
         "font_filter": "regular",
         "clean_render": False,
     },
     "handwritten": {
         "proportion": 0.25,
         "ops": [stroke_variation, smudge, noise, exposure_jitter,
-                rotation, wave_distortion],
+                rotation, wave_distortion, bleed_through],
         "font_filter": "handwriting",
         "clean_render": False,
     },
     "signage": {
         "proportion": 0.20,
         "ops": [perspective_warp, rotation, exposure_jitter, glare,
-                weather_damage, color_jitter, uneven_lighting],
+                weather_damage, color_jitter, uneven_lighting, occlusion],
         "font_filter": "display",
         "clean_render": False,
     },
     "degraded": {
         "proportion": 0.10,
         "ops": [blur, jpeg_compress, noise, exposure_jitter,
-                low_resolution, rotation, color_jitter],
+                low_resolution, rotation, color_jitter,
+                wave_distortion, striped_shadow],
         "font_filter": "all",
         "clean_render": False,
     },
@@ -107,13 +108,15 @@ def filter_fonts_by_style(fonts: list[str], style: str) -> list[str]:
         is_display = any(k in name for k in _DISPLAY_KEYWORDS)
 
         if font_filter == "regular" and not is_handwriting and not is_display:
+            # Regular includes normal, bold, italic, serif, mono — anything
+            # that's not explicitly handwriting or decorative display
             filtered.append(f)
         elif font_filter == "handwriting" and is_handwriting:
             filtered.append(f)
-        elif font_filter == "display" and (is_display or is_handwriting):
+        elif font_filter == "display" and is_display:
             filtered.append(f)
 
-    return filtered if filtered else fonts  # fallback to all if no matches
+    return filtered if filtered else fonts
 
 
 # ---------------------------------------------------------------------------
