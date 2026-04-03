@@ -42,8 +42,10 @@ class CTCHead(nn.Module):
         super().__init__()
         self.vocab_size = vocab_size
         mlp_hidden = enc_dim // 2
+        # Local conv for temporal context (neighbors help CTC alignment),
+        # then per-timestep MLP for vocab projection.
+        self.conv = nn.Conv1d(enc_dim, mlp_hidden, kernel_size=3, padding=1)
         self.mlp = nn.Sequential(
-            nn.Linear(enc_dim, mlp_hidden),
             nn.GELU(),
             nn.Linear(mlp_hidden, mlp_hidden),
             nn.GELU(),
@@ -51,7 +53,9 @@ class CTCHead(nn.Module):
         )
 
     def forward(self, features: Tensor) -> Tensor:
-        return self.mlp(features)
+        # Conv1d: (N, T, C) → permute → (N, C, T) → conv → (N, hidden, T) → permute back
+        x = self.conv(features.permute(0, 2, 1)).permute(0, 2, 1)
+        return self.mlp(x)
 
 
 class GroupCTCModule(nn.Module):
