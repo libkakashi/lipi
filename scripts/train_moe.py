@@ -417,7 +417,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         ctc_ok_frac = ctc_ok.sum().float() / B
         routing_pressure = lid1_weight + routing_penalty * (1.0 - ctc_ok_frac)
         loss = (routing_pressure * lid1_loss.float()
-                + lid1_ok_frac * lid2_loss.float()
+                + lid2_loss.float()
                 + ctc_ok_frac * ctc_loss)
 
         if grad_accum > 1:
