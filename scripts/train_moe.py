@@ -34,6 +34,329 @@ from src.training.moe_eval import evaluate
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def vram(label="", device_type="cuda"):
+    if device_type == "cuda":
+        a = torch.cuda.memory_allocated() / 1e9
+        r = torch.cuda.memory_reserved() / 1e9
+        print(f"  VRAM [{label}]: {a:.2f} GB allocated, {r:.2f} GB reserved")
+
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train Lipi MoE Encoder")
+    parser.add_argument("--data", type=str, required=True)
+    parser.add_argument("--scripts", type=str, default="all")
+    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--batch-size", type=int, default=192)
+    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--grad-accum", type=int, default=1)
+    parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument("--save-dir", type=str, default="checkpoints/moe")
+    parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--val-split", type=float, default=0.1)
+    parser.add_argument("--log-interval", type=int, default=20)
+    # Model
+    parser.add_argument("--stem-depth", type=int, default=3)
+    parser.add_argument("--shared-dim", type=int, default=288)
+    parser.add_argument("--shared-blocks-4x4", type=int, default=8)
+    parser.add_argument("--shared-blocks-4x16", type=int, default=4)
+    parser.add_argument("--stage1-dim", type=int, default=288)
+    parser.add_argument("--stage1-blocks", type=int, default=12)
+    parser.add_argument("--stage2-dim", type=int, default=576)
+    parser.add_argument("--stage2-blocks", type=int, default=8)
+    parser.add_argument("--head-hidden", type=int, default=384)
+    parser.add_argument("--no-compile", action="store_true")
+    parser.add_argument("--lid1-weight", type=float, default=1.0)
+    parser.add_argument("--cpu-offload", action="store_true",
+                        help="Offload optimizer states to CPU (frees ~5-7GB VRAM)")
+    args = parser.parse_args()
+
+    # Validation
+    assert args.epochs > 0, f"--epochs must be > 0, got {args.epochs}"
+    assert args.batch_size > 0, f"--batch-size must be > 0, got {args.batch_size}"
+    assert args.lr > 0, f"--lr must be > 0, got {args.lr}"
+    assert 0 < args.val_split < 1, f"--val-split must be in (0, 1), got {args.val_split}"
+    assert args.grad_accum >= 1, f"--grad-accum must be >= 1, got {args.grad_accum}"
+    assert Path(args.data).exists(), f"--data path does not exist: {args.data}"
+    if args.resume:
+        assert Path(args.resume).exists(), f"--resume path does not exist: {args.resume}"
+
+    return args
+
+
+# ---------------------------------------------------------------------------
+# Device resolution
+# ---------------------------------------------------------------------------
+
+def resolve_device(args):
+    if args.device == "auto":
+        device = torch.device("cuda" if torch.cuda.is_available()
+                              else "mps" if hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+                              else "cpu")
+    else:
+        device = torch.device(args.device)
+    device_type = device.type
+    print(f"Device: {device}")
+    return device, device_type
+
+
+# ---------------------------------------------------------------------------
+# Data loading and preparation
+# ---------------------------------------------------------------------------
+
+def load_and_prepare_data(args, device):
+    device_type = device.type
+    data_path = Path(args.data)
+    print(f"\nLoading data from {data_path}/...")
+    images, labels, script_ids_global, group_ids_global, meta = load_shards(data_path)
+    active_scripts = meta["active_scripts"]
+    if args.scripts != "all":
+        selected = set(s.strip() for s in args.scripts.split(","))
+        active_scripts = [s for s in active_scripts if s in selected]
+    print(f"Scripts: {active_scripts}")
+
+    # Active groups
+    active_groups = []
+    seen = set()
+    for s in active_scripts:
+        g = SCRIPT_TO_GROUP.get(s)
+        if g and g not in seen:
+            active_groups.append(g)
+            seen.add(g)
+    n_groups = len(active_groups)
+    assert n_groups > 0, "No active groups found — check --scripts and SCRIPT_TO_GROUP mapping"
+    print(f"Groups: {n_groups} -> {active_groups}")
+
+    # Remap IDs
+    group_ids, local_script_ids, global_to_local_group = remap_ids(
+        active_scripts, active_groups, script_ids_global, group_ids_global)
+
+    # Tokenizers (fixed vocabs from Unicode ranges, not data-dependent)
+    print("\nBuilding per-script tokenizers...")
+    group_tokenizers, group_script_vocab_sizes, group_script_names = build_script_tokenizers(
+        active_scripts, active_groups)
+    print(f"  Per-script vocab sizes: {group_script_vocab_sizes}")
+
+    # Encode labels
+    print("Pre-encoding labels...")
+    target_tensor, target_len_tensor = encode_labels(
+        labels, group_ids, local_script_ids, active_groups, group_tokenizers)
+    print(f"  Max label length: {target_len_tensor.max().item()}")
+
+    # Pre-filter empty/too-long labels
+    max_enc_len = images.shape[3] // 4
+    valid = (target_len_tensor > 0) & (target_len_tensor <= max_enc_len)
+    n_filtered = (~valid).sum().item()
+    if n_filtered > 0:
+        keep = valid.nonzero(as_tuple=True)[0]
+        images = images[keep]
+        target_tensor = target_tensor[keep]
+        target_len_tensor = target_len_tensor[keep]
+        group_ids = group_ids[keep]
+        local_script_ids = local_script_ids[keep]
+        labels = [labels[i] for i in keep.tolist()]
+        print(f"  Filtered {n_filtered} samples (empty or too long for CTC)")
+
+    # Dataset + split
+    dataset = MoEDataset(images, target_tensor, target_len_tensor,
+                         group_ids, local_script_ids, labels)
+    n_total = len(dataset)
+    n_val = max(1, int(n_total * args.val_split))
+    n_train = n_total - n_val
+    assert n_train > 0, f"No training samples after split (total={n_total}, val={n_val})"
+    train_set, val_set = torch.utils.data.random_split(
+        dataset, [n_train, n_val], generator=torch.Generator().manual_seed(42))
+    print(f"Train: {n_train}, Val: {n_val}")
+
+    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True,
+                              collate_fn=collate_moe, pin_memory=(device_type == "cuda"))
+    val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False,
+                            collate_fn=collate_moe, pin_memory=(device_type == "cuda"))
+
+    return {
+        "train_loader": train_loader,
+        "val_loader": val_loader,
+        "n_groups": n_groups,
+        "active_groups": active_groups,
+        "group_tokenizers": group_tokenizers,
+        "group_script_vocab_sizes": group_script_vocab_sizes,
+        "group_script_names": group_script_names,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Model construction
+# ---------------------------------------------------------------------------
+
+def build_model(args, n_groups, group_script_vocab_sizes, group_script_names, device):
+    device_type = device.type
+    model = LipiMoEEncoder(
+        stem_depth=args.stem_depth,
+        shared_dim=args.shared_dim,
+        shared_blocks_4x4=args.shared_blocks_4x4,
+        shared_blocks_4x16=args.shared_blocks_4x16,
+        stage1_dim=args.stage1_dim,
+        stage1_blocks=args.stage1_blocks,
+        stage2_dim=args.stage2_dim,
+        stage2_blocks=args.stage2_blocks,
+        num_groups=n_groups,
+        group_script_vocab_sizes=group_script_vocab_sizes,
+        group_script_names=group_script_names,
+        head_hidden=args.head_hidden,
+    ).to(device)
+
+    vram("after model to device (fp32)", device_type)
+
+    # NOTE: Do NOT cast model to bf16. Autocast handles bf16 forward/backward
+    # while keeping fp32 params for optimizer precision. Casting to bf16
+    # makes Adam's m/v states bf16 (7-bit mantissa) — not enough precision
+    # for stable convergence.
+
+    total_params = sum(p.numel() for p in model.parameters())
+    p0 = next(model.parameters())
+    print(f"Model: {total_params / 1e6:.1f}M params ({n_groups} groups), dtype={p0.dtype}")
+
+    return model
+
+
+# ---------------------------------------------------------------------------
+# Optimizer and scheduler
+# ---------------------------------------------------------------------------
+
+def build_optimizer_and_scheduler(args, model, device_type, steps_per_epoch):
+    vram("before optimizer", device_type)
+    base_optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
+    vram("after optimizer init", device_type)
+    if args.cpu_offload and device_type == "cuda":
+        optimizer = CPUOffloadOptimizer(base_optimizer)
+        print("Optimizer states offloaded to CPU (~5-7GB VRAM freed)")
+    else:
+        optimizer = base_optimizer
+
+    use_amp = device_type in ("cuda", "mps")
+    if device_type == "cuda":
+        torch.backends.cudnn.benchmark = True
+        torch.set_float32_matmul_precision('high')
+        amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        scaler = torch.amp.GradScaler("cuda", enabled=(amp_dtype == torch.float16))
+        print(f"AMP: {amp_dtype}")
+    else:
+        amp_dtype = torch.float32
+        scaler = torch.amp.GradScaler(enabled=False)
+
+    total_steps = steps_per_epoch * args.epochs
+    warmup_steps = min(steps_per_epoch, total_steps // 10)
+    warmup = torch.optim.lr_scheduler.LinearLR(
+        base_optimizer, start_factor=0.01, end_factor=1.0, total_iters=max(warmup_steps, 1))
+    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+        base_optimizer, T_max=max(total_steps - warmup_steps, 1), eta_min=1e-6)
+    scheduler = torch.optim.lr_scheduler.SequentialLR(
+        base_optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps])
+
+    return {
+        "optimizer": optimizer,
+        "base_optimizer": base_optimizer,
+        "scaler": scaler,
+        "scheduler": scheduler,
+        "use_amp": use_amp,
+        "amp_dtype": amp_dtype,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint resume
+# ---------------------------------------------------------------------------
+
+def resume_from_checkpoint(args, model, optimizer, base_optimizer, scaler, scheduler,
+                           steps_per_epoch, device_type):
+    print(f"\nResuming from {args.resume}...")
+    ckpt = torch.load(args.resume, map_location="cpu", weights_only=False)
+    # Partial load: skip mismatched layers (e.g., CTC proj after vocab change)
+    model_state = ckpt["model"]
+    current_state = model.state_dict()
+    skipped = []
+    for k in list(model_state.keys()):
+        if k in current_state and model_state[k].shape != current_state[k].shape:
+            skipped.append(k)
+            del model_state[k]
+    if skipped:
+        print(f"  Skipped {len(skipped)} shape-mismatched layers:")
+        for k in skipped[:5]:
+            print(f"    {k}")
+        if len(skipped) > 5:
+            print(f"    ... and {len(skipped) - 5} more")
+    missing = [k for k in current_state if k not in model_state]
+    if missing:
+        print(f"  {len(missing)} layers missing from checkpoint (randomly initialized):")
+        for k in missing[:10]:
+            print(f"    {k}: {current_state[k].shape}")
+        if len(missing) > 10:
+            print(f"    ... and {len(missing) - 10} more")
+    model.load_state_dict(model_state, strict=False)
+    # Skip optimizer state if layers were skipped OR if checkpoint was
+    # from a different dtype (e.g., bf16 model -> fp32 model)
+    ckpt_dtype = None
+    for v in model_state.values():
+        if v.is_floating_point():
+            ckpt_dtype = v.dtype
+            break
+    model_dtype = next(model.parameters()).dtype
+    dtype_changed = ckpt_dtype is not None and ckpt_dtype != model_dtype
+    if not skipped and not dtype_changed:
+        optimizer.load_state_dict(ckpt["optimizer"])
+    else:
+        reason = "vocab changed" if skipped else f"dtype changed ({ckpt_dtype}→{model_dtype})"
+        print(f"  Skipping optimizer state ({reason})")
+    if "scaler" in ckpt:
+        scaler.load_state_dict(ckpt["scaler"])
+    # Sync GPU->CPU mirrors after model load (cpu_offload only)
+    if hasattr(optimizer, "sync_from_gpu"):
+        optimizer.sync_from_gpu()
+
+    start_epoch = ckpt.get("epoch", 0) + 1
+
+    # Always rebuild scheduler on resume — checkpoint might have a different
+    # scheduler type (CosineAnnealingLR vs SequentialLR) or different total epochs.
+    print(f"  Rebuilding scheduler from epoch {start_epoch}")
+    for pg in base_optimizer.param_groups:
+        pg["lr"] = args.lr
+    remaining_steps = steps_per_epoch * (args.epochs - start_epoch + 1)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        base_optimizer, T_max=max(remaining_steps, 1), eta_min=1e-6)
+
+    del ckpt
+    print(f"  Resumed at epoch {start_epoch}, lr={base_optimizer.param_groups[0]['lr']:.2e}")
+    if device_type == "cuda":
+        torch.cuda.empty_cache()
+    vram("after resume", device_type)
+
+    return start_epoch, scheduler
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint saving
+# ---------------------------------------------------------------------------
+
+def save_checkpoint(model, optimizer, scheduler, scaler, epoch, args, save_dir):
+    ckpt_path = save_dir / f"moe_epoch{epoch}.pt"
+    torch.save({
+        "model": {k: v.cpu() for k, v in model.state_dict().items()},
+        "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict(),
+        "scaler": scaler.state_dict(),
+        "epoch": epoch,
+        "args": vars(args),
+    }, ckpt_path)
+    print(f"  Saved: {ckpt_path}")
+
+
+# ---------------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------------
 
@@ -100,7 +423,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                 scheduler.step()
 
         # Accumulate on GPU — no sync
-        mult = float(grad_accum) if grad_accum > 1 else 1.0
+        mult = float(grad_accum)
         ctc_loss_accum += ctc_loss.detach()
         lid1_loss_accum += lid1_loss.detach()
         total_loss_accum += loss.detach() * mult
@@ -145,248 +468,32 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="Train Lipi MoE Encoder")
-    parser.add_argument("--data", type=str, required=True)
-    parser.add_argument("--scripts", type=str, default="all")
-    parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--batch-size", type=int, default=192)
-    parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--grad-accum", type=int, default=1)
-    parser.add_argument("--device", type=str, default="auto")
-    parser.add_argument("--save-dir", type=str, default="checkpoints/moe")
-    parser.add_argument("--resume", type=str, default=None)
-    parser.add_argument("--val-split", type=float, default=0.1)
-    parser.add_argument("--log-interval", type=int, default=20)
-    # Model
-    parser.add_argument("--stem-depth", type=int, default=3)
-    parser.add_argument("--shared-dim", type=int, default=288)
-    parser.add_argument("--shared-blocks-4x4", type=int, default=8)
-    parser.add_argument("--shared-blocks-4x16", type=int, default=4)
-    parser.add_argument("--stage1-dim", type=int, default=288)
-    parser.add_argument("--stage1-blocks", type=int, default=12)
-    parser.add_argument("--stage2-dim", type=int, default=576)
-    parser.add_argument("--stage2-blocks", type=int, default=8)
-    parser.add_argument("--head-hidden", type=int, default=384)
-    parser.add_argument("--no-compile", action="store_true")
-    parser.add_argument("--lid1-weight", type=float, default=1.0)
-    parser.add_argument("--cpu-offload", action="store_true",
-                        help="Offload optimizer states to CPU (frees ~5-7GB VRAM)")
-    args = parser.parse_args()
+    args = parse_args()
+    device, device_type = resolve_device(args)
 
-    # Device
-    if args.device == "auto":
-        device = torch.device("cuda" if torch.cuda.is_available()
-                              else "mps" if hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
-                              else "cpu")
-    else:
-        device = torch.device(args.device)
-    device_type = device.type
-    print(f"Device: {device}")
+    data = load_and_prepare_data(args, device)
+    model = build_model(args, data["n_groups"], data["group_script_vocab_sizes"],
+                        data["group_script_names"], device)
 
-    # --- Data ---
-    data_path = Path(args.data)
-    print(f"\nLoading data from {data_path}/...")
-    images, labels, script_ids_global, group_ids_global, meta = load_shards(data_path)
-    active_scripts = meta["active_scripts"]
-    if args.scripts != "all":
-        selected = set(s.strip() for s in args.scripts.split(","))
-        active_scripts = [s for s in active_scripts if s in selected]
-    print(f"Scripts: {active_scripts}")
-
-    # Active groups
-    active_groups = []
-    seen = set()
-    for s in active_scripts:
-        g = SCRIPT_TO_GROUP.get(s)
-        if g and g not in seen:
-            active_groups.append(g)
-            seen.add(g)
-    n_groups = len(active_groups)
-    print(f"Groups: {n_groups} -> {active_groups}")
-
-    # Remap IDs
-    group_ids, local_script_ids, global_to_local_group = remap_ids(
-        active_scripts, active_groups, script_ids_global, group_ids_global)
-
-    # Tokenizers (fixed vocabs from Unicode ranges, not data-dependent)
-    print("\nBuilding per-script tokenizers...")
-    group_tokenizers, group_script_vocab_sizes, group_script_names = build_script_tokenizers(
-        active_scripts, active_groups)
-    print(f"  Per-script vocab sizes: {group_script_vocab_sizes}")
-
-    # Encode labels
-    print("Pre-encoding labels...")
-    target_tensor, target_len_tensor = encode_labels(
-        labels, group_ids, local_script_ids, active_groups, group_tokenizers)
-    print(f"  Max label length: {target_len_tensor.max().item()}")
-
-    # Pre-filter empty/too-long labels
-    max_enc_len = images.shape[3] // 4
-    valid = (target_len_tensor > 0) & (target_len_tensor <= max_enc_len)
-    n_filtered = (~valid).sum().item()
-    if n_filtered > 0:
-        keep = valid.nonzero(as_tuple=True)[0]
-        images = images[keep]
-        target_tensor = target_tensor[keep]
-        target_len_tensor = target_len_tensor[keep]
-        group_ids = group_ids[keep]
-        local_script_ids = local_script_ids[keep]
-        labels = [labels[i] for i in keep.tolist()]
-        print(f"  Filtered {n_filtered} samples (empty or too long for CTC)")
-
-    # Dataset + split
-    dataset = MoEDataset(images, target_tensor, target_len_tensor,
-                         group_ids, local_script_ids, labels)
-    n_total = len(dataset)
-    n_val = max(1, int(n_total * args.val_split))
-    n_train = n_total - n_val
-    train_set, val_set = torch.utils.data.random_split(
-        dataset, [n_train, n_val], generator=torch.Generator().manual_seed(42))
-    print(f"Train: {n_train}, Val: {n_val}")
-
-    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True,
-                              collate_fn=collate_moe, pin_memory=(device_type == "cuda"))
-    val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False,
-                            collate_fn=collate_moe, pin_memory=(device_type == "cuda"))
-
-    # --- Model ---
-    model = LipiMoEEncoder(
-        stem_depth=args.stem_depth,
-        shared_dim=args.shared_dim,
-        shared_blocks_4x4=args.shared_blocks_4x4,
-        shared_blocks_4x16=args.shared_blocks_4x16,
-        stage1_dim=args.stage1_dim,
-        stage1_blocks=args.stage1_blocks,
-        stage2_dim=args.stage2_dim,
-        stage2_blocks=args.stage2_blocks,
-        num_groups=n_groups,
-        group_script_vocab_sizes=group_script_vocab_sizes,
-        group_script_names=group_script_names,
-        head_hidden=args.head_hidden,
-    ).to(device)
-
-    def vram(label=""):
-        if device_type == "cuda":
-            a = torch.cuda.memory_allocated() / 1e9
-            r = torch.cuda.memory_reserved() / 1e9
-            print(f"  VRAM [{label}]: {a:.2f} GB allocated, {r:.2f} GB reserved")
-
-    vram("after model to device (fp32)")
-
-    # NOTE: Do NOT cast model to bf16. Autocast handles bf16 forward/backward
-    # while keeping fp32 params for optimizer precision. Casting to bf16
-    # makes Adam's m/v states bf16 (7-bit mantissa) — not enough precision
-    # for stable convergence.
-
-    total_params = sum(p.numel() for p in model.parameters())
-    p0 = next(model.parameters())
-    print(f"Model: {total_params / 1e6:.1f}M params ({n_groups} groups), dtype={p0.dtype}")
+    steps_per_epoch = len(data["train_loader"])
+    opt = build_optimizer_and_scheduler(args, model, device_type, steps_per_epoch)
 
     # NOTE: torch.compile moved AFTER optimizer creation + resume.
     # Compiling before optimizer changes parameter structure, breaking
     # optimizer state dict loading from non-compiled checkpoints.
 
-    # --- Optimizer + Scheduler ---
-    vram("before optimizer")
-    base_optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
-    vram("after optimizer init")
-    if args.cpu_offload and device_type == "cuda":
-        optimizer = CPUOffloadOptimizer(base_optimizer)
-        print("Optimizer states offloaded to CPU (~5-7GB VRAM freed)")
-    else:
-        optimizer = base_optimizer
-
-    use_amp = device_type in ("cuda", "mps")
-    if device_type == "cuda":
-        torch.backends.cudnn.benchmark = True
-        torch.set_float32_matmul_precision('high')
-        amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-        scaler = torch.amp.GradScaler("cuda", enabled=(amp_dtype == torch.float16))
-        print(f"AMP: {amp_dtype}")
-    else:
-        amp_dtype = torch.float32
-        scaler = torch.amp.GradScaler(enabled=False)
-
-    steps_per_epoch = len(train_loader)
-    total_steps = steps_per_epoch * args.epochs
-    warmup_steps = min(steps_per_epoch, total_steps // 10)
-    warmup = torch.optim.lr_scheduler.LinearLR(
-        base_optimizer, start_factor=0.01, end_factor=1.0, total_iters=max(warmup_steps, 1))
-    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
-        base_optimizer, T_max=max(total_steps - warmup_steps, 1), eta_min=1e-6)
-    scheduler = torch.optim.lr_scheduler.SequentialLR(
-        base_optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps])
-
-    # Resume
     start_epoch = 1
     if args.resume:
-        print(f"\nResuming from {args.resume}...")
-        ckpt = torch.load(args.resume, map_location="cpu", weights_only=False)
-        # Partial load: skip mismatched layers (e.g., CTC proj after vocab change)
-        model_state = ckpt["model"]
-        current_state = model.state_dict()
-        skipped = []
-        for k in list(model_state.keys()):
-            if k in current_state and model_state[k].shape != current_state[k].shape:
-                skipped.append(k)
-                del model_state[k]
-        if skipped:
-            print(f"  Skipped {len(skipped)} shape-mismatched layers:")
-            for k in skipped[:5]:
-                print(f"    {k}")
-            if len(skipped) > 5:
-                print(f"    ... and {len(skipped) - 5} more")
-        missing = [k for k in current_state if k not in model_state]
-        if missing:
-            print(f"  {len(missing)} layers missing from checkpoint (randomly initialized):")
-            for k in missing[:10]:
-                print(f"    {k}: {current_state[k].shape}")
-            if len(missing) > 10:
-                print(f"    ... and {len(missing) - 10} more")
-        model.load_state_dict(model_state, strict=False)
-        # Skip optimizer state if layers were skipped OR if checkpoint was
-        # from a different dtype (e.g., bf16 model → fp32 model)
-        ckpt_dtype = None
-        for v in model_state.values():
-            if v.is_floating_point():
-                ckpt_dtype = v.dtype
-                break
-        model_dtype = next(model.parameters()).dtype
-        dtype_changed = ckpt_dtype is not None and ckpt_dtype != model_dtype
-        if not skipped and not dtype_changed:
-            optimizer.load_state_dict(ckpt["optimizer"])
-        else:
-            reason = "vocab changed" if skipped else f"dtype changed ({ckpt_dtype}→{model_dtype})"
-            print(f"  Skipping optimizer state ({reason})")
-        if "scaler" in ckpt:
-            scaler.load_state_dict(ckpt["scaler"])
-        # Sync GPU→CPU mirrors after model load (cpu_offload only)
-        if hasattr(optimizer, "sync_from_gpu"):
-            optimizer.sync_from_gpu()
-
-        start_epoch = ckpt.get("epoch", 0) + 1
-
-        # Always rebuild scheduler on resume — checkpoint might have a different
-        # scheduler type (CosineAnnealingLR vs SequentialLR) or different total epochs.
-        print(f"  Rebuilding scheduler from epoch {start_epoch}")
-        for pg in base_optimizer.param_groups:
-            pg["lr"] = args.lr
-        remaining_steps = steps_per_epoch * (args.epochs - start_epoch + 1)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            base_optimizer, T_max=max(remaining_steps, 1), eta_min=1e-6)
-
-        del ckpt
-        print(f"  Resumed at epoch {start_epoch}, lr={base_optimizer.param_groups[0]['lr']:.2e}")
-        torch.cuda.empty_cache()
-        vram("after resume")
+        start_epoch, opt["scheduler"] = resume_from_checkpoint(
+            args, model, opt["optimizer"], opt["base_optimizer"], opt["scaler"],
+            opt["scheduler"], steps_per_epoch, device_type)
 
     # torch.compile after optimizer + resume (avoids param group mismatch)
     if device_type == "cuda" and not args.no_compile:
         print("Compiling model with torch.compile...")
         model = torch.compile(model)
-        vram("after compile")
+        vram("after compile", device_type)
 
-    # --- Train ---
     ce_loss_fn = nn.CrossEntropyLoss()
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -397,18 +504,17 @@ def main():
     print(f"  Batch: {args.batch_size} x {args.grad_accum} = {eff_batch} effective")
     print(f"  Losses: CTC x1.0 + LID1 x{args.lid1_weight}")
     print(f"  Routing: predicted (skip CTC on LID-1/LID-2 misroutes)")
-    print(f"  Per-script vocabs: {group_script_vocab_sizes}")
+    print(f"  Per-script vocabs: {data['group_script_vocab_sizes']}")
     print(f"{'=' * 60}")
 
     for epoch in range(start_epoch, args.epochs + 1):
         t0 = time.time()
-
         metrics = train_one_epoch(
-            model, train_loader, optimizer, base_optimizer, scheduler, scaler,
-            ce_loss_fn, device, device_type, use_amp, amp_dtype,
-            epoch, args.epochs, args.grad_accum, args.log_interval,
-            lid1_weight=args.lid1_weight,
-            group_script_vocabs=group_script_vocab_sizes)
+            model, data["train_loader"], opt["optimizer"], opt["base_optimizer"],
+            opt["scheduler"], opt["scaler"], ce_loss_fn, device, device_type,
+            opt["use_amp"], opt["amp_dtype"], epoch, args.epochs, args.grad_accum,
+            args.log_interval, lid1_weight=args.lid1_weight,
+            group_script_vocabs=data["group_script_vocab_sizes"])
 
         elapsed = time.time() - t0
         if metrics:
@@ -416,22 +522,13 @@ def main():
                   f"ctc={metrics['ctc']:.4f} lid1={metrics['lid1']:.4f}  "
                   f"time={elapsed:.0f}s")
 
-        # Save (model to CPU to avoid OOM)
-        ckpt_path = save_dir / f"moe_epoch{epoch}.pt"
-        torch.save({
-            "model": {k: v.cpu() for k, v in model.state_dict().items()},
-            "optimizer": optimizer.state_dict(),
-            "scheduler": scheduler.state_dict(),
-            "scaler": scaler.state_dict(),
-            "epoch": epoch,
-            "args": vars(args),
-        }, ckpt_path)
-        print(f"  Saved: {ckpt_path}")
+        save_checkpoint(model, opt["optimizer"], opt["scheduler"], opt["scaler"],
+                        epoch, args, save_dir)
 
-        # Eval
         print(f"\n  Eval epoch {epoch}:")
-        evaluate(model, val_loader, group_tokenizers, group_script_names,
-                 active_groups, device, device_type, use_amp, amp_dtype)
+        evaluate(model, data["val_loader"], data["group_tokenizers"],
+                 data["group_script_names"], data["active_groups"],
+                 device, device_type, opt["use_amp"], opt["amp_dtype"])
 
     print(f"\n{'=' * 60}")
     print("DONE")

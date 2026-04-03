@@ -29,6 +29,14 @@ from src.data.rendering import (
 from src.data.fonts import find_fonts_for_script, build_weighted_font_list
 from src.data.word_lists import load_all_word_lists
 
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+CLEAN_RATIO = 0.3
+CHAR_BUDGET_RATIO = 0.25
+MIN_SHARD_BYTES = 100
+
 
 # ---------------------------------------------------------------------------
 # Renderable character list (from frozen vocab)
@@ -46,8 +54,14 @@ def get_renderable_chars(script: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Shard saving
+# Helpers
 # ---------------------------------------------------------------------------
+
+def shard_exists(path: str) -> bool:
+    """Check if a shard file exists and has meaningful content."""
+    p = Path(path)
+    return p.exists() and p.stat().st_size > MIN_SHARD_BYTES
+
 
 def save_shard(images, labels, script, shard_path):
     """Save a shard to disk."""
@@ -66,6 +80,212 @@ def save_shard(images, labels, script, shard_path):
 
 
 # ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Generate training data")
+    parser.add_argument("--samples-per-script", type=int, default=10000)
+    parser.add_argument("--scripts", type=str, default="all")
+    parser.add_argument("--balance-groups", action="store_true")
+    parser.add_argument("--augment", dest="augment", action="store_true", default=True)
+    parser.add_argument("--no-augment", dest="augment", action="store_false")
+    parser.add_argument("--height", type=int, default=32)
+    parser.add_argument("--max-width", type=int, default=192)
+    parser.add_argument("--include-chars", action="store_true")
+    parser.add_argument("--char-reps", type=int, default=3)
+    parser.add_argument("--out", type=str, default="data/shards")
+    parser.add_argument("--workers", type=int, default=48)
+    args = parser.parse_args()
+
+    # Validate numeric args
+    if args.height <= 0:
+        parser.error("--height must be > 0")
+    if args.max_width <= 0:
+        parser.error("--max-width must be > 0")
+    if args.samples_per_script <= 0:
+        parser.error("--samples-per-script must be > 0")
+    if args.workers < 1:
+        parser.error("--workers must be >= 1")
+
+    # Validate script names
+    if args.scripts != "all":
+        requested = [s.strip() for s in args.scripts.split(",")]
+        unknown = [s for s in requested if s not in SCRIPTS]
+        if unknown:
+            parser.error(f"Unknown script(s): {', '.join(unknown)}. "
+                         f"Valid: {', '.join(sorted(SCRIPTS))}")
+
+    return args
+
+
+# ---------------------------------------------------------------------------
+# Font discovery
+# ---------------------------------------------------------------------------
+
+def discover_fonts(active_scripts, word_lists):
+    """Discover fonts for each script. Returns (script_fonts, valid_scripts)."""
+    print("Discovering fonts...")
+    script_fonts = {}
+    valid_scripts = []
+    for script in active_scripts:
+        if script == "emoji":
+            script_fonts[script] = ["__emoji__"]
+            valid_scripts.append(script)
+            print(f"  {'emoji':<15}   - (synthetic)")
+            continue
+        if not word_lists.get(script):
+            print(f"  {script:<15}   no word list — SKIPPED")
+            continue
+        fonts = find_fonts_for_script(script)
+        sample = word_lists[script][0]
+        weighted = build_weighted_font_list(fonts, sample)
+        if weighted:
+            script_fonts[script] = weighted
+            valid_scripts.append(script)
+            n_unique = len(set(weighted))
+            print(f"  {script:<15} {n_unique:>3} fonts")
+        else:
+            print(f"  {script:<15}   0 fonts — SKIPPED")
+
+    if len(valid_scripts) < 2:
+        print("ERROR: Need at least 2 scripts with fonts")
+        sys.exit(1)
+
+    return script_fonts, valid_scripts
+
+
+# ---------------------------------------------------------------------------
+# Chunk builders
+# ---------------------------------------------------------------------------
+
+def build_word_chunks(tasks, script_fonts, word_lists, args, shard_dir):
+    """Build word-image chunks with resume support. Returns (chunks, next_shard_idx, skipped)."""
+    chunks = []
+    shard_idx = 0
+    skipped = 0
+    for script, target in tasks:
+        fonts = script_fonts[script]
+        words = word_lists.get(script, ["placeholder"])
+        chunk_size = max(500, target // max(1, args.workers // len(tasks)))
+        remaining = target
+        while remaining > 0:
+            batch = min(chunk_size, remaining)
+            shard_path = str(shard_dir / f"shard_{shard_idx:04d}.pt")
+            if shard_exists(shard_path):
+                skipped += batch
+            else:
+                chunks.append((script, batch, fonts, words,
+                              args.height, args.max_width, args.augment, shard_path))
+            shard_idx += 1
+            remaining -= batch
+    return chunks, shard_idx, skipped
+
+
+def build_char_chunks(valid_scripts, script_fonts, tasks, args, shard_dir, start_shard_idx):
+    """Build single-character chunks with resume support. Returns char_chunks."""
+    script_word_target = {s: t for s, t in tasks}
+
+    print(f"\n{'='*60}")
+    print(f"Generating single-character images (max {CHAR_BUDGET_RATIO:.0%} of word budget)")
+    print(f"{'='*60}")
+
+    char_chunks = []
+    shard_idx = start_shard_idx
+    for script in valid_scripts:
+        if script == "emoji":
+            continue
+        fonts = script_fonts[script]
+        chars = get_renderable_chars(script)
+        if not chars:
+            continue
+
+        word_target = script_word_target.get(script, args.samples_per_script)
+        char_budget = int(word_target * CHAR_BUDGET_RATIO)
+        reps = max(1, min(args.char_reps, char_budget // len(chars)))
+        est = len(chars) * reps
+        print(f"  {script:<15} {len(chars):>5} unique chars × {reps} reps = ~{est} images "
+              f"(word budget: {word_target})")
+
+        chunk_size = max(200, len(chars) // max(1, args.workers // len(valid_scripts)))
+        for ci in range(0, len(chars), chunk_size):
+            char_subset = chars[ci:ci + chunk_size]
+            shard_path = str(shard_dir / f"char_shard_{shard_idx:04d}.pt")
+            if shard_exists(shard_path):
+                shard_idx += 1
+                continue
+            char_chunks.append((script, char_subset, reps, fonts,
+                                args.height, args.max_width, args.augment, shard_path))
+            shard_idx += 1
+
+    return char_chunks
+
+
+# ---------------------------------------------------------------------------
+# Pool runner
+# ---------------------------------------------------------------------------
+
+def run_generation_pool(chunks, worker_fn, n_workers, label):
+    """Run a generation function over chunks using a multiprocessing pool."""
+    total_est = sum(c[1] for c in chunks)
+    print(f"\nGenerating {total_est} {label} images, {len(chunks)} chunks, "
+          f"{min(n_workers, len(chunks))} workers\n")
+
+    start = time.time()
+    done = 0
+    with Pool(processes=min(n_workers, len(chunks)), maxtasksperchild=1) as pool:
+        for result in pool.imap_unordered(worker_fn, chunks):
+            _, script, n = result
+            done += n
+            elapsed = time.time() - start
+            print(f"    total: {done}/{total_est} ({done/elapsed:.0f} img/s)", flush=True)
+    return done
+
+
+# ---------------------------------------------------------------------------
+# Metadata
+# ---------------------------------------------------------------------------
+
+def save_metadata(valid_scripts, args, shard_dir):
+    """Save metadata and print summary. Warns if existing metadata has different dimensions."""
+    meta_path = shard_dir / "metadata.pt"
+    if meta_path.exists():
+        try:
+            old = torch.load(meta_path, weights_only=True)
+            if old.get("height") != args.height or old.get("max_width") != args.max_width:
+                print(f"WARNING: Existing metadata has height={old.get('height')}, "
+                      f"max_width={old.get('max_width')} but current run uses "
+                      f"height={args.height}, max_width={args.max_width}. "
+                      f"Overwriting metadata.")
+        except Exception:
+            pass
+
+    active_groups = []
+    seen = set()
+    for s in valid_scripts:
+        g = SCRIPT_TO_GROUP[s]
+        if g not in seen:
+            active_groups.append(g)
+            seen.add(g)
+
+    torch.save({
+        "active_scripts": valid_scripts,
+        "active_groups": active_groups,
+        "script_to_idx": {s: i for i, s in enumerate(valid_scripts)},
+        "group_to_idx": {g: i for i, g in enumerate(active_groups)},
+        "height": args.height,
+        "max_width": args.max_width,
+        "augmented": args.augment,
+        "samples_per_script": args.samples_per_script,
+        "has_labels": True,
+    }, meta_path)
+
+    total_shards = len(list(shard_dir.glob("shard_*.pt")))
+    total_mb = sum(f.stat().st_size for f in shard_dir.glob("*.pt")) / 1e6
+    print(f"\nDone. {total_shards} shards ({total_mb:.0f} MB) in {shard_dir}/")
+
+
+# ---------------------------------------------------------------------------
 # Worker functions (called in multiprocessing pool)
 # ---------------------------------------------------------------------------
 
@@ -78,7 +298,7 @@ def _generate_word_batch(args_tuple):
     images, labels = [], []
     attempts = 0
     # First 30% clean, rest augmented — guarantees clean examples
-    clean_target = int(count * 0.3)
+    clean_target = int(count * CLEAN_RATIO)
 
     while len(images) < count and attempts < count * 5:
         attempts += 1
@@ -172,59 +392,17 @@ def _generate_char_batch(args_tuple):
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate training data")
-    parser.add_argument("--samples-per-script", type=int, default=10000)
-    parser.add_argument("--scripts", type=str, default="all")
-    parser.add_argument("--balance-groups", action="store_true")
-    parser.add_argument("--augment", action="store_true", default=True)
-    parser.add_argument("--no-augment", action="store_true")
-    parser.add_argument("--height", type=int, default=32)
-    parser.add_argument("--max-width", type=int, default=192)
-    parser.add_argument("--include-chars", action="store_true")
-    parser.add_argument("--char-reps", type=int, default=3)
-    parser.add_argument("--out", type=str, default="data/shards")
-    parser.add_argument("--workers", type=int, default=48)
-    args = parser.parse_args()
+    args = parse_args()
 
-    if args.no_augment:
-        args.augment = False
+    active_scripts = (list(SCRIPTS) if args.scripts == "all"
+                      else [s.strip() for s in args.scripts.split(",")])
 
-    active_scripts = list(SCRIPTS) if args.scripts == "all" else [
-        s.strip() for s in args.scripts.split(",")]
-
-    # Load word lists
     print("Loading word lists...")
     word_lists = load_all_word_lists(active_scripts)
 
-    # Discover fonts
-    print("Discovering fonts...")
-    script_fonts = {}
-    valid_scripts = []
-    for script in active_scripts:
-        if script == "emoji":
-            script_fonts[script] = ["__emoji__"]
-            valid_scripts.append(script)
-            print(f"  {'emoji':<15}   - (synthetic)")
-            continue
-        if not word_lists.get(script):
-            print(f"  {script:<15}   no word list — SKIPPED")
-            continue
-        fonts = find_fonts_for_script(script)
-        sample = word_lists[script][0]
-        weighted = build_weighted_font_list(fonts, sample)
-        if weighted:
-            script_fonts[script] = weighted
-            valid_scripts.append(script)
-            n_unique = len(set(weighted))
-            print(f"  {script:<15} {n_unique:>3} fonts")
-        else:
-            print(f"  {script:<15}   0 fonts — SKIPPED")
+    script_fonts, valid_scripts = discover_fonts(active_scripts, word_lists)
 
-    if len(valid_scripts) < 2:
-        print("ERROR: Need at least 2 scripts with fonts")
-        sys.exit(1)
-
-    # Build targets per script
+    # Build per-script targets
     tasks = []
     for script in valid_scripts:
         group = SCRIPT_TO_GROUP[script]
@@ -238,116 +416,28 @@ def main():
     shard_dir = Path(args.out)
     shard_dir.mkdir(parents=True, exist_ok=True)
 
-    # Build word image chunks (skip existing shards for resume)
-    chunks = []
-    shard_idx = 0
-    skipped = 0
-    for script, target in tasks:
-        fonts = script_fonts[script]
-        words = word_lists.get(script, ["placeholder"])
-        chunk_size = max(500, target // max(1, args.workers // len(tasks)))
-        remaining = target
-        while remaining > 0:
-            batch = min(chunk_size, remaining)
-            shard_path = str(shard_dir / f"shard_{shard_idx:04d}.pt")
-            if Path(shard_path).exists() and Path(shard_path).stat().st_size > 100:
-                skipped += batch
-            else:
-                chunks.append((script, batch, fonts, words,
-                              args.height, args.max_width, args.augment, shard_path))
-            shard_idx += 1
-            remaining -= batch
-
-    total_est = sum(c[1] for c in chunks)
+    # Word images
+    chunks, next_shard_idx, skipped = build_word_chunks(tasks, script_fonts, word_lists, args, shard_dir)
     if skipped > 0:
-        print(f"\nResuming: {skipped} images in existing shards, {total_est} remaining")
-    if not chunks:
-        print("All shards exist. Done.")
+        print(f"\nResuming: {skipped} images in existing shards, "
+              f"{sum(c[1] for c in chunks)} remaining")
+    if chunks:
+        run_generation_pool(chunks, _generate_word_batch, args.workers, "word")
     else:
-        print(f"\nGenerating {total_est} images, {len(chunks)} chunks, "
-              f"{min(args.workers, len(chunks))} workers\n")
-        start = time.time()
-        done = 0
-        with Pool(processes=min(args.workers, len(chunks)), maxtasksperchild=1) as pool:
-            for result in pool.imap_unordered(_generate_word_batch, chunks):
-                _, script, n = result
-                done += n
-                elapsed = time.time() - start
-                print(f"    total: {done}/{total_est} ({done/elapsed:.0f} img/s)", flush=True)
+        print("All shards exist. Done.")
 
-    # Single-character images
+    # Character images
     if args.include_chars:
-        script_word_target = {s: t for s, t in tasks}
-        char_budget_ratio = 0.25
-
-        print(f"\n{'='*60}")
-        print(f"Generating single-character images (max {char_budget_ratio:.0%} of word budget)")
-        print(f"{'='*60}")
-
-        char_chunks = []
-        for script in valid_scripts:
-            if script == "emoji":
-                continue
-            fonts = script_fonts[script]
-            chars = get_renderable_chars(script)
-            if not chars:
-                continue
-
-            word_target = script_word_target.get(script, args.samples_per_script)
-            char_budget = int(word_target * char_budget_ratio)
-            reps = max(1, min(args.char_reps, char_budget // len(chars)))
-            est = len(chars) * reps
-            print(f"  {script:<15} {len(chars):>5} unique chars × {reps} reps = ~{est} images "
-                  f"(word budget: {word_target})")
-
-            chunk_size = max(200, len(chars) // max(1, args.workers // len(valid_scripts)))
-            for ci in range(0, len(chars), chunk_size):
-                char_subset = chars[ci:ci + chunk_size]
-                shard_path = str(shard_dir / f"char_shard_{shard_idx:04d}.pt")
-                if Path(shard_path).exists() and Path(shard_path).stat().st_size > 100:
-                    shard_idx += 1
-                    continue
-                char_chunks.append((script, char_subset, reps, fonts,
-                                    args.height, args.max_width, args.augment, shard_path))
-                shard_idx += 1
-
+        char_chunks = build_char_chunks(valid_scripts, script_fonts, tasks, args,
+                                        shard_dir, next_shard_idx)
         if char_chunks:
             print(f"\n  {len(char_chunks)} char chunks across "
                   f"{min(args.workers, len(char_chunks))} workers\n")
-            char_start = time.time()
-            char_done = 0
-            with Pool(processes=min(args.workers, len(char_chunks)), maxtasksperchild=1) as pool:
-                for result in pool.imap_unordered(_generate_char_batch, char_chunks):
-                    _, script, n = result
-                    char_done += n
-            print(f"\n  Total: {char_done} char images in {time.time()-char_start:.0f}s")
+            run_generation_pool(char_chunks, _generate_char_batch, args.workers, "char")
         else:
             print("  All char shards exist.")
 
-    # Save metadata
-    active_groups = []
-    seen = set()
-    for s in valid_scripts:
-        g = SCRIPT_TO_GROUP[s]
-        if g not in seen:
-            active_groups.append(g)
-            seen.add(g)
-
-    torch.save({
-        "active_scripts": valid_scripts,
-        "active_groups": active_groups,
-        "script_to_idx": {s: i for i, s in enumerate(valid_scripts)},
-        "group_to_idx": {g: i for i, g in enumerate(active_groups)},
-        "height": args.height,
-        "max_width": args.max_width,
-        "augmented": args.augment,
-        "samples_per_script": args.samples_per_script,
-        "has_labels": True,
-    }, shard_dir / "metadata.pt")
-
-    total_shards = len(list(shard_dir.glob("shard_*.pt")))
-    total_mb = sum(f.stat().st_size for f in shard_dir.glob("*.pt")) / 1e6
-    print(f"\nDone. {total_shards} shards ({total_mb:.0f} MB) in {shard_dir}/")
+    save_metadata(valid_scripts, args, shard_dir)
 
 
 if __name__ == "__main__":
