@@ -41,11 +41,11 @@ class CTCHead(nn.Module):
                  hidden_dim: int = 384, num_layers: int = 2, dropout: float = 0.1):
         super().__init__()
         self.vocab_size = vocab_size
-        # Use enc_dim//2 as hidden — enough for vocab projection,
-        # avoids 3x full-dim matmuls that were slower than BiLSTM
         mlp_hidden = enc_dim // 2
         self.mlp = nn.Sequential(
             nn.Linear(enc_dim, mlp_hidden),
+            nn.GELU(),
+            nn.Linear(mlp_hidden, mlp_hidden),
             nn.GELU(),
             nn.Linear(mlp_hidden, vocab_size),
         )
