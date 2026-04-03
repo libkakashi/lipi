@@ -408,17 +408,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         lid2_loss = compute_lid2_loss(
             out["script_logits_per_group"], sids, lid1_ok, ce_loss_fn)
 
-        # Fraction-weighted losses with routing penalty.
-        # CTC and LID-2 are scaled by their contributing fraction (automatic
-        # curriculum). LID-1 gets extra weight proportional to the misroute
-        # rate — the model pays a price for every sample CTC couldn't run on.
-        B = imgs.shape[0]
-        lid1_ok_frac = lid1_ok.sum().float() / B
-        ctc_ok_frac = ctc_ok.sum().float() / B
-        routing_pressure = lid1_weight + routing_penalty * (1.0 - ctc_ok_frac)
-        loss = (routing_pressure * lid1_loss.float()
-                + lid2_loss.float()
-                + ctc_ok_frac * ctc_loss)
+        loss = ctc_loss + lid1_weight * lid1_loss.float() + lid2_loss.float()
 
         if grad_accum > 1:
             loss = loss / grad_accum
