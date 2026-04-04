@@ -350,13 +350,23 @@ def resume_from_checkpoint(args, model, optimizer, base_optimizer, scaler, sched
             break
     model_dtype = next(model.parameters()).dtype
     dtype_changed = ckpt_dtype is not None and ckpt_dtype != model_dtype
+    # Check param group count matches (e.g., checkpoint had 1 group, now we have 2)
+    ckpt_groups = len(ckpt.get("optimizer", {}).get("param_groups", []))
+    cur_groups = len(base_optimizer.param_groups)
+    groups_changed = ckpt_groups != cur_groups
     if "optimizer" not in ckpt:
         print("  No optimizer state in checkpoint (fresh optimizer)")
-    elif not skipped and not dtype_changed:
-        optimizer.load_state_dict(ckpt["optimizer"])
+    elif skipped or dtype_changed or groups_changed:
+        reasons = []
+        if skipped:
+            reasons.append("vocab changed")
+        if dtype_changed:
+            reasons.append(f"dtype changed ({ckpt_dtype}→{model_dtype})")
+        if groups_changed:
+            reasons.append(f"param groups changed ({ckpt_groups}→{cur_groups})")
+        print(f"  Skipping optimizer state ({', '.join(reasons)})")
     else:
-        reason = "vocab changed" if skipped else f"dtype changed ({ckpt_dtype}→{model_dtype})"
-        print(f"  Skipping optimizer state ({reason})")
+        optimizer.load_state_dict(ckpt["optimizer"])
     if "scaler" in ckpt:
         scaler.load_state_dict(ckpt["scaler"])
     # Sync GPU->CPU mirrors after model load (cpu_offload only)
