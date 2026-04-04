@@ -27,6 +27,7 @@ from src.data.augmentation import (
     rotation, perspective_warp, wave_distortion,
     bleed_through, fold_crease, aged_document, scanner_edge, water_stain,
     stroke_variation, smudge,
+    variable_baseline, slant, ink_fade, variable_stroke, lined_paper,
     noise, color_jitter, to_grayscale,
     occlusion, weather_damage,
 )
@@ -72,8 +73,10 @@ STYLES = {
     },
     "handwritten": {
         "proportion": 0.25,
-        "ops": [stroke_variation, smudge, noise, exposure_jitter,
-                rotation, wave_distortion, bleed_through],
+        "ops": [stroke_variation, smudge, variable_stroke,
+                variable_baseline, slant, ink_fade, lined_paper,
+                noise, exposure_jitter, rotation, wave_distortion,
+                bleed_through],
         "font_filter": "handwriting",
         "clean_render": False,
     },

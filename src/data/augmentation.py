@@ -492,7 +492,142 @@ def elastic_distortion(img: Image.Image) -> Image.Image:
 
 
 # =========================================================================
-# Op registry — 20 ops, no redundancy
+# Handwriting simulation
+# =========================================================================
+
+def variable_baseline(img: Image.Image) -> Image.Image:
+    """Drifting baseline — handwriting doesn't follow straight lines.
+
+    Applies a smooth random vertical displacement per column,
+    simulating natural hand movement across the page.
+    """
+    arr = np.array(img)
+    h, w = arr.shape[:2]
+    # Generate smooth random displacement (low-frequency noise)
+    n_control = random.randint(3, 6)
+    control_points = [random.uniform(-2.5, 2.5) for _ in range(n_control)]
+    x_positions = np.linspace(0, w - 1, n_control)
+    displacements = np.interp(np.arange(w), x_positions, control_points)
+
+    result = np.full_like(arr, arr[0, 0])  # fill with top-left pixel (background)
+    for x in range(w):
+        shift = int(round(displacements[x]))
+        for y in range(h):
+            src_y = min(max(y + shift, 0), h - 1)
+            result[y, x] = arr[src_y, x]
+
+    return Image.fromarray(result)
+
+
+def slant(img: Image.Image) -> Image.Image:
+    """Random slant — handwriting typically leans left or right.
+
+    Applies a horizontal shear transform. More natural than rotation
+    for simulating handwriting angle.
+    """
+    arr = np.array(img)
+    h, w = arr.shape[:2]
+    shear = random.uniform(-0.3, 0.3)  # negative = left lean, positive = right
+
+    result = np.full_like(arr, arr[0, 0])
+    for y in range(h):
+        offset = int(shear * (y - h / 2))
+        for x in range(w):
+            src_x = x - offset
+            if 0 <= src_x < w:
+                result[y, x] = arr[y, src_x]
+
+    return Image.fromarray(result)
+
+
+def ink_fade(img: Image.Image) -> Image.Image:
+    """Ink fading — pen running low, inconsistent ink flow.
+
+    Applies a random gradient that partially fades the text,
+    simulating uneven ink distribution.
+    """
+    arr = np.array(img, dtype=np.float32)
+    h, w = arr.shape[:2]
+
+    # Detect background color from corners
+    corners = [arr[0, 0], arr[0, -1], arr[-1, 0], arr[-1, -1]]
+    bg = np.median(corners, axis=0)
+
+    # Random fade: either left-to-right, right-to-left, or patchy
+    style = random.choice(["lr", "rl", "patchy"])
+    if style == "lr":
+        fade = np.linspace(1.0, random.uniform(0.3, 0.7), w)
+    elif style == "rl":
+        fade = np.linspace(random.uniform(0.3, 0.7), 1.0, w)
+    else:
+        # Patchy: random smooth fade
+        n_pts = random.randint(4, 8)
+        ctrl = [random.uniform(0.4, 1.0) for _ in range(n_pts)]
+        x_pos = np.linspace(0, w - 1, n_pts)
+        fade = np.interp(np.arange(w), x_pos, ctrl)
+
+    # Blend toward background where fade is low
+    fade = fade[np.newaxis, :, np.newaxis]  # (1, W, 1)
+    arr = arr * fade + bg * (1 - fade)
+
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+
+
+def variable_stroke(img: Image.Image) -> Image.Image:
+    """Variable stroke width — pen pressure changes across the word.
+
+    Applies thin/thicken differently across horizontal regions,
+    unlike stroke_variation which is uniform.
+    """
+    arr = np.array(img)
+    h, w = arr.shape[:2]
+    if w < 12:
+        return img
+
+    # Split into 3-5 vertical strips, each gets different treatment
+    n_strips = random.randint(3, 5)
+    strip_w = w // n_strips
+    result = arr.copy()
+
+    for i in range(n_strips):
+        x_start = i * strip_w
+        x_end = min((i + 1) * strip_w, w)
+        strip = Image.fromarray(arr[:, x_start:x_end])
+
+        action = random.choice(["thin", "thick", "none"])
+        if action == "thin":
+            strip = strip.filter(ImageFilter.MinFilter(size=3))
+        elif action == "thick":
+            strip = strip.filter(ImageFilter.MaxFilter(size=3))
+
+        result[:, x_start:x_end] = np.array(strip)
+
+    return Image.fromarray(result)
+
+
+def lined_paper(img: Image.Image) -> Image.Image:
+    """Lined paper background — horizontal ruled lines behind text.
+
+    Common in handwritten notes, forms, and notebooks.
+    """
+    arr = np.array(img, dtype=np.float32)
+    h, w = arr.shape[:2]
+
+    line_spacing = random.randint(6, 10)
+    line_color = random.uniform(0.7, 0.9)  # light gray
+    line_thickness = 1
+
+    for y in range(0, h, line_spacing):
+        for dy in range(line_thickness):
+            if y + dy < h:
+                arr[y + dy, :] = arr[y + dy, :] * line_color + \
+                    np.array([200, 200, 230], dtype=np.float32) * (1 - line_color)
+
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+
+
+# =========================================================================
+# Op registry — 25 ops
 # =========================================================================
 
 AUGMENT_OPS: list[Callable] = [
@@ -519,6 +654,12 @@ AUGMENT_OPS: list[Callable] = [
     # Ink (2)
     stroke_variation,
     smudge,
+    # Handwriting (5)
+    variable_baseline,
+    slant,
+    ink_fade,
+    variable_stroke,
+    lined_paper,
     # Noise & color (3)
     noise,
     color_jitter,
