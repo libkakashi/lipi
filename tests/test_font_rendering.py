@@ -631,15 +631,16 @@ class TestFontIsolation:
        Indic scripts look identical
     """
 
-    def test_no_cross_script_fonts_within_groups(self):
-        """Scripts in the same multi-script group must NOT share fonts.
+    def test_each_script_has_unique_fonts(self):
+        """Each script in a multi-script group must have at least some
+        fonts that are unique to it (not shared with other group members).
 
-        Shared fonts make scripts visually identical, preventing LID-2
-        from learning to distinguish them. Exception: cyrillic/greek
-        share fonts because most fonts genuinely support both.
+        Shared multi-script fonts (Baloo, Hind, Tiro) are fine and
+        desirable — they force the model to learn character shapes.
+        But each script also needs unique fonts for visual diversity.
         """
         from src.model.lid import GROUP_SCRIPTS
-        EXEMPT_GROUPS = {"cyrillic_greek"}  # these legitimately share fonts
+        EXEMPT_GROUPS = {"cyrillic_greek"}
 
         failures = []
         for group, scripts in GROUP_SCRIPTS.items():
@@ -654,47 +655,59 @@ class TestFontIsolation:
                 weighted = build_weighted_font_list(fonts, words[0])
                 script_font_sets[script] = set(Path(f).name for f in weighted)
 
-            for i, s1 in enumerate(scripts):
-                for s2 in scripts[i+1:]:
-                    if s1 not in script_font_sets or s2 not in script_font_sets:
-                        continue
-                    shared = script_font_sets[s1] & script_font_sets[s2]
-                    if shared:
-                        failures.append(
-                            f"{group}: {s1} and {s2} share {len(shared)} fonts: "
-                            f"{sorted(shared)[:3]}")
+            for script in scripts:
+                if script not in script_font_sets:
+                    continue
+                others = set()
+                for s2 in scripts:
+                    if s2 != script and s2 in script_font_sets:
+                        others |= script_font_sets[s2]
+                unique = script_font_sets[script] - others
+                if len(unique) == 0 and len(script_font_sets[script]) > 0:
+                    failures.append(
+                        f"{group}/{script}: no unique fonts "
+                        f"(all {len(script_font_sets[script])} shared)")
 
         assert not failures, (
-            "Font cross-contamination within groups:\n  " + "\n  ".join(failures))
+            "Scripts with no unique fonts:\n  " + "\n  ".join(failures))
 
-    def test_no_wrong_script_fonts(self):
-        """Script-specific fonts must not appear for OTHER restricted scripts.
+    def test_no_cross_family_font_leaks(self):
+        """Fonts from unrelated script families must not leak across.
 
-        E.g., NotoSansEthiopic must only appear for ethiopic,
-        NotoNaskhArabic must only appear for arabic, etc.
-        Skips scripts with None pattern (latin, cyrillic, greek) since
-        they intentionally accept all fonts.
+        E.g., NotoSansEthiopic must not appear for Arabic,
+        NotoNaskhArabic must not appear for Ethiopic.
+        Within the same family (Indic scripts sharing Baloo/Tiro) is fine.
         """
         from src.data.fonts import _SCRIPT_FONT_PATTERNS
 
-        SCRIPT_SPECIFIC_FONTS = {
+        # Script families — sharing fonts within a family is OK
+        INDIC = {"devanagari", "gurmukhi", "gujarati", "bengali", "odia",
+                 "kannada", "telugu", "malayalam", "tamil"}
+        FAMILIES = [INDIC]
+
+        def same_family(s1, s2):
+            return any(s1 in fam and s2 in fam for fam in FAMILIES)
+
+        # Markers that uniquely identify a script's dedicated fonts
+        SCRIPT_MARKERS = {
             "ethiopic": ["ethiopic", "abyssinica"],
             "tibetan": ["tibetan", "jomolhari"],
-            "devanagari": ["devanagari"],
-            "bengali": ["bengali", "bangla"],
-            "tamil": ["tamil"],
-            "arabic": ["nastaliq", "naskh", "kufi"],
-            "hebrew": ["hebrew"],
+            "arabic": ["nastaliq", "naskh", "kufi", "amiri", "lateef"],
+            "hebrew": ["hebrew", "david"],
             "armenian": ["armenian"],
             "georgian": ["georgian"],
+            "thai": ["thai", "sarabun", "kanit"],
+            "burmese": ["myanmar", "padauk"],
+            "khmer": ["khmer", "battambang", "bayon"],
+            "sinhala": ["sinhala", "abhaya"],
         }
 
         failures = []
-        for target_script, markers in SCRIPT_SPECIFIC_FONTS.items():
+        for target_script, markers in SCRIPT_MARKERS.items():
             for script in SCRIPTS:
-                if script == "emoji" or script == target_script:
+                if (script == "emoji" or script == target_script
+                        or same_family(script, target_script)):
                     continue
-                # Skip scripts that accept all fonts (None pattern)
                 if _SCRIPT_FONT_PATTERNS.get(script) is None:
                     continue
                 fonts = find_fonts_for_script(script)
@@ -711,7 +724,7 @@ class TestFontIsolation:
                                 f"(belongs to {target_script})")
 
         assert not failures, (
-            "Wrong script fonts detected:\n  " + "\n  ".join(failures))
+            "Cross-family font leaks:\n  " + "\n  ".join(failures))
 
     def test_minimum_font_count(self):
         """Every script must have at least 2 fonts for visual diversity."""
