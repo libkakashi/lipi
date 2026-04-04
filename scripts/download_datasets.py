@@ -86,6 +86,31 @@ def download_iiit_indic(out_dir):
     print(f"  Saved to {dest}/")
 
 
+@register("indic-scene",
+          ["devanagari", "bengali", "gurmukhi", "gujarati", "odia",
+           "kannada", "telugu", "malayalam", "tamil", "latin"],
+          "IndicSTR12 + Bharat Scene Text: 127K+ real Indic scene text words")
+def download_indic_scene(out_dir):
+    dest = out_dir / "indic-scene"
+    dest.mkdir(parents=True, exist_ok=True)
+
+    # Bharat Scene Text Dataset (GitHub, direct download)
+    run(f"git clone https://github.com/Bhashini-IITJ/BharatSceneTextDataset.git "
+        f"{dest}/bstd")
+
+    # IndicSTR12 requires CVIT download
+    print("  IndicSTR12 (27K real + 3M synth per language):")
+    print("  Download from: https://cvit.iiit.ac.in/research/projects/cvit-projects/indicstr")
+    print(f"  Extract to: {dest}/indicstr12/")
+
+    # Mozhi (printed Indic text)
+    print("  Mozhi (1.2M+ printed word images, 13 languages):")
+    print("  Download from: https://cvit.iiit.ac.in/usodi/tdocrmil.php")
+    print(f"  Extract to: {dest}/mozhi/")
+
+    print(f"  Saved to {dest}/")
+
+
 @register("iam",
           ["latin"],
           "IAM Handwriting Database: 115K English word images, 657 writers")
