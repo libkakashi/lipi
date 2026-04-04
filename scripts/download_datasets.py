@@ -149,10 +149,23 @@ def download_hebrew(out_dir):
 
 @register("arabic",
           ["arabic"],
-          "Arabic OCR: IFN/ENIT + Muharaf + OpenITI")
+          "Arabic OCR: 2.16M words + KHATT handwriting + Muharaf + EvArEST scene text")
 def download_arabic(out_dir):
+    check_hf()
     dest = out_dir / "arabic"
     dest.mkdir(parents=True, exist_ok=True)
+
+    # Arabic OCR Dataset — 2.16M word images (biggest Arabic dataset)
+    run(f"huggingface-cli download mssqpi/Arabic-OCR-Dataset "
+        f"--repo-type dataset --local-dir {dest}/arabic-ocr-2m")
+
+    # KHATT handwritten Arabic
+    run(f"huggingface-cli download johnlockejrr/KHATT_v1.0_dataset "
+        f"--repo-type dataset --local-dir {dest}/khatt")
+
+    # EvArEST Arabic scene text
+    run(f"huggingface-cli download Melaraby/EvArEST-dataset-for-Arabic-scene-text-recognition "
+        f"--repo-type dataset --local-dir {dest}/evarest")
 
     # Muharaf (historical Arabic manuscripts)
     run(f"git clone https://github.com/MehreenMehreen/muharaf.git {dest}/muharaf")
@@ -224,6 +237,66 @@ def download_bengali(out_dir):
     print("  BN-HTRd available at:")
     print("  https://data.mendeley.com/datasets/743k6dm543/1")
     print(f"  Download and extract to {dest}/")
+
+
+@register("chinese-text",
+          ["han_kana"],
+          "Chinese text recognition: 500K line images")
+def download_chinese_text(out_dir):
+    check_hf()
+    dest = out_dir / "chinese-text"
+    dest.mkdir(parents=True, exist_ok=True)
+    run(f"huggingface-cli download priyank-m/chinese_text_recognition "
+        f"--repo-type dataset --local-dir {dest}")
+    print(f"  Saved to {dest}/")
+
+
+@register("russian-hw",
+          ["cyrillic"],
+          "HWR200: 30K Russian handwritten sentences, 3 photo conditions")
+def download_russian_hw(out_dir):
+    check_hf()
+    dest = out_dir / "russian-hw"
+    dest.mkdir(parents=True, exist_ok=True)
+    run(f"huggingface-cli download AntiplagiatCompany/HWR200 "
+        f"--repo-type dataset --local-dir {dest}")
+    print(f"  Saved to {dest}/")
+
+
+@register("burmese-real",
+          ["burmese"],
+          "Burmese OCR: 9K clean line images (real)")
+def download_burmese_real(out_dir):
+    check_hf()
+    dest = out_dir / "burmese-real"
+    dest.mkdir(parents=True, exist_ok=True)
+    run(f"huggingface-cli download alexbeatson/burmese_ocr_data "
+        f"--repo-type dataset --local-dir {dest}")
+    print(f"  Saved to {dest}/")
+
+
+@register("hindi-ocr",
+          ["devanagari"],
+          "Hindi/Nepali OCR: 6.7K Devanagari line images")
+def download_hindi_ocr(out_dir):
+    check_hf()
+    dest = out_dir / "hindi-ocr"
+    dest.mkdir(parents=True, exist_ok=True)
+    run(f"huggingface-cli download apjanco/hindi-ocr "
+        f"--repo-type dataset --local-dir {dest}")
+    print(f"  Saved to {dest}/")
+
+
+@register("sanskrit-ocr",
+          ["devanagari"],
+          "Sanskrit typed OCR: 3.5K Devanagari word images")
+def download_sanskrit(out_dir):
+    check_hf()
+    dest = out_dir / "sanskrit-ocr"
+    dest.mkdir(parents=True, exist_ok=True)
+    run(f"huggingface-cli download Process-Venue/Sanskrit-OCR-Typed-Dataset "
+        f"--repo-type dataset --local-dir {dest}")
+    print(f"  Saved to {dest}/")
 
 
 @register("burmese",
