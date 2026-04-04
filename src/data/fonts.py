@@ -1,11 +1,10 @@
 """
-Font discovery and validation for OCR training data generation.
+Font discovery for OCR training data generation.
 
-Finds fonts that can render each script using name-based matching.
-Fonts must contain script-relevant keywords (e.g., "Ethiopic", "Tamil")
-to be used for that script. This prevents system fonts (DejaVu, FreeSerif)
-from rendering tofu/garbage for scripts they technically have in their
-cmap but can't actually display.
+Uses an explicit font-to-script mapping — no pattern matching.
+Each font is mapped to the scripts it can actually render.
+Prevents tofu rendering from fonts that pass cmap checks but
+can't display the correct glyphs.
 """
 
 import os
@@ -27,85 +26,224 @@ _FONT_DIRS = [
     str(Path(__file__).parent.parent.parent / "training_data" / "fonts"),
 ]
 
+# Explicit font filename → scripts mapping.
+# Only fonts in this list are used. No pattern matching.
+# Derived from setup_fonts.py — these are the fonts we download and control.
+_FONT_TO_SCRIPTS: dict[str, list[str]] = {
+    # --- Latin / Cyrillic / Greek (base Noto + serif) ---
+    "NotoSans-Regular.ttf": ["latin", "cyrillic", "greek"],
+    "NotoSans-Bold.ttf": ["latin", "cyrillic", "greek"],
+    "NotoSans-Italic.ttf": ["latin", "cyrillic", "greek"],
+    "NotoSans-Light.ttf": ["latin", "cyrillic", "greek"],
+    "NotoSansMono-Regular.ttf": ["latin", "cyrillic", "greek"],
+    "NotoSerif-Regular.ttf": ["latin", "cyrillic", "greek"],
+    "NotoSerif-Bold.ttf": ["latin", "cyrillic", "greek"],
+    "NotoSerif-Italic.ttf": ["latin", "cyrillic", "greek"],
+    # Latin handwriting / display
+    "Caveat[wght].ttf": ["latin"],
+    "DancingScript[wght].ttf": ["latin"],
+    "IndieFlower-Regular.ttf": ["latin"],
+    "PatrickHand-Regular.ttf": ["latin"],
+    "ShadowsIntoLight.ttf": ["latin"],
+    "PermanentMarker-Regular.ttf": ["latin"],
+    "AmaticSC-Regular.ttf": ["latin"],
+    "Lobster-Regular.ttf": ["latin"],
+    "Pacifico-Regular.ttf": ["latin"],
+    "ComicNeue-Regular.ttf": ["latin"],
+    "SpecialElite-Regular.ttf": ["latin"],
+    "Poppins-Regular.ttf": ["latin", "devanagari"],
+    # --- Arabic ---
+    "NotoSansArabic-Regular.ttf": ["arabic"],
+    "NotoSansArabic-Bold.ttf": ["arabic"],
+    "NotoNaskhArabic-Regular.ttf": ["arabic"],
+    "NotoNaskhArabic-Bold.ttf": ["arabic"],
+    "NotoNastaliqUrdu-Regular.ttf": ["arabic"],
+    "NotoKufiArabic-Regular.ttf": ["arabic"],
+    "Amiri-Regular.ttf": ["arabic"],
+    "Amiri-Bold.ttf": ["arabic"],
+    "ScheherazadeNew-Regular.ttf": ["arabic"],
+    "Lateef-Regular.ttf": ["arabic"],
+    # --- Hebrew ---
+    "NotoSansHebrew-Regular.ttf": ["hebrew"],
+    "NotoSansHebrew-Bold.ttf": ["hebrew"],
+    "NotoSerifHebrew-Regular.ttf": ["hebrew"],
+    "FrankRuhlLibre[wght].ttf": ["hebrew"],
+    "Rubik[wght].ttf": ["hebrew"],
+    "SecularOne-Regular.ttf": ["hebrew"],
+    "Heebo[wght].ttf": ["hebrew"],
+    "Assistant[wght].ttf": ["hebrew"],
+    "SuezOne-Regular.ttf": ["hebrew"],
+    "DavidLibre-Regular.ttf": ["hebrew"],
+    "Karantina-Regular.ttf": ["hebrew"],
+    # --- CJK (han_kana) ---
+    "NotoSansSC[wght].ttf": ["han_kana"],
+    "NotoSansJP[wght].ttf": ["han_kana"],
+    "NotoSansCJKsc-Regular.otf": ["han_kana"],
+    "NotoSansCJKjp-Regular.otf": ["han_kana"],
+    "NotoSerifCJKsc-Regular.otf": ["han_kana"],
+    "HachiMaruPop-Regular.ttf": ["han_kana"],
+    "KleeOne-Regular.ttf": ["han_kana"],
+    "Yomogi-Regular.ttf": ["han_kana"],
+    "MaShanZheng-Regular.ttf": ["han_kana"],
+    "LiuJianMaoCao-Regular.ttf": ["han_kana"],
+    "LongCang-Regular.ttf": ["han_kana"],
+    "ZhiMangXing-Regular.ttf": ["han_kana"],
+    "ShipporiMincho-Regular.ttf": ["han_kana"],
+    "ZenMaruGothic-Regular.ttf": ["han_kana"],
+    "ZenKurenaido-Regular.ttf": ["han_kana"],
+    "ZCOOLQingKeHuangYou-Regular.ttf": ["han_kana"],
+    "ZCOOLKuaiLe-Regular.ttf": ["han_kana"],
+    # --- Korean ---
+    "NotoSansKR[wght].ttf": ["korean"],
+    "NotoSansCJKkr-Regular.otf": ["korean"],
+    "NotoSerifCJKkr-Regular.otf": ["korean"],
+    "NanumGothic-Regular.ttf": ["korean"],
+    "NanumMyeongjo-Regular.ttf": ["korean"],
+    "NanumPenScript-Regular.ttf": ["korean"],
+    # --- Devanagari ---
+    "NotoSansDevanagari-Regular.ttf": ["devanagari"],
+    "NotoSansDevanagari-Bold.ttf": ["devanagari"],
+    "NotoSerifDevanagari-Regular.ttf": ["devanagari"],
+    "TiroDevanagariHindi-Regular.ttf": ["devanagari"],
+    "Laila-Regular.ttf": ["devanagari"],
+    "Kalam-Regular.ttf": ["devanagari", "latin"],
+    # --- Bengali ---
+    "NotoSansBengali-Regular.ttf": ["bengali"],
+    "NotoSansBengali-Bold.ttf": ["bengali"],
+    "NotoSerifBengali-Regular.ttf": ["bengali"],
+    "TiroBangla-Regular.ttf": ["bengali"],
+    "HindSiliguri-Regular.ttf": ["bengali"],
+    "BalooDa2[wght].ttf": ["bengali"],
+    "Atma-Regular.ttf": ["bengali"],
+    "Galada-Regular.ttf": ["bengali"],
+    "Mina-Regular.ttf": ["bengali"],
+    # --- Gurmukhi ---
+    "NotoSansGurmukhi-Regular.ttf": ["gurmukhi"],
+    "NotoSansGurmukhi-Bold.ttf": ["gurmukhi"],
+    "NotoSerifGurmukhi-Regular.ttf": ["gurmukhi"],
+    "BalooPaaji2[wght].ttf": ["gurmukhi"],
+    "MuktaMahee-Regular.ttf": ["gurmukhi"],
+    "Langar-Regular.ttf": ["gurmukhi"],
+    # --- Gujarati ---
+    "NotoSansGujarati-Regular.ttf": ["gujarati"],
+    "NotoSansGujarati-Bold.ttf": ["gujarati"],
+    "NotoSerifGujarati-Regular.ttf": ["gujarati"],
+    "HindVadodara-Regular.ttf": ["gujarati"],
+    # --- Odia ---
+    "NotoSansOriya-Regular.ttf": ["odia"],
+    "NotoSansOriya-Bold.ttf": ["odia"],
+    "BalooBhaina2[wght].ttf": ["odia"],
+    # --- Tamil ---
+    "NotoSansTamil-Regular.ttf": ["tamil"],
+    "NotoSansTamil-Bold.ttf": ["tamil"],
+    "NotoSerifTamil-Regular.ttf": ["tamil"],
+    "TiroTamil-Regular.ttf": ["tamil"],
+    "Kavivanar-Regular.ttf": ["tamil"],
+    "Catamaran[wght].ttf": ["tamil"],
+    "HindMadurai-Regular.ttf": ["tamil"],
+    "MuktaMalar-Regular.ttf": ["tamil"],
+    "BalooThambi2[wght].ttf": ["tamil"],
+    # --- Telugu ---
+    "NotoSansTelugu-Regular.ttf": ["telugu"],
+    "NotoSansTelugu-Bold.ttf": ["telugu"],
+    "NotoSerifTelugu-Regular.ttf": ["telugu"],
+    "TiroTelugu-Regular.ttf": ["telugu"],
+    "LakkiReddy-Regular.ttf": ["telugu"],
+    "HindGuntur-Regular.ttf": ["telugu"],
+    "Mandali-Regular.ttf": ["telugu"],
+    "Ramabhadra-Regular.ttf": ["telugu"],
+    "BalooTammudu2[wght].ttf": ["telugu"],
+    "Peddana-Regular.ttf": ["telugu"],
+    # --- Kannada ---
+    "NotoSansKannada-Regular.ttf": ["kannada"],
+    "NotoSansKannada-Bold.ttf": ["kannada"],
+    "NotoSerifKannada-Regular.ttf": ["kannada"],
+    "TiroKannada-Regular.ttf": ["kannada"],
+    "AkayaKanadaka-Regular.ttf": ["kannada"],
+    "Benne-Regular.ttf": ["kannada"],
+    "HindMysuru-Regular.ttf": ["kannada"],
+    "BalooTamma2[wght].ttf": ["kannada"],
+    # --- Malayalam ---
+    "NotoSansMalayalam-Regular.ttf": ["malayalam"],
+    "NotoSansMalayalam-Bold.ttf": ["malayalam"],
+    "NotoSerifMalayalam-Regular.ttf": ["malayalam"],
+    "Chilanka-Regular.ttf": ["malayalam"],
+    "Manjari-Regular.ttf": ["malayalam"],
+    "Gayathri-Regular.ttf": ["malayalam"],
+    "BalooChettan2[wght].ttf": ["malayalam"],
+    # --- Sinhala ---
+    "NotoSansSinhala-Regular.ttf": ["sinhala"],
+    "NotoSansSinhala-Bold.ttf": ["sinhala"],
+    "NotoSerifSinhala-Regular.ttf": ["sinhala"],
+    "AbhayaLibre-Regular.ttf": ["sinhala"],
+    "Yaldevi[wght].ttf": ["sinhala"],
+    "GemunuLibre[wght].ttf": ["sinhala"],
+    # --- Thai ---
+    "NotoSansThai-Regular.ttf": ["thai"],
+    "NotoSansThai-Bold.ttf": ["thai"],
+    "NotoSerifThai-Regular.ttf": ["thai"],
+    "Kanit-Regular.ttf": ["thai"],
+    "Sarabun-Regular.ttf": ["thai"],
+    "Prompt-Regular.ttf": ["thai"],
+    # --- Lao ---
+    "NotoSansLao-Regular.ttf": ["lao"],
+    "NotoSansLao-Bold.ttf": ["lao"],
+    "NotoSerifLao-Regular.ttf": ["lao"],
+    "PhetsarathOT-Regular.ttf": ["lao"],
+    # --- Burmese ---
+    "NotoSansMyanmar-Regular.ttf": ["burmese"],
+    "NotoSansMyanmar-Bold.ttf": ["burmese"],
+    "NotoSerifMyanmar-Regular.ttf": ["burmese"],
+    "Padauk-Regular.ttf": ["burmese"],
+    "Padauk-Bold.ttf": ["burmese"],
+    # --- Khmer ---
+    "NotoSansKhmer-Regular.ttf": ["khmer"],
+    "NotoSansKhmer-Bold.ttf": ["khmer"],
+    "NotoSerifKhmer-Regular.ttf": ["khmer"],
+    "Battambang-Regular.ttf": ["khmer"],
+    "Hanuman[wght].ttf": ["khmer"],
+    "Moul-Regular.ttf": ["khmer"],
+    "Siemreap.ttf": ["khmer"],
+    "Koulen-Regular.ttf": ["khmer"],
+    "Fasthand-Regular.ttf": ["khmer"],
+    "Freehand-Regular.ttf": ["khmer"],
+    "Dangrek-Regular.ttf": ["khmer"],
+    "Bayon-Regular.ttf": ["khmer"],
+    "Content-Regular.ttf": ["khmer"],
+    # --- Armenian ---
+    "NotoSansArmenian-Regular.ttf": ["armenian"],
+    "NotoSansArmenian-Bold.ttf": ["armenian"],
+    "NotoSerifArmenian-Regular.ttf": ["armenian"],
+    # --- Georgian ---
+    "NotoSansGeorgian-Regular.ttf": ["georgian"],
+    "NotoSansGeorgian-Bold.ttf": ["georgian"],
+    "NotoSerifGeorgian-Regular.ttf": ["georgian"],
+    # --- Ethiopic ---
+    "NotoSansEthiopic-Regular.ttf": ["ethiopic"],
+    "NotoSansEthiopic-Bold.ttf": ["ethiopic"],
+    "NotoSerifEthiopic-Regular.ttf": ["ethiopic"],
+    "AbyssinicaSIL-Regular.ttf": ["ethiopic"],
+    # --- Tibetan ---
+    "NotoSansTibetan-Regular.ttf": ["tibetan"],
+    "NotoSansTibetan-Bold.ttf": ["tibetan"],
+    "NotoSerifTibetan-Regular.ttf": ["tibetan"],
+    "Jomolhari-Regular.ttf": ["tibetan"],
+}
+
+# Build reverse mapping: script → set of font filenames
+_SCRIPT_TO_FONTS: dict[str, set[str]] = {}
+for _font, _scripts in _FONT_TO_SCRIPTS.items():
+    for _script in _scripts:
+        _SCRIPT_TO_FONTS.setdefault(_script, set()).add(_font)
+
 # Keywords for font style weighting
 _HANDWRITING_KEYWORDS = [
     "caveat", "dancing", "indie", "patrick", "shadow", "kalam",
-    "nanumpen", "chilanka", "handwrit", "cursive", "script",
+    "nanumpen", "chilanka", "handwrit", "cursive",
 ]
 _DISPLAY_KEYWORDS = [
     "permanent", "amatic", "lobster", "pacifico", "special", "display",
 ]
-
-# Font name patterns that indicate support for each script.
-# A font must contain at least one of these substrings (case-insensitive)
-# to be considered for that script. This prevents DejaVu/FreeSerif/etc
-# from being used for scripts they have in cmap but render as tofu.
-#
-# "universal" fonts (explicitly designed for broad Unicode) are also listed.
-_SCRIPT_FONT_PATTERNS = {
-    "latin": ["notosans-", "notoserif-", "notosansmono",
-              "dejavu", "free", "liberation", "arial", "helvetica",
-              "times-", "times ", "verdana", "tahoma", "comic", "courier",
-              "roboto", "opensans", "lato", "montserrat", "poppins",
-              "inter-", "inter.", "raleway", "ubuntu", "source", "jetbrains",
-              "caveat", "dancing", "indie", "patrick", "kalam",
-              "lobster", "pacifico", "amatic", "permanent",
-              "baloo", "hind", "tiro", "mukta", "gemunu", "heebo",
-              "content"],
-    "cyrillic": ["notosans-", "notoserif-", "notosansmono",
-                 "dejavu", "free", "liberation", "arial", "helvetica",
-                 "times-", "times ", "verdana", "roboto", "opensans",
-                 "ubuntu", "source", "jetbrains", "inter-", "inter.",
-                 "caveat", "dancing"],
-    "greek": ["notosans-", "notoserif-", "notosansmono",
-              "dejavu", "free", "liberation", "arial", "helvetica",
-              "times-", "times ", "verdana", "roboto", "opensans",
-              "source", "jetbrains", "inter-", "inter."],
-    "arabic": ["arabic", "nastaliq", "naskh", "kufi", "urdu", "persian",
-               "lateef", "scheherazade", "amiri", "harmattan", "alkalami",
-               "reem", "mirza", "markazi", "tajawal", "cairo", "almarai"],
-    "hebrew": ["hebrew", "david", "frank", "miriam"],
-    "han_kana": ["cjk", "japanese", "chinese", "gothic", "mincho", "meiryo",
-                 "hiragino", "kaiti", "songti", "heiti", "fangsong",
-                 "source han", "hachi", "kosugi", "sawarabi",
-                 "zen", "klee", "reggae", "rampart", "rocknroll",
-                 "shippori", "dela", "potta", "yomogi", "yuji", "murecho"],
-    "korean": ["korean", "hangul", "nanum", "gothic", "batang", "gulim",
-               "malgun", "source han", "gamja", "jua",
-               "black han", "do hyeon", "gaegu", "gugi", "hi melody",
-               "poor story", "stylish", "sunflower", "single day"],
-    "devanagari": ["devanagari", "hindi", "marathi", "sanskrit", "mangal",
-                   "kokila", "gargi", "lohit", "poppins", "rajdhani",
-                   "yantramanav", "khand", "biryani", "halant", "laila"],
-    "gurmukhi": ["gurmukhi", "punjabi", "raavi", "baalopaaji", "baloopaaji"],
-    "gujarati": ["gujarati", "shruti"],
-    "bengali": ["bengali", "bangla", "vrinda", "shonar",
-                "galada", "atma", "mina", "balooda"],
-    "odia": ["odia", "oriya", "kalinga", "baloobhaina"],
-    "kannada": ["kannada", "tunga", "balootamma"],
-    "telugu": ["telugu", "gautami",
-               "mandali", "ramabhadra", "tenali", "gurajada", "lakki",
-               "balootammudu"],
-    "malayalam": ["malayalam", "kartika", "rachana",
-                  "chilanka", "gayathri", "manjari", "baloochettan"],
-    "tamil": ["tamil", "latha",
-              "arima", "kavivanar", "meera", "catamaran", "baloothambi"],
-    "sinhala": ["sinhala", "sinhalese", "iskoola", "abhaya"],
-    "thai": ["thai", "angsana", "browallia", "cordia",
-             "sarabun", "kanit", "prompt", "mitr", "itim", "charm",
-             "chonburi", "krub", "pridi", "taviraj", "trirong"],
-    "lao": ["lao", "phetsarath", "saysettha"],
-    "burmese": ["myanmar", "burmese", "padauk"],
-    "khmer": ["khmer", "cambodian", "battambang", "bayon",
-              "bokor", "chenla", "dangrek", "fasthand", "freehand",
-              "hanuman", "metal", "moul", "siemreap", "suwannaphum",
-              "taprom", "content"],
-    "emoji": None,
-    "armenian": ["armenian"],
-    "georgian": ["georgian"],
-    "ethiopic": ["ethiopic", "abyssinica"],
-    "tibetan": ["tibetan", "jomolhari"],
-}
 
 
 def find_system_fonts() -> list[str]:
@@ -128,54 +266,15 @@ def find_system_fonts() -> list[str]:
 def find_fonts_for_script(script: str) -> list[str]:
     """Find fonts that can render a given script.
 
-    Uses name-based matching to prevent fonts with broad cmap tables
-    (DejaVu, FreeSerif) from being used for scripts they render as tofu.
+    Uses explicit font-to-script mapping. Only returns fonts that are
+    known to correctly render this script — no pattern matching.
     """
-    import unicodedata
-    from src.data.script_detect import _SCRIPT_RANGES
-
-    if script not in _SCRIPT_RANGES:
-        return []
-
-    # Find a valid sample codepoint for cmap verification
-    ranges = _SCRIPT_RANGES[script]
-    sample_cp = None
-    for start, end in ranges:
-        for cp in range(start, end + 1):
-            ch = chr(cp)
-            cat = unicodedata.category(ch)
-            if cat != "Cn" and cat not in ("Mn", "Mc"):
-                sample_cp = ch
-                break
-        if sample_cp:
-            break
-    if sample_cp is None:
-        for start, end in ranges:
-            for cp in range(start, end + 1):
-                if unicodedata.category(chr(cp)) != "Cn":
-                    sample_cp = chr(cp)
-                    break
-            if sample_cp:
-                break
-    if sample_cp is None:
+    allowed_names = _SCRIPT_TO_FONTS.get(script, set())
+    if not allowed_names:
         return []
 
     all_fonts = find_system_fonts()
-    patterns = _SCRIPT_FONT_PATTERNS.get(script)
-
-    valid = []
-    for f in all_fonts:
-        # Must have the codepoint in cmap
-        if not font_has_codepoint(f, sample_cp):
-            continue
-        # If script has font name patterns, font must match at least one
-        if patterns is not None:
-            name_lower = Path(f).name.lower()
-            if not any(p in name_lower for p in patterns):
-                continue
-        valid.append(f)
-
-    return valid
+    return [f for f in all_fonts if Path(f).name in allowed_names]
 
 
 def build_weighted_font_list(

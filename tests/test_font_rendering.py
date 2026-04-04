@@ -616,6 +616,50 @@ class TestCharRenderingCoverage:
         assert not failures, (
             "Cmap-passed but blank renders:\n  " + "\n  ".join(failures))
 
+    def test_no_tofu_rendering(self):
+        """Detect tofu (box) rendering by checking row diversity.
+
+        Tofu (□□□□) produces few unique row patterns (same box repeated).
+        Real glyphs produce many unique patterns (varied letter shapes).
+        Catches fonts that pass cmap but render wrong script as boxes.
+        """
+        from src.data.rendering import font_covers_text
+        failures = []
+        for script in SCRIPTS:
+            if script == "emoji":
+                continue
+            fonts = find_fonts_for_script(script)
+            # Use longer words (4+ chars) to avoid false positives from short words
+            words = [w for w in _get_sample_words(script, 20) if len(w) >= 4]
+            if not fonts or not words:
+                continue
+            weighted = build_weighted_font_list(fonts, words[0])
+            if not weighted:
+                continue
+            unique_fonts = list(set(weighted))
+
+            for font in unique_fonts[:10]:
+                # Find a word this font can render
+                for word in words[:5]:
+                    if not font_covers_text(font, word):
+                        continue
+                    img = render_word(word, font, height=32, clean=True)
+                    if img is None or not image_has_ink(img):
+                        continue
+                    img = resize_or_pad(img, 32, 192)
+                    arr = np.array(img).mean(axis=2)  # grayscale
+                    bg = arr[0, 0]  # top-left = background
+                    ink_mask = (np.abs(arr - bg) > 30).astype(int)
+                    unique_rows = len(set(tuple(row) for row in ink_mask))
+                    if unique_rows <= 5:
+                        failures.append(
+                            f"{script}: {Path(font).name} has {unique_rows} "
+                            f"unique rows (likely tofu) for \"{word}\"")
+                    break
+
+        assert not failures, (
+            "Tofu rendering detected:\n  " + "\n  ".join(failures))
+
 
 # ---------------------------------------------------------------------------
 # 6. Font Isolation Tests — prevent cross-script contamination
@@ -671,60 +715,30 @@ class TestFontIsolation:
         assert not failures, (
             "Scripts with no unique fonts:\n  " + "\n  ".join(failures))
 
-    def test_no_cross_family_font_leaks(self):
-        """Fonts from unrelated script families must not leak across.
+    def test_fonts_match_explicit_mapping(self):
+        """Every font returned by find_fonts_for_script must be in the
+        explicit _FONT_TO_SCRIPTS mapping for that script.
 
-        E.g., NotoSansEthiopic must not appear for Arabic,
-        NotoNaskhArabic must not appear for Ethiopic.
-        Within the same family (Indic scripts sharing Baloo/Tiro) is fine.
+        With explicit mapping, cross-contamination is impossible by
+        construction. This test verifies the mapping is consistent.
         """
-        from src.data.fonts import _SCRIPT_FONT_PATTERNS
-
-        # Script families — sharing fonts within a family is OK
-        INDIC = {"devanagari", "gurmukhi", "gujarati", "bengali", "odia",
-                 "kannada", "telugu", "malayalam", "tamil"}
-        FAMILIES = [INDIC]
-
-        def same_family(s1, s2):
-            return any(s1 in fam and s2 in fam for fam in FAMILIES)
-
-        # Markers that uniquely identify a script's dedicated fonts
-        SCRIPT_MARKERS = {
-            "ethiopic": ["ethiopic", "abyssinica"],
-            "tibetan": ["tibetan", "jomolhari"],
-            "arabic": ["nastaliq", "naskh", "kufi", "amiri", "lateef"],
-            "hebrew": ["hebrew", "david"],
-            "armenian": ["armenian"],
-            "georgian": ["georgian"],
-            "thai": ["thai", "sarabun", "kanit"],
-            "burmese": ["myanmar", "padauk"],
-            "khmer": ["khmer", "battambang", "bayon"],
-            "sinhala": ["sinhala", "abhaya"],
-        }
+        from src.data.fonts import _FONT_TO_SCRIPTS
 
         failures = []
-        for target_script, markers in SCRIPT_MARKERS.items():
-            for script in SCRIPTS:
-                if (script == "emoji" or script == target_script
-                        or same_family(script, target_script)):
-                    continue
-                if _SCRIPT_FONT_PATTERNS.get(script) is None:
-                    continue
-                fonts = find_fonts_for_script(script)
-                words = load_word_list(script)
-                if not fonts or not words:
-                    continue
-                weighted = build_weighted_font_list(fonts, words[0])
-                for f in set(weighted):
-                    name = Path(f).name.lower()
-                    for marker in markers:
-                        if marker in name:
-                            failures.append(
-                                f"{script} uses {Path(f).name} "
-                                f"(belongs to {target_script})")
+        for script in SCRIPTS:
+            if script == "emoji":
+                continue
+            fonts = find_fonts_for_script(script)
+            for f in fonts:
+                name = Path(f).name
+                if name not in _FONT_TO_SCRIPTS:
+                    failures.append(f"{script}: {name} not in mapping")
+                elif script not in _FONT_TO_SCRIPTS[name]:
+                    failures.append(f"{script}: {name} mapped to "
+                                    f"{_FONT_TO_SCRIPTS[name]}, not {script}")
 
         assert not failures, (
-            "Cross-family font leaks:\n  " + "\n  ".join(failures))
+            "Font mapping violations:\n  " + "\n  ".join(failures))
 
     def test_minimum_font_count(self):
         """Every script must have at least 2 fonts for visual diversity."""
