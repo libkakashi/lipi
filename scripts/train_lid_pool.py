@@ -41,6 +41,8 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--log-interval", type=int, default=20)
+    parser.add_argument("--train-swa", action="store_true",
+                        help="Also train shared SWA blocks, not just LID-1")
     parser.add_argument("--save-path", type=str, default=None,
                         help="Save updated checkpoint (default: overwrite resume path)")
     # Model dims (must match checkpoint)
@@ -146,19 +148,31 @@ def main():
         print(f"  Skipped {len(missing)} shape-mismatched layers")
     del ckpt
 
-    # --- Freeze everything except lid_coarse ---
+    # --- Freeze experts, train shared encoder + LID-1 ---
+    expert_keys = ("stage1.", "stage2.", "ctc_modules.")
     trainable = 0
     frozen = 0
     for name, param in model.named_parameters():
-        if "lid_coarse" in name:
-            param.requires_grad = True
-            trainable += param.numel()
+        if args.train_swa:
+            # Train everything except expert blocks
+            if any(k in name for k in expert_keys):
+                param.requires_grad = False
+                frozen += param.numel()
+            else:
+                param.requires_grad = True
+                trainable += param.numel()
         else:
-            param.requires_grad = False
-            frozen += param.numel()
+            # Train only LID-1
+            if "lid_coarse" in name:
+                param.requires_grad = True
+                trainable += param.numel()
+            else:
+                param.requires_grad = False
+                frozen += param.numel()
 
+    mode = "shared encoder + LID-1" if args.train_swa else "LID-1 only"
     print(f"\nFrozen: {frozen/1e6:.1f}M params")
-    print(f"Trainable: {trainable/1e6:.1f}M params (lid_coarse only)")
+    print(f"Trainable: {trainable/1e6:.1f}M params ({mode})")
 
     # --- Optimizer ---
     optimizer = torch.optim.AdamW(
@@ -171,7 +185,7 @@ def main():
 
     # --- Train ---
     print(f"\n{'='*60}")
-    print(f"TRAINING LID-1 SPATIAL POOL: {args.epochs} epochs, lr={args.lr}")
+    print(f"TRAINING {mode.upper()}: {args.epochs} epochs, lr={args.lr}")
     print(f"{'='*60}")
 
     for epoch in range(1, args.epochs + 1):
