@@ -114,6 +114,43 @@ def download_wikipedia_titles(lang_code: str, script_ranges: list[tuple[int, int
 
 # Script definitions
 SCRIPTS = {
+    # --- Low word count scripts (< 10K) ---
+    "gurmukhi": {
+        "ranges": [(0x0A00, 0x0A7F)],
+        "wiki_lang": "pa",
+        "wiktionary_lang": "Punjabi",
+    },
+    "gujarati": {
+        "ranges": [(0x0A80, 0x0AFF)],
+        "wiki_lang": "gu",
+        "wiktionary_lang": "Gujarati",
+    },
+    "telugu": {
+        "ranges": [(0x0C00, 0x0C7F)],
+        "wiki_lang": "te",
+        "wiktionary_lang": "Telugu",
+    },
+    "thai": {
+        "ranges": [(0x0E00, 0x0E7F)],
+        "wiki_lang": "th",
+        "wiktionary_lang": "Thai",
+    },
+    "lao": {
+        "ranges": [(0x0E80, 0x0EFF)],
+        "wiki_lang": "lo",
+        "wiktionary_lang": "Lao",
+    },
+    "georgian": {
+        "ranges": [(0x10A0, 0x10FF), (0x2D00, 0x2D2F)],
+        "wiki_lang": "ka",
+        "wiktionary_lang": "Georgian",
+    },
+    "tibetan": {
+        "ranges": [(0x0F00, 0x0FFF)],
+        "wiki_lang": "bo",
+        "wiktionary_lang": "Tibetan",
+    },
+    # --- Previously added scripts ---
     "odia": {
         "ranges": [(0x0B00, 0x0B7F)],
         "wiki_lang": "or",
@@ -144,15 +181,15 @@ SCRIPTS = {
         "wiki_lang": "hy",
         "wiktionary_lang": "Armenian",
     },
-    "georgian": {
-        "ranges": [(0x10A0, 0x10FF), (0x2D00, 0x2D2F)],
-        "wiki_lang": "ka",
-        "wiktionary_lang": "Georgian",
+    "nko": {
+        "ranges": [(0x07C0, 0x07FF)],
+        "wiki_lang": "nqo",
+        "wiktionary_lang": "NKo",
     },
-    "tibetan": {
-        "ranges": [(0x0F00, 0x0FFF)],
-        "wiki_lang": "bo",
-        "wiktionary_lang": "Tibetan",
+    "tifinagh": {
+        "ranges": [(0x2D30, 0x2D7F)],
+        "wiki_lang": "zgh",
+        "wiktionary_lang": "Tifinagh",
     },
 }
 
@@ -170,7 +207,7 @@ def main():
         print(f"\n{'='*50}")
         print(f"{script_name}: {existing} existing words")
 
-        if existing >= 5000:
+        if existing >= 20000:
             print(f"  Already have enough words, skipping")
             continue
 
