@@ -491,7 +491,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             print(f"  [{epoch}/{total_epochs}] batch {batch_idx+1}/{steps}  "
                   f"loss={avg_total:.4f} "
                   f"(ctc={avg_ctc:.4f} lid1={avg_lid1:.4f} lid2={avg_lid2:.4f})  "
-                  f"lr={lr:.2e}  lid1={lid1_acc:.0f}% lid2={lid2_acc:.0f}%  "
+                  f"lr={lr:.2e}  lid1={lid1_acc:.2f}% lid2={lid2_acc:.2f}%  "
                   f"gnorm s={shared_norm:.1f} e={expert_norm:.1f}")
             log_ctc.zero_()
             log_lid1.zero_()
