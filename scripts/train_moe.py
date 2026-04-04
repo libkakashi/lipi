@@ -66,6 +66,8 @@ def parse_args():
     parser.add_argument("--shared-dim", type=int, default=288)
     parser.add_argument("--shared-blocks-4x4", type=int, default=8)
     parser.add_argument("--shared-blocks-4x16", type=int, default=4)
+    parser.add_argument("--no-alternate", action="store_true",
+                        help="Sequential shared blocks (4x4 then 4x16) instead of alternating")
     parser.add_argument("--stage1-dim", type=int, default=288)
     parser.add_argument("--stage1-blocks", type=int, default=12)
     parser.add_argument("--stage2-dim", type=int, default=576)
@@ -209,6 +211,7 @@ def build_model(args, n_groups, group_script_vocab_sizes, group_script_names, de
         shared_dim=args.shared_dim,
         shared_blocks_4x4=args.shared_blocks_4x4,
         shared_blocks_4x16=args.shared_blocks_4x16,
+        shared_alternate=not args.no_alternate,
         stage1_dim=args.stage1_dim,
         stage1_blocks=args.stage1_blocks,
         stage2_dim=args.stage2_dim,

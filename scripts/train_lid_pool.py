@@ -40,7 +40,8 @@ class SharedEncoder(nn.Module):
     """Lightweight shared encoder — only the parts needed for LID-1."""
 
     def __init__(self, stem_depth, shared_dim, shared_blocks_4x4,
-                 shared_blocks_4x16, num_groups, stem_channels=64):
+                 shared_blocks_4x16, num_groups, stem_channels=64,
+                 alternate=True):
         super().__init__()
         self.color_proj = ColorProjection()
         self.stem = ResNetStem(out_channels=stem_channels, depth=stem_depth)
@@ -48,15 +49,24 @@ class SharedEncoder(nn.Module):
 
         total_shared = shared_blocks_4x4 + shared_blocks_4x16
         self.shared_swa = nn.ModuleList()
-        for i in range(total_shared):
-            if i % 2 == 0:
-                wh, ww = 4, 4
-            else:
-                wh, ww = 4, 16
-            self.shared_swa.append(
-                SWABlock(dim=shared_dim, num_heads=shared_dim // 32,
-                         window_h=wh, window_w=ww,
-                         shift=(i % 2 == 1), mlp_ratio=4))
+        if alternate:
+            for i in range(total_shared):
+                ww = 4 if i % 2 == 0 else 16
+                self.shared_swa.append(
+                    SWABlock(dim=shared_dim, num_heads=shared_dim // 32,
+                             window_h=4, window_w=ww,
+                             shift=(i % 2 == 1), mlp_ratio=4))
+        else:
+            for i in range(shared_blocks_4x4):
+                self.shared_swa.append(
+                    SWABlock(dim=shared_dim, num_heads=shared_dim // 32,
+                             window_h=4, window_w=4,
+                             shift=(i % 2 == 1), mlp_ratio=4))
+            for i in range(shared_blocks_4x16):
+                self.shared_swa.append(
+                    SWABlock(dim=shared_dim, num_heads=shared_dim // 32,
+                             window_h=4, window_w=16,
+                             shift=(i % 2 == 1), mlp_ratio=4))
 
         self.lid_coarse = LIDCoarse(in_channels=shared_dim, num_groups=num_groups)
 
@@ -92,6 +102,8 @@ def main():
     parser.add_argument("--shared-blocks-4x4", type=int, default=4)
     parser.add_argument("--shared-blocks-4x16", type=int, default=4)
     parser.add_argument("--stem-depth", type=int, default=3)
+    parser.add_argument("--no-alternate", action="store_true",
+                        help="Sequential blocks (4x4 then 4x16) instead of alternating")
     args = parser.parse_args()
 
     # Device
@@ -152,6 +164,7 @@ def main():
         shared_blocks_4x4=args.shared_blocks_4x4,
         shared_blocks_4x16=args.shared_blocks_4x16,
         num_groups=n_groups,
+        alternate=not args.no_alternate,
     ).to(device)
 
     params = sum(p.numel() for p in model.parameters())
