@@ -584,12 +584,16 @@ def variable_stroke(img: Image.Image) -> Image.Image:
     if w < 12:
         return img
 
-    # Split into 3-5 vertical strips, each gets different treatment
+    # Split into 3-5 vertical strips, each gets different treatment.
+    # At least one strip stays unchanged to preserve ink.
     n_strips = random.randint(3, 5)
     strip_w = w // n_strips
     result = arr.copy()
+    keep_strip = random.randint(0, n_strips - 1)
 
     for i in range(n_strips):
+        if i == keep_strip:
+            continue  # preserve at least one strip
         x_start = i * strip_w
         x_end = min((i + 1) * strip_w, w)
         strip = Image.fromarray(arr[:, x_start:x_end])
