@@ -43,9 +43,24 @@ _DISPLAY_KEYWORDS = [
 #
 # "universal" fonts (explicitly designed for broad Unicode) are also listed.
 _SCRIPT_FONT_PATTERNS = {
-    "latin": None,  # None = accept all fonts (Latin is in everything)
-    "cyrillic": None,  # most standard fonts support Cyrillic
-    "greek": None,  # most standard fonts support Greek
+    "latin": ["notosans-", "notoserif-", "notosansmono",
+              "dejavu", "free", "liberation", "arial", "helvetica",
+              "times-", "times ", "verdana", "tahoma", "comic", "courier",
+              "roboto", "opensans", "lato", "montserrat", "poppins",
+              "inter-", "inter.", "raleway", "ubuntu", "source", "jetbrains",
+              "caveat", "dancing", "indie", "patrick", "kalam",
+              "lobster", "pacifico", "amatic", "permanent",
+              "baloo", "hind", "tiro", "mukta", "gemunu", "heebo",
+              "content"],
+    "cyrillic": ["notosans-", "notoserif-", "notosansmono",
+                 "dejavu", "free", "liberation", "arial", "helvetica",
+                 "times-", "times ", "verdana", "roboto", "opensans",
+                 "ubuntu", "source", "jetbrains", "inter-", "inter.",
+                 "caveat", "dancing"],
+    "greek": ["notosans-", "notoserif-", "notosansmono",
+              "dejavu", "free", "liberation", "arial", "helvetica",
+              "times-", "times ", "verdana", "roboto", "opensans",
+              "source", "jetbrains", "inter-", "inter."],
     "arabic": ["arabic", "nastaliq", "naskh", "kufi", "urdu", "persian",
                "lateef", "scheherazade", "amiri", "harmattan", "alkalami",
                "reem", "mirza", "markazi", "tajawal", "cairo", "almarai"],
