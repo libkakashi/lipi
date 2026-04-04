@@ -82,9 +82,10 @@ def parse_args():
                         help="Number of epochs to detach shared→expert gradient. "
                              "LID-1 gets undivided shared encoder, CTC trains experts only.")
     parser.add_argument("--freeze-except", type=str, default=None,
-                        choices=["experts", "experts+ctc", "shared"],
+                        choices=["experts", "experts+ctc", "ctc", "shared"],
                         help="Freeze everything except: 'experts' (stage1+stage2 only), "
                              "'experts+ctc' (stage1+stage2+ctc heads+lid2), "
+                             "'ctc' (ctc heads only), "
                              "or 'shared' (shared SWA + LID-1 only)")
     parser.add_argument("--cpu-offload", action="store_true",
                         help="Offload optimizer states to CPU (frees ~5-7GB VRAM)")
@@ -570,6 +571,9 @@ def main():
                 # Train expert SWA + CTC heads + LID-2
                 param.requires_grad = any(k in name for k in
                     ("stage1.", "stage2.", "ctc_modules."))
+            elif args.freeze_except == "ctc":
+                # Train only CTC heads + LID-2
+                param.requires_grad = "ctc_modules." in name
             elif args.freeze_except == "shared":
                 # Train only shared encoder + LID-1
                 param.requires_grad = not any(k in name for k in
