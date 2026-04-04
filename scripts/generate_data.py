@@ -135,14 +135,24 @@ def filter_fonts_by_style(fonts: list[str], style: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def get_renderable_chars(script: str) -> list[str]:
-    """Get renderable characters from the frozen vocab for a script.
+    """Get standalone-renderable characters from the frozen vocab.
 
-    Excludes blank token and non-printable chars (space, control chars).
+    Excludes:
+      - Blank token
+      - Non-printable chars (space, control)
+      - Combining marks (Unicode category M*: Mn, Mc, Me) — these need a
+        base character to render (e.g., Devanagari matras, anusvara, virama).
+        They're kept in the vocab for word-level CTC but can't render alone.
     """
+    import unicodedata
     from src.data.bigrams import BLANK_TOKEN
     group = SCRIPT_TO_GROUP[script]
     vocab = build_script_vocab(script, group)
-    return [ch for ch in vocab if ch.strip() and ord(ch) > 32 and ch != BLANK_TOKEN]
+    return [ch for ch in vocab
+            if ch.strip()
+            and ord(ch) > 32
+            and ch != BLANK_TOKEN
+            and not unicodedata.category(ch).startswith('M')]
 
 
 # ---------------------------------------------------------------------------
