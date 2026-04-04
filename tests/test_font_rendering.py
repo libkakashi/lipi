@@ -615,3 +615,190 @@ class TestCharRenderingCoverage:
 
         assert not failures, (
             "Cmap-passed but blank renders:\n  " + "\n  ".join(failures))
+
+
+# ---------------------------------------------------------------------------
+# 6. Font Isolation Tests — prevent cross-script contamination
+# ---------------------------------------------------------------------------
+
+@skip_no_fonts
+class TestFontIsolation:
+    """Verify fonts are script-specific and don't cross-contaminate.
+
+    These tests catch the two font bugs that caused training failures:
+    1. System fonts (DejaVu, FreeSerif) rendering tofu for non-Latin scripts
+    2. Multi-script font families (Baloo, Hind, Tiro) making different
+       Indic scripts look identical
+    """
+
+    def test_no_cross_script_fonts_within_groups(self):
+        """Scripts in the same multi-script group must NOT share fonts.
+
+        Shared fonts make scripts visually identical, preventing LID-2
+        from learning to distinguish them. Exception: cyrillic/greek
+        share fonts because most fonts genuinely support both.
+        """
+        from src.model.lid import GROUP_SCRIPTS
+        EXEMPT_GROUPS = {"cyrillic_greek"}  # these legitimately share fonts
+
+        failures = []
+        for group, scripts in GROUP_SCRIPTS.items():
+            if len(scripts) < 2 or group in EXEMPT_GROUPS:
+                continue
+            script_font_sets = {}
+            for script in scripts:
+                fonts = find_fonts_for_script(script)
+                words = load_word_list(script)
+                if not fonts or not words:
+                    continue
+                weighted = build_weighted_font_list(fonts, words[0])
+                script_font_sets[script] = set(Path(f).name for f in weighted)
+
+            for i, s1 in enumerate(scripts):
+                for s2 in scripts[i+1:]:
+                    if s1 not in script_font_sets or s2 not in script_font_sets:
+                        continue
+                    shared = script_font_sets[s1] & script_font_sets[s2]
+                    if shared:
+                        failures.append(
+                            f"{group}: {s1} and {s2} share {len(shared)} fonts: "
+                            f"{sorted(shared)[:3]}")
+
+        assert not failures, (
+            "Font cross-contamination within groups:\n  " + "\n  ".join(failures))
+
+    def test_no_wrong_script_fonts(self):
+        """Script-specific fonts must not appear for OTHER restricted scripts.
+
+        E.g., NotoSansEthiopic must only appear for ethiopic,
+        NotoNaskhArabic must only appear for arabic, etc.
+        Skips scripts with None pattern (latin, cyrillic, greek) since
+        they intentionally accept all fonts.
+        """
+        from src.data.fonts import _SCRIPT_FONT_PATTERNS
+
+        SCRIPT_SPECIFIC_FONTS = {
+            "ethiopic": ["ethiopic", "abyssinica"],
+            "tibetan": ["tibetan", "jomolhari"],
+            "devanagari": ["devanagari"],
+            "bengali": ["bengali", "bangla"],
+            "tamil": ["tamil"],
+            "arabic": ["nastaliq", "naskh", "kufi"],
+            "hebrew": ["hebrew"],
+            "armenian": ["armenian"],
+            "georgian": ["georgian"],
+        }
+
+        failures = []
+        for target_script, markers in SCRIPT_SPECIFIC_FONTS.items():
+            for script in SCRIPTS:
+                if script == "emoji" or script == target_script:
+                    continue
+                # Skip scripts that accept all fonts (None pattern)
+                if _SCRIPT_FONT_PATTERNS.get(script) is None:
+                    continue
+                fonts = find_fonts_for_script(script)
+                words = load_word_list(script)
+                if not fonts or not words:
+                    continue
+                weighted = build_weighted_font_list(fonts, words[0])
+                for f in set(weighted):
+                    name = Path(f).name.lower()
+                    for marker in markers:
+                        if marker in name:
+                            failures.append(
+                                f"{script} uses {Path(f).name} "
+                                f"(belongs to {target_script})")
+
+        assert not failures, (
+            "Wrong script fonts detected:\n  " + "\n  ".join(failures))
+
+    def test_minimum_font_count(self):
+        """Every script must have at least 2 fonts for visual diversity."""
+        failures = []
+        for script in SCRIPTS:
+            if script == "emoji":
+                continue
+            fonts = find_fonts_for_script(script)
+            words = load_word_list(script)
+            if not words:
+                continue
+            if not fonts:
+                failures.append(f"{script}: 0 fonts")
+                continue
+            weighted = build_weighted_font_list(fonts, words[0])
+            unique = len(set(weighted))
+            if unique < 2:
+                failures.append(f"{script}: only {unique} font(s)")
+
+        assert not failures, (
+            "Scripts with too few fonts:\n  " + "\n  ".join(failures))
+
+
+# ---------------------------------------------------------------------------
+# 7. Data Quality Tests — prevent training data corruption
+# ---------------------------------------------------------------------------
+
+@skip_no_fonts
+class TestDataQuality:
+    """Verify training data pipeline produces correct labels and images."""
+
+    def test_vocab_covers_word_lists(self):
+        """Every character in word lists must be encodable (after decomposition).
+
+        Silent OOV dropping corrupts CTC labels — the image shows the
+        full word but the target has missing characters.
+        """
+        from src.data.vocab import build_script_vocab
+        from src.data.bigrams import LipiTokenizer
+        from src.data.decompose import decompose_text, DECOMPOSE_GROUPS
+
+        failures = []
+        for script in SCRIPTS:
+            if script == "emoji":
+                continue
+            words = load_word_list(script)
+            if not words:
+                continue
+            group = SCRIPT_TO_GROUP[script]
+            vocab = build_script_vocab(script, group)
+            tok = LipiTokenizer(vocab=vocab, bigrams=set())
+
+            oov_chars = 0
+            total_chars = 0
+            for w in words[:2000]:
+                text = decompose_text(w, group) if group in DECOMPOSE_GROUPS else w
+                enc = tok.encode(text)
+                total_chars += len(text)
+                oov_chars += len(text) - len(enc)
+
+            oov_pct = 100 * oov_chars / max(total_chars, 1)
+            if oov_pct > 1.0:
+                failures.append(f"{script}: {oov_pct:.1f}% OOV characters")
+
+        assert not failures, (
+            "Scripts with >1% OOV (labels corrupted):\n  " + "\n  ".join(failures))
+
+    def test_renderable_chars_excludes_combining_marks(self):
+        """get_renderable_chars must not include combining marks.
+
+        Combining marks (Unicode M*) can't render standalone — they
+        produce blank images that waste training data.
+        """
+        import unicodedata
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        from generate_data import get_renderable_chars
+
+        failures = []
+        for script in SCRIPTS:
+            if script == "emoji":
+                continue
+            chars = get_renderable_chars(script)
+            combining = [ch for ch in chars
+                         if unicodedata.category(ch).startswith('M')]
+            if combining:
+                failures.append(
+                    f"{script}: {len(combining)} combining marks in renderable chars")
+
+        assert not failures, (
+            "Combining marks in renderable chars:\n  " + "\n  ".join(failures))
