@@ -33,8 +33,12 @@ DATA_DIR = Path(__file__).parent.parent / "training_data" / "real_datasets"
 SHARD_SIZE = 5000  # images per shard
 
 
-def process_image(img_path, height=32, max_width=192):
-    """Load, validate, and convert an image to model input format."""
+def process_image(img_path, height=32, max_width=768):
+    """Load, validate, and convert an image to model input format.
+
+    Resizes height to target while preserving aspect ratio.
+    Pads width to max_width if narrower, keeps original width if wider.
+    """
     try:
         img = Image.open(img_path).convert("RGB")
     except Exception:
@@ -43,7 +47,17 @@ def process_image(img_path, height=32, max_width=192):
     if img.width < 4 or img.height < 4:
         return None
 
-    img = resize_or_pad(img, height, max_width)
+    # Resize height preserving aspect ratio
+    if img.height != height:
+        new_width = max(1, int(img.width * height / img.height))
+        img = img.resize((new_width, height), Image.BILINEAR)
+
+    # Pad narrow images, keep wide ones as-is
+    if img.width < max_width:
+        padded = Image.new("RGB", (max_width, height), (240, 240, 240))
+        padded.paste(img, (0, 0))
+        img = padded
+
     if not image_has_ink(img):
         return None
 
