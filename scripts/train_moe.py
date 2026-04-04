@@ -354,9 +354,10 @@ def resume_from_checkpoint(args, model, optimizer, base_optimizer, scaler, sched
     ckpt_groups = len(ckpt.get("optimizer", {}).get("param_groups", []))
     cur_groups = len(base_optimizer.param_groups)
     groups_changed = ckpt_groups != cur_groups
+    freeze_mode = hasattr(args, 'freeze_except') and args.freeze_except is not None
     if "optimizer" not in ckpt:
         print("  No optimizer state in checkpoint (fresh optimizer)")
-    elif skipped or dtype_changed or groups_changed:
+    elif skipped or dtype_changed or groups_changed or freeze_mode:
         reasons = []
         if skipped:
             reasons.append("vocab changed")
@@ -364,6 +365,8 @@ def resume_from_checkpoint(args, model, optimizer, base_optimizer, scaler, sched
             reasons.append(f"dtype changed ({ckpt_dtype}→{model_dtype})")
         if groups_changed:
             reasons.append(f"param groups changed ({ckpt_groups}→{cur_groups})")
+        if freeze_mode:
+            reasons.append(f"freeze mode ({args.freeze_except})")
         print(f"  Skipping optimizer state ({', '.join(reasons)})")
     else:
         optimizer.load_state_dict(ckpt["optimizer"])
