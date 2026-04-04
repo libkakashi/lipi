@@ -299,6 +299,24 @@ def resume_from_checkpoint(args, model, optimizer, base_optimizer, scaler, sched
     ckpt = torch.load(args.resume, map_location="cpu", weights_only=False)
     # Partial load: skip mismatched layers (e.g., CTC proj after vocab change)
     model_state = ckpt["model"]
+
+    # Remap legacy key names (shared_swa_4x4/4x16 → shared_swa)
+    n_4x4 = len(set(k.split(".")[1] for k in model_state if k.startswith("shared_swa_4x4.")))
+    remapped = 0
+    for k in list(model_state.keys()):
+        if k.startswith("shared_swa_4x4."):
+            new_k = k.replace("shared_swa_4x4.", "shared_swa.", 1)
+            model_state[new_k] = model_state.pop(k)
+            remapped += 1
+        elif k.startswith("shared_swa_4x16."):
+            idx = int(k.split(".")[1])
+            rest = ".".join(k.split(".")[2:])
+            new_k = f"shared_swa.{idx + n_4x4}.{rest}"
+            model_state[new_k] = model_state.pop(k)
+            remapped += 1
+    if remapped:
+        print(f"  Remapped {remapped} legacy shared_swa keys")
+
     current_state = model.state_dict()
     skipped = []
     for k in list(model_state.keys()):
