@@ -157,20 +157,15 @@ class LIDCoarse(nn.Module):
     def __init__(self, in_channels: int = 288, num_groups: int = NUM_GROUPS,
                  seq_len: int = 384):
         super().__init__()
-        # Learned spatial reduction: T → 64 → 16 → 1
+        # Learned spatial reduction: T → T//6 → T//24 → 1
         # groups=16: each group mixes 24 channels. Cross-channel mixing
         # at every layer lets the model learn multi-feature spatial patterns.
         g = 16
-        self.spatial_pool = nn.Sequential(
-            nn.Conv1d(in_channels, in_channels, kernel_size=6, stride=6,
-                      groups=g),                               # 384 → 64
-            nn.GELU(),
-            nn.Conv1d(in_channels, in_channels, kernel_size=4, stride=4,
-                      groups=g),                               # 64 → 16
-            nn.GELU(),
-            nn.Conv1d(in_channels, in_channels, kernel_size=16,
-                      groups=g),                               # 16 → 1
-        )
+        self.spatial_conv1 = nn.Conv1d(in_channels, in_channels, kernel_size=6,
+                                       stride=6, groups=g)
+        self.spatial_conv2 = nn.Conv1d(in_channels, in_channels, kernel_size=4,
+                                       stride=4, groups=g)
+        self.spatial_final = nn.AdaptiveAvgPool1d(1)  # handles any remaining T
         hidden = in_channels // 2
         self.classifier = nn.Sequential(
             nn.Linear(in_channels, hidden),
@@ -181,7 +176,9 @@ class LIDCoarse(nn.Module):
     def forward_seq(self, x: Tensor) -> Tensor:
         """Classify from sequence features (B, T, C) — used by moe_encoder."""
         x_ct = x.permute(0, 2, 1)                           # (B, C, T)
-        pooled = self.spatial_pool(x_ct).squeeze(-1)         # (B, C)
+        x_ct = torch.nn.functional.gelu(self.spatial_conv1(x_ct))
+        x_ct = torch.nn.functional.gelu(self.spatial_conv2(x_ct))
+        pooled = self.spatial_final(x_ct).squeeze(-1)        # (B, C)
         return self.classifier(pooled)
 
     def forward(self, features: Tensor) -> Tensor:

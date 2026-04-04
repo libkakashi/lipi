@@ -819,8 +819,8 @@ class TestModelConstruction:
     def test_lid1_uses_learned_pooling(self, model_and_vocabs):
         """LID-1 must use learned spatial pooling, NOT mean pooling."""
         model, _, _, _ = model_and_vocabs
-        assert hasattr(model.lid_coarse, 'spatial_pool'), (
-            "LID-1 missing spatial_pool — using mean pooling instead of learned projection")
+        assert hasattr(model.lid_coarse, 'spatial_conv1'), (
+            "LID-1 missing spatial_conv1 — using mean pooling instead of learned projection")
 
     def test_lid2_uses_learned_pooling(self, model_and_vocabs):
         """LID-2 must use learned spatial pooling."""
