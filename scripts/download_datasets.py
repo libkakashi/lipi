@@ -275,18 +275,6 @@ def download_burmese_real(out_dir):
     print(f"  Saved to {dest}/")
 
 
-@register("hindi-ocr",
-          ["devanagari"],
-          "Hindi/Nepali OCR: 6.7K Devanagari line images")
-def download_hindi_ocr(out_dir):
-    check_hf()
-    dest = out_dir / "hindi-ocr"
-    dest.mkdir(parents=True, exist_ok=True)
-    run(f"huggingface-cli download apjanco/hindi-ocr "
-        f"--repo-type dataset --local-dir {dest}")
-    print(f"  Saved to {dest}/")
-
-
 @register("sanskrit-ocr",
           ["devanagari"],
           "Sanskrit typed OCR: 3.5K Devanagari word images")
