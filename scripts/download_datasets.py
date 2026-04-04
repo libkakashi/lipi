@@ -98,14 +98,15 @@ def download_indic_scene(out_dir):
     run(f"git clone https://github.com/Bhashini-IITJ/BharatSceneTextDataset.git "
         f"{dest}/bstd")
 
-    # IndicSTR12 requires CVIT download
-    print("  IndicSTR12 (27K real + 3M synth per language):")
-    print("  Download from: https://cvit.iiit.ac.in/research/projects/cvit-projects/indicstr")
-    print(f"  Extract to: {dest}/indicstr12/")
+    # IndicSTR12 real images (direct download)
+    indicstr_dest = dest / "indicstr12"
+    indicstr_dest.mkdir(parents=True, exist_ok=True)
+    run(f"wget -P {indicstr_dest} https://cvit.iiit.ac.in/images/datasets/IndicSTR12/real.zip")
+    run(f"unzip -o {indicstr_dest}/real.zip -d {indicstr_dest}")
 
-    # Mozhi (printed Indic text)
+    # Mozhi (printed Indic text) — requires form submission
     print("  Mozhi (1.2M+ printed word images, 13 languages):")
-    print("  Download from: https://cvit.iiit.ac.in/usodi/tdocrmil.php")
+    print("  Submit form at: https://cvit.iiit.ac.in/usodi/tdocrmil.php")
     print(f"  Extract to: {dest}/mozhi/")
 
     print(f"  Saved to {dest}/")
