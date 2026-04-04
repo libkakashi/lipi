@@ -104,10 +104,18 @@ def download_indic_scene(out_dir):
     run(f"wget -P {indicstr_dest} https://cvit.iiit.ac.in/images/datasets/IndicSTR12/real.zip")
     run(f"unzip -o {indicstr_dest}/real.zip -d {indicstr_dest}")
 
-    # Mozhi (printed Indic text) — requires form submission
-    print("  Mozhi (1.2M+ printed word images, 13 languages):")
-    print("  Submit form at: https://cvit.iiit.ac.in/usodi/tdocrmil.php")
-    print(f"  Extract to: {dest}/mozhi/")
+    # Mozhi — printed Indic word images, 13 languages
+    mozhi_dest = dest / "mozhi"
+    mozhi_dest.mkdir(parents=True, exist_ok=True)
+    mozhi_base = "https://ilocr.iiit.ac.in/public/printed/phase-0/v0.5"
+    mozhi_langs = [
+        "assamese", "bengali", "gujarati", "hindi", "kannada",
+        "malayalam", "manipuri", "marathi", "oriya", "punjabi",
+        "tamil", "telugu", "urdu",
+    ]
+    for lang in mozhi_langs:
+        run(f"wget -P {mozhi_dest}/{lang} {mozhi_base}/{lang}/akshara/train.zip")
+        run(f"unzip -o {mozhi_dest}/{lang}/train.zip -d {mozhi_dest}/{lang}")
 
     print(f"  Saved to {dest}/")
 
