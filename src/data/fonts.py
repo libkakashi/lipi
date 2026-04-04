@@ -63,6 +63,12 @@ _FONT_TO_SCRIPTS: dict[str, list[str]] = {
     "Amiri-Bold.ttf": ["arabic"],
     "ScheherazadeNew-Regular.ttf": ["arabic"],
     "Lateef-Regular.ttf": ["arabic"],
+    "ArefRuqaa-Regular.ttf": ["arabic"],
+    "Tajawal-Regular.ttf": ["arabic"],
+    "Cairo[wght].ttf": ["arabic"],
+    "ReemKufi-Regular.ttf": ["arabic"],
+    "MarkaziText-Regular.ttf": ["arabic"],
+    "Harmattan-Regular.ttf": ["arabic"],
     # --- Hebrew ---
     "NotoSansHebrew-Regular.ttf": ["hebrew"],
     "NotoSansHebrew-Bold.ttf": ["hebrew"],
@@ -75,6 +81,8 @@ _FONT_TO_SCRIPTS: dict[str, list[str]] = {
     "SuezOne-Regular.ttf": ["hebrew"],
     "DavidLibre-Regular.ttf": ["hebrew"],
     "Karantina-Regular.ttf": ["hebrew"],
+    "NotoRashiHebrew-Regular.ttf": ["hebrew"],
+    "MiriamLibre-Regular.ttf": ["hebrew"],
     # --- CJK (han_kana) ---
     "NotoSansSC[wght].ttf": ["han_kana"],
     "NotoSansJP[wght].ttf": ["han_kana"],
@@ -93,6 +101,13 @@ _FONT_TO_SCRIPTS: dict[str, list[str]] = {
     "ZenKurenaido-Regular.ttf": ["han_kana"],
     "ZCOOLQingKeHuangYou-Regular.ttf": ["han_kana"],
     "ZCOOLKuaiLe-Regular.ttf": ["han_kana"],
+    "ZenOldMincho-Regular.ttf": ["han_kana"],
+    "SawarabiMincho-Regular.ttf": ["han_kana"],
+    "SawarabiGothic-Regular.ttf": ["han_kana"],
+    "KosugiMaru-Regular.ttf": ["han_kana"],
+    "DelaGothicOne-Regular.ttf": ["han_kana"],
+    "YuseiMagic-Regular.ttf": ["han_kana"],
+    "MPLUS1[wght].ttf": ["han_kana"],
     # --- Korean ---
     "NotoSansKR[wght].ttf": ["korean"],
     "NotoSansCJKkr-Regular.otf": ["korean"],
@@ -100,6 +115,13 @@ _FONT_TO_SCRIPTS: dict[str, list[str]] = {
     "NanumGothic-Regular.ttf": ["korean"],
     "NanumMyeongjo-Regular.ttf": ["korean"],
     "NanumPenScript-Regular.ttf": ["korean"],
+    "GothicA1-Regular.ttf": ["korean"],
+    "GamjaFlower-Regular.ttf": ["korean"],
+    "Gaegu-Regular.ttf": ["korean"],
+    "EastSeaDokdo-Regular.ttf": ["korean"],
+    "DoHyeon-Regular.ttf": ["korean"],
+    "Jua-Regular.ttf": ["korean"],
+    "SongMyung-Regular.ttf": ["korean"],
     # --- Devanagari ---
     "NotoSansDevanagari-Regular.ttf": ["devanagari"],
     "NotoSansDevanagari-Bold.ttf": ["devanagari"],
@@ -107,6 +129,13 @@ _FONT_TO_SCRIPTS: dict[str, list[str]] = {
     "TiroDevanagariHindi-Regular.ttf": ["devanagari"],
     "Laila-Regular.ttf": ["devanagari"],
     "Kalam-Regular.ttf": ["devanagari", "latin"],
+    "Martel-Regular.ttf": ["devanagari"],
+    "Eczar-Regular.ttf": ["devanagari"],
+    "Halant-Regular.ttf": ["devanagari"],
+    "Teko[wght].ttf": ["devanagari"],
+    "Modak-Regular.ttf": ["devanagari"],
+    "Tillana-Regular.ttf": ["devanagari"],
+    "AnekDevanagari[wght].ttf": ["devanagari"],
     # --- Bengali ---
     "NotoSansBengali-Regular.ttf": ["bengali"],
     "NotoSansBengali-Bold.ttf": ["bengali"],
@@ -129,10 +158,12 @@ _FONT_TO_SCRIPTS: dict[str, list[str]] = {
     "NotoSansGujarati-Bold.ttf": ["gujarati"],
     "NotoSerifGujarati-Regular.ttf": ["gujarati"],
     "HindVadodara-Regular.ttf": ["gujarati"],
+    "MuktaVaani-Regular.ttf": ["gujarati"],
     # --- Odia ---
     "NotoSansOriya-Regular.ttf": ["odia"],
     "NotoSansOriya-Bold.ttf": ["odia"],
     "BalooBhaina2[wght].ttf": ["odia"],
+    "NotoSerifOriya-Regular.ttf": ["odia"],
     # --- Tamil ---
     "NotoSansTamil-Regular.ttf": ["tamil"],
     "NotoSansTamil-Bold.ttf": ["tamil"],
@@ -185,6 +216,14 @@ _FONT_TO_SCRIPTS: dict[str, list[str]] = {
     "Kanit-Regular.ttf": ["thai"],
     "Sarabun-Regular.ttf": ["thai"],
     "Prompt-Regular.ttf": ["thai"],
+    "Pridi-Regular.ttf": ["thai"],
+    "Taviraj-Regular.ttf": ["thai"],
+    "Itim-Regular.ttf": ["thai"],
+    "Charm-Regular.ttf": ["thai"],
+    "Sriracha-Regular.ttf": ["thai"],
+    "Mitr-Regular.ttf": ["thai"],
+    "K2D-Regular.ttf": ["thai"],
+    "Chonburi-Regular.ttf": ["thai"],
     # --- Lao ---
     "NotoSansLao-Regular.ttf": ["lao"],
     "NotoSansLao-Bold.ttf": ["lao"],
@@ -228,6 +267,250 @@ _FONT_TO_SCRIPTS: dict[str, list[str]] = {
     "NotoSansTibetan-Bold.ttf": ["tibetan"],
     "NotoSerifTibetan-Regular.ttf": ["tibetan"],
     "Jomolhari-Regular.ttf": ["tibetan"],
+    "Uchen-Regular.ttf": ["tibetan"],
+}
+
+# Font category mapping: filename → category
+# Categories: sans, serif, handwriting, display, mono
+_FONT_CATEGORIES: dict[str, str] = {
+    # --- Latin / Cyrillic / Greek ---
+    "NotoSans-Regular.ttf": "sans",
+    "NotoSans-Bold.ttf": "sans",
+    "NotoSans-Italic.ttf": "sans",
+    "NotoSans-Light.ttf": "sans",
+    "NotoSansMono-Regular.ttf": "mono",
+    "NotoSerif-Regular.ttf": "serif",
+    "NotoSerif-Bold.ttf": "serif",
+    "NotoSerif-Italic.ttf": "serif",
+    # Latin handwriting / display
+    "Caveat[wght].ttf": "handwriting",
+    "DancingScript[wght].ttf": "handwriting",
+    "IndieFlower-Regular.ttf": "handwriting",
+    "PatrickHand-Regular.ttf": "handwriting",
+    "ShadowsIntoLight.ttf": "handwriting",
+    "PermanentMarker-Regular.ttf": "display",
+    "AmaticSC-Regular.ttf": "display",
+    "Lobster-Regular.ttf": "display",
+    "Pacifico-Regular.ttf": "display",
+    "ComicNeue-Regular.ttf": "handwriting",
+    "SpecialElite-Regular.ttf": "display",
+    "Poppins-Regular.ttf": "sans",
+    # --- Arabic ---
+    "NotoSansArabic-Regular.ttf": "sans",
+    "NotoSansArabic-Bold.ttf": "sans",
+    "NotoNaskhArabic-Regular.ttf": "serif",
+    "NotoNaskhArabic-Bold.ttf": "serif",
+    "NotoNastaliqUrdu-Regular.ttf": "serif",
+    "NotoKufiArabic-Regular.ttf": "sans",
+    "Amiri-Regular.ttf": "serif",
+    "Amiri-Bold.ttf": "serif",
+    "ScheherazadeNew-Regular.ttf": "serif",
+    "Lateef-Regular.ttf": "serif",
+    "ArefRuqaa-Regular.ttf": "handwriting",
+    "Tajawal-Regular.ttf": "sans",
+    "Cairo[wght].ttf": "sans",
+    "ReemKufi-Regular.ttf": "display",
+    "MarkaziText-Regular.ttf": "serif",
+    "Harmattan-Regular.ttf": "serif",
+    # --- Hebrew ---
+    "NotoSansHebrew-Regular.ttf": "sans",
+    "NotoSansHebrew-Bold.ttf": "sans",
+    "NotoSerifHebrew-Regular.ttf": "serif",
+    "FrankRuhlLibre[wght].ttf": "serif",
+    "Rubik[wght].ttf": "sans",
+    "SecularOne-Regular.ttf": "display",
+    "Heebo[wght].ttf": "sans",
+    "Assistant[wght].ttf": "sans",
+    "SuezOne-Regular.ttf": "serif",
+    "DavidLibre-Regular.ttf": "serif",
+    "Karantina-Regular.ttf": "display",
+    "NotoRashiHebrew-Regular.ttf": "serif",
+    "MiriamLibre-Regular.ttf": "sans",
+    # --- CJK (han_kana) ---
+    "NotoSansSC[wght].ttf": "sans",
+    "NotoSansJP[wght].ttf": "sans",
+    "NotoSansCJKsc-Regular.otf": "sans",
+    "NotoSansCJKjp-Regular.otf": "sans",
+    "NotoSerifCJKsc-Regular.otf": "serif",
+    "HachiMaruPop-Regular.ttf": "handwriting",
+    "KleeOne-Regular.ttf": "handwriting",
+    "Yomogi-Regular.ttf": "handwriting",
+    "MaShanZheng-Regular.ttf": "handwriting",
+    "LiuJianMaoCao-Regular.ttf": "handwriting",
+    "LongCang-Regular.ttf": "handwriting",
+    "ZhiMangXing-Regular.ttf": "display",
+    "ShipporiMincho-Regular.ttf": "serif",
+    "ZenMaruGothic-Regular.ttf": "sans",
+    "ZenKurenaido-Regular.ttf": "sans",
+    "ZCOOLQingKeHuangYou-Regular.ttf": "handwriting",
+    "ZCOOLKuaiLe-Regular.ttf": "display",
+    "ZenOldMincho-Regular.ttf": "serif",
+    "SawarabiMincho-Regular.ttf": "serif",
+    "SawarabiGothic-Regular.ttf": "sans",
+    "KosugiMaru-Regular.ttf": "sans",
+    "DelaGothicOne-Regular.ttf": "display",
+    "YuseiMagic-Regular.ttf": "handwriting",
+    "MPLUS1[wght].ttf": "sans",
+    # --- Korean ---
+    "NotoSansKR[wght].ttf": "sans",
+    "NotoSansCJKkr-Regular.otf": "sans",
+    "NotoSerifCJKkr-Regular.otf": "serif",
+    "NanumGothic-Regular.ttf": "sans",
+    "NanumMyeongjo-Regular.ttf": "serif",
+    "NanumPenScript-Regular.ttf": "handwriting",
+    "GothicA1-Regular.ttf": "sans",
+    "GamjaFlower-Regular.ttf": "handwriting",
+    "Gaegu-Regular.ttf": "handwriting",
+    "EastSeaDokdo-Regular.ttf": "handwriting",
+    "DoHyeon-Regular.ttf": "display",
+    "Jua-Regular.ttf": "display",
+    "SongMyung-Regular.ttf": "serif",
+    # --- Devanagari ---
+    "NotoSansDevanagari-Regular.ttf": "sans",
+    "NotoSansDevanagari-Bold.ttf": "sans",
+    "NotoSerifDevanagari-Regular.ttf": "serif",
+    "TiroDevanagariHindi-Regular.ttf": "serif",
+    "Laila-Regular.ttf": "serif",
+    "Kalam-Regular.ttf": "handwriting",
+    "Martel-Regular.ttf": "serif",
+    "Eczar-Regular.ttf": "serif",
+    "Halant-Regular.ttf": "serif",
+    "Teko[wght].ttf": "display",
+    "Modak-Regular.ttf": "display",
+    "Tillana-Regular.ttf": "handwriting",
+    "AnekDevanagari[wght].ttf": "sans",
+    # --- Bengali ---
+    "NotoSansBengali-Regular.ttf": "sans",
+    "NotoSansBengali-Bold.ttf": "sans",
+    "NotoSerifBengali-Regular.ttf": "serif",
+    "TiroBangla-Regular.ttf": "serif",
+    "HindSiliguri-Regular.ttf": "sans",
+    "BalooDa2[wght].ttf": "display",
+    "Atma-Regular.ttf": "handwriting",
+    "Galada-Regular.ttf": "display",
+    "Mina-Regular.ttf": "handwriting",
+    # --- Gurmukhi ---
+    "NotoSansGurmukhi-Regular.ttf": "sans",
+    "NotoSansGurmukhi-Bold.ttf": "sans",
+    "NotoSerifGurmukhi-Regular.ttf": "serif",
+    "BalooPaaji2[wght].ttf": "display",
+    "MuktaMahee-Regular.ttf": "sans",
+    "Langar-Regular.ttf": "display",
+    # --- Gujarati ---
+    "NotoSansGujarati-Regular.ttf": "sans",
+    "NotoSansGujarati-Bold.ttf": "sans",
+    "NotoSerifGujarati-Regular.ttf": "serif",
+    "HindVadodara-Regular.ttf": "sans",
+    "MuktaVaani-Regular.ttf": "sans",
+    # --- Odia ---
+    "NotoSansOriya-Regular.ttf": "sans",
+    "NotoSansOriya-Bold.ttf": "sans",
+    "BalooBhaina2[wght].ttf": "display",
+    "NotoSerifOriya-Regular.ttf": "serif",
+    # --- Tamil ---
+    "NotoSansTamil-Regular.ttf": "sans",
+    "NotoSansTamil-Bold.ttf": "sans",
+    "NotoSerifTamil-Regular.ttf": "serif",
+    "TiroTamil-Regular.ttf": "serif",
+    "Kavivanar-Regular.ttf": "handwriting",
+    "Catamaran[wght].ttf": "sans",
+    "HindMadurai-Regular.ttf": "sans",
+    "MuktaMalar-Regular.ttf": "sans",
+    "BalooThambi2[wght].ttf": "display",
+    # --- Telugu ---
+    "NotoSansTelugu-Regular.ttf": "sans",
+    "NotoSansTelugu-Bold.ttf": "sans",
+    "NotoSerifTelugu-Regular.ttf": "serif",
+    "TiroTelugu-Regular.ttf": "serif",
+    "LakkiReddy-Regular.ttf": "handwriting",
+    "HindGuntur-Regular.ttf": "sans",
+    "Mandali-Regular.ttf": "sans",
+    "Ramabhadra-Regular.ttf": "sans",
+    "BalooTammudu2[wght].ttf": "display",
+    "Peddana-Regular.ttf": "serif",
+    # --- Kannada ---
+    "NotoSansKannada-Regular.ttf": "sans",
+    "NotoSansKannada-Bold.ttf": "sans",
+    "NotoSerifKannada-Regular.ttf": "serif",
+    "TiroKannada-Regular.ttf": "serif",
+    "AkayaKanadaka-Regular.ttf": "handwriting",
+    "Benne-Regular.ttf": "serif",
+    "HindMysuru-Regular.ttf": "sans",
+    "BalooTamma2[wght].ttf": "display",
+    # --- Malayalam ---
+    "NotoSansMalayalam-Regular.ttf": "sans",
+    "NotoSansMalayalam-Bold.ttf": "sans",
+    "NotoSerifMalayalam-Regular.ttf": "serif",
+    "Chilanka-Regular.ttf": "handwriting",
+    "Manjari-Regular.ttf": "sans",
+    "Gayathri-Regular.ttf": "sans",
+    "BalooChettan2[wght].ttf": "display",
+    # --- Sinhala ---
+    "NotoSansSinhala-Regular.ttf": "sans",
+    "NotoSansSinhala-Bold.ttf": "sans",
+    "NotoSerifSinhala-Regular.ttf": "serif",
+    "AbhayaLibre-Regular.ttf": "serif",
+    "Yaldevi[wght].ttf": "sans",
+    "GemunuLibre[wght].ttf": "display",
+    # --- Thai ---
+    "NotoSansThai-Regular.ttf": "sans",
+    "NotoSansThai-Bold.ttf": "sans",
+    "NotoSerifThai-Regular.ttf": "serif",
+    "Kanit-Regular.ttf": "sans",
+    "Sarabun-Regular.ttf": "sans",
+    "Prompt-Regular.ttf": "sans",
+    "Pridi-Regular.ttf": "serif",
+    "Taviraj-Regular.ttf": "serif",
+    "Itim-Regular.ttf": "handwriting",
+    "Charm-Regular.ttf": "handwriting",
+    "Sriracha-Regular.ttf": "handwriting",
+    "Mitr-Regular.ttf": "sans",
+    "K2D-Regular.ttf": "sans",
+    "Chonburi-Regular.ttf": "display",
+    # --- Lao ---
+    "NotoSansLao-Regular.ttf": "sans",
+    "NotoSansLao-Bold.ttf": "sans",
+    "NotoSerifLao-Regular.ttf": "serif",
+    "PhetsarathOT-Regular.ttf": "sans",
+    # --- Burmese ---
+    "NotoSansMyanmar-Regular.ttf": "sans",
+    "NotoSansMyanmar-Bold.ttf": "sans",
+    "NotoSerifMyanmar-Regular.ttf": "serif",
+    "Padauk-Regular.ttf": "sans",
+    "Padauk-Bold.ttf": "sans",
+    # --- Khmer ---
+    "NotoSansKhmer-Regular.ttf": "sans",
+    "NotoSansKhmer-Bold.ttf": "sans",
+    "NotoSerifKhmer-Regular.ttf": "serif",
+    "Battambang-Regular.ttf": "sans",
+    "Hanuman[wght].ttf": "serif",
+    "Moul-Regular.ttf": "display",
+    "Siemreap.ttf": "sans",
+    "Koulen-Regular.ttf": "display",
+    "Fasthand-Regular.ttf": "handwriting",
+    "Freehand-Regular.ttf": "handwriting",
+    "Dangrek-Regular.ttf": "display",
+    "Bayon-Regular.ttf": "display",
+    "Content-Regular.ttf": "sans",
+    # --- Armenian ---
+    "NotoSansArmenian-Regular.ttf": "sans",
+    "NotoSansArmenian-Bold.ttf": "sans",
+    "NotoSerifArmenian-Regular.ttf": "serif",
+    # --- Georgian ---
+    "NotoSansGeorgian-Regular.ttf": "sans",
+    "NotoSansGeorgian-Bold.ttf": "sans",
+    "NotoSerifGeorgian-Regular.ttf": "serif",
+    # --- Ethiopic ---
+    "NotoSansEthiopic-Regular.ttf": "sans",
+    "NotoSansEthiopic-Bold.ttf": "sans",
+    "NotoSerifEthiopic-Regular.ttf": "serif",
+    "AbyssinicaSIL-Regular.ttf": "serif",
+    # --- Tibetan ---
+    "NotoSansTibetan-Regular.ttf": "sans",
+    "NotoSansTibetan-Bold.ttf": "sans",
+    "NotoSerifTibetan-Regular.ttf": "serif",
+    "Jomolhari-Regular.ttf": "serif",
+    "Uchen-Regular.ttf": "serif",
 }
 
 # Build reverse mapping: script → set of font filenames
@@ -236,13 +519,19 @@ for _font, _scripts in _FONT_TO_SCRIPTS.items():
     for _script in _scripts:
         _SCRIPT_TO_FONTS.setdefault(_script, set()).add(_font)
 
-# Keywords for font style weighting
+# Keywords for font style weighting (legacy fallback)
 _HANDWRITING_KEYWORDS = [
     "caveat", "dancing", "indie", "patrick", "shadow", "kalam",
-    "nanumpen", "chilanka", "handwrit", "cursive",
+    "nanumpen", "chilanka", "handwrit", "cursive", "tillana",
+    "itim", "charm", "sriracha", "gamjaflower", "gaegu", "eastseadokdo",
+    "arefruqaa", "yuseimagic", "atma", "mina", "kavivanar",
+    "lakkireddy", "akayakanadaka", "fasthand", "freehand",
 ]
 _DISPLAY_KEYWORDS = [
     "permanent", "amatic", "lobster", "pacifico", "special", "display",
+    "modak", "teko", "chonburi", "dohyeon", "jua", "delagothicone",
+    "reemkufi", "secular", "karantina", "koulen", "moul", "dangrek",
+    "bayon", "galada", "langar",
 ]
 
 
@@ -292,10 +581,20 @@ def build_weighted_font_list(
 
     weighted = []
     for f in valid:
-        name = Path(f).name.lower()
-        if any(k in name for k in _HANDWRITING_KEYWORDS):
+        fname = Path(f).name
+        cat = _FONT_CATEGORIES.get(fname)
+        if cat is None:
+            # Fallback to keyword matching
+            name_lower = fname.lower()
+            if any(k in name_lower for k in _HANDWRITING_KEYWORDS):
+                cat = "handwriting"
+            elif any(k in name_lower for k in _DISPLAY_KEYWORDS):
+                cat = "display"
+            else:
+                cat = "sans"
+        if cat == "handwriting":
             weighted.extend([f] * 2)  # 20% weight
-        elif any(k in name for k in _DISPLAY_KEYWORDS):
+        elif cat == "display":
             weighted.extend([f] * 1)  # 10% weight
         else:
             weighted.extend([f] * 7)  # 70% weight
