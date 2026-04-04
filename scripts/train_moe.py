@@ -81,6 +81,10 @@ def parse_args():
     parser.add_argument("--detach-epochs", type=int, default=0,
                         help="Number of epochs to detach shared→expert gradient. "
                              "LID-1 gets undivided shared encoder, CTC trains experts only.")
+    parser.add_argument("--freeze-except", type=str, default=None,
+                        choices=["experts", "shared"],
+                        help="Freeze everything except: 'experts' (stage1+stage2 only) "
+                             "or 'shared' (shared SWA + LID-1 only)")
     parser.add_argument("--cpu-offload", action="store_true",
                         help="Offload optimizer states to CPU (frees ~5-7GB VRAM)")
     args = parser.parse_args()
@@ -538,6 +542,26 @@ def main():
     data = load_and_prepare_data(args, device)
     model = build_model(args, data["n_groups"], data["group_script_vocab_sizes"],
                         data["group_script_names"], device)
+
+    # Selective freezing
+    if args.freeze_except:
+        expert_keys = ("stage1.", "stage2.")
+        frozen = 0
+        trainable = 0
+        for name, param in model.named_parameters():
+            if args.freeze_except == "experts":
+                # Train only expert SWA blocks
+                param.requires_grad = any(k in name for k in expert_keys)
+            elif args.freeze_except == "shared":
+                # Train only shared encoder + LID-1
+                param.requires_grad = not any(k in name for k in
+                    ("stage1.", "stage2.", "ctc_modules."))
+            if param.requires_grad:
+                trainable += param.numel()
+            else:
+                frozen += param.numel()
+        print(f"Freeze mode: training {args.freeze_except} only")
+        print(f"  Trainable: {trainable/1e6:.1f}M, Frozen: {frozen/1e6:.1f}M")
 
     steps_per_epoch = len(data["train_loader"])
     opt = build_optimizer_and_scheduler(args, model, device_type, steps_per_epoch)
