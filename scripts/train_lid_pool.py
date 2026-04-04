@@ -209,9 +209,7 @@ def main():
                 B = x.shape[0]
                 x = x.permute(0, 2, 3, 1).reshape(B, h * w, C)
                 x = model.proj_shared(x)
-                for block in model.shared_swa_4x4:
-                    x = block(x, h=h, w=w)
-                for block in model.shared_swa_4x16:
+                for block in model.shared_swa:
                     x = block(x, h=h, w=w)
                 # LID-1 classification
                 group_logits = model.lid_coarse.forward_seq(x)

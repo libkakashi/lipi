@@ -181,21 +181,20 @@ class LipiMoEEncoder(nn.Module):
         # Channel projection
         self.proj_shared = nn.Linear(stem_channels, shared_dim)
 
-        # Shared SWA 4×4
-        self.shared_swa_4x4 = nn.ModuleList([
-            SWABlock(dim=shared_dim, num_heads=shared_dim // 32,
-                     window_h=4, window_w=4,
-                     shift=(i % 2 == 1), mlp_ratio=shared_mlp_ratio)
-            for i in range(shared_blocks_4x4)
-        ])
-
-        # Shared SWA 4×16
-        self.shared_swa_4x16 = nn.ModuleList([
-            SWABlock(dim=shared_dim, num_heads=shared_dim // 32,
-                     window_h=4, window_w=16,
-                     shift=(i % 2 == 1), mlp_ratio=shared_mlp_ratio)
-            for i in range(shared_blocks_4x16)
-        ])
+        # Shared SWA — alternating 4×4 (local) and 4×16 (wide context)
+        total_shared = shared_blocks_4x4 + shared_blocks_4x16
+        self.shared_swa = nn.ModuleList()
+        for i in range(total_shared):
+            # Alternate: even=4×4 local, odd=4×16 wide
+            if i % 2 == 0:
+                wh, ww = 4, 4
+            else:
+                wh, ww = 4, 16
+            self.shared_swa.append(
+                SWABlock(dim=shared_dim, num_heads=shared_dim // 32,
+                         window_h=wh, window_w=ww,
+                         shift=(i % 2 == 1), mlp_ratio=shared_mlp_ratio)
+            )
 
         # LID-1
         self.lid_coarse = LIDCoarse(in_channels=shared_dim, num_groups=num_groups)
@@ -291,12 +290,7 @@ class LipiMoEEncoder(nn.Module):
         x = self.proj_shared(x)
 
         # Shared SWA (with gradient checkpointing to save activation memory)
-        for block in self.shared_swa_4x4:
-            if self.training and torch.is_grad_enabled():
-                x = ckpt_util.checkpoint(block, x, h, w, use_reentrant=False)
-            else:
-                x = block(x, h=h, w=w)
-        for block in self.shared_swa_4x16:
+        for block in self.shared_swa:
             if self.training and torch.is_grad_enabled():
                 x = ckpt_util.checkpoint(block, x, h, w, use_reentrant=False)
             else:
