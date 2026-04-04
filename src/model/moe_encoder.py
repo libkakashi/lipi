@@ -151,7 +151,6 @@ class LipiMoEEncoder(nn.Module):
         shared_blocks_4x4: int = 8,
         shared_blocks_4x16: int = 4,
         shared_mlp_ratio: int = 4,
-        shared_alternate: bool = False,  # unused, kept for checkpoint compat
         # Expert SWA Stage 1
         stage1_dim: int = 288,
         stage1_blocks: int = 12,
