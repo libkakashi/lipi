@@ -52,7 +52,11 @@ def process_image(img_path, height=32, max_width=768):
         new_width = max(1, int(img.width * height / img.height))
         img = img.resize((new_width, height), Image.BILINEAR)
 
-    # Pad narrow images, keep wide ones as-is
+    # Scale down if too wide (never crop)
+    if img.width > max_width:
+        img = img.resize((max_width, height), Image.BILINEAR)
+
+    # Pad narrow images to max_width for uniform tensor stacking
     if img.width < max_width:
         padded = Image.new("RGB", (max_width, height), (240, 240, 240))
         padded.paste(img, (0, 0))
@@ -198,6 +202,8 @@ def convert_casia(out_dir):
                     if img.height != 32:
                         new_width = max(1, int(img.width * 32 / img.height))
                         img = img.resize((new_width, 32), Image.BILINEAR)
+                    if img.width > 768:
+                        img = img.resize((768, 32), Image.BILINEAR)
                     if img.width < 768:
                         padded = Image.new("RGB", (768, 32), (240, 240, 240))
                         padded.paste(img, (0, 0))
