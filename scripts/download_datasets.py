@@ -109,14 +109,16 @@ def download_iam(out_dir):
 
 @register("casia-hwdb",
           ["han_kana"],
-          "CASIA-HWDB: 3.9M Chinese handwritten character samples")
+          "CASIA-HWDB2: Chinese handwritten text lines (HuggingFace)")
 def download_casia(out_dir):
+    check_hf()
     dest = out_dir / "casia-hwdb"
     dest.mkdir(parents=True, exist_ok=True)
-    print("  CASIA-HWDB requires manual registration at:")
-    print("  https://nlpr.ia.ac.cn/databases/handwriting/home.html")
-    print(f"  Download and extract to {dest}/")
-    print("  Key files: HWDB1.1 (isolated chars), HWDB2.x (text lines)")
+
+    run(f"huggingface-cli download Teklia/CASIA-HWDB2-line "
+        f"--repo-type dataset --local-dir {dest}")
+
+    print(f"  Saved to {dest}/")
 
 
 @register("hkr",

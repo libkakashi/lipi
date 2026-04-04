@@ -176,6 +176,66 @@ def convert_iam(out_dir):
     print(f"  IAM: {total} word images converted")
 
 
+@register("casia-hwdb", "CASIA-HWDB2 Chinese Handwritten Lines (HuggingFace)")
+def convert_casia(out_dir):
+    casia_dir = DATA_DIR / "casia-hwdb"
+    images, labels = [], []
+
+    # HuggingFace Teklia/CASIA-HWDB2-line format
+    # Try parquet first (HF datasets default)
+    try:
+        from datasets import load_dataset
+        ds = load_dataset(str(casia_dir))
+        for split in ds:
+            for item in ds[split]:
+                img = item.get("image")
+                label = item.get("text", item.get("ground_truth", ""))
+                if img and label and 1 <= len(label) <= 50:
+                    if isinstance(img, Image.Image):
+                        img = img.convert("RGB")
+                    else:
+                        continue
+                    if img.height != 32:
+                        new_width = max(1, int(img.width * 32 / img.height))
+                        img = img.resize((new_width, 32), Image.BILINEAR)
+                    if img.width < 768:
+                        padded = Image.new("RGB", (768, 32), (240, 240, 240))
+                        padded.paste(img, (0, 0))
+                        img = padded
+                    if image_has_ink(img):
+                        images.append(rgb_to_input(img))
+                        labels.append(label)
+        total = save_shards(images, labels, "han_kana", out_dir, prefix="casia")
+        print(f"  CASIA-HWDB: {total} line images converted")
+        return
+    except ImportError:
+        print("  'datasets' package not installed, trying image directory...")
+    except Exception as e:
+        print(f"  HuggingFace datasets load failed: {e}, trying image directory...")
+
+    # Fallback: look for image + label file pairs
+    for img_dir in [casia_dir, casia_dir / "data", casia_dir / "train"]:
+        if not img_dir.exists():
+            continue
+        for ann_file in sorted(img_dir.rglob("*.txt"))[:50000]:
+            if "README" in ann_file.name:
+                continue
+            base = ann_file.stem
+            for ext in [".png", ".jpg", ".jpeg"]:
+                img_path = ann_file.parent / (base + ext)
+                if img_path.exists():
+                    label = ann_file.read_text(errors="ignore").strip()
+                    if 1 <= len(label) <= 50:
+                        tensor = process_image(img_path)
+                        if tensor is not None:
+                            images.append(tensor)
+                            labels.append(label)
+                    break
+
+    total = save_shards(images, labels, "han_kana", out_dir, prefix="casia")
+    print(f"  CASIA-HWDB: {total} line images converted")
+
+
 @register("iiit-indic", "IIIT-INDIC-HW-WORDS (10 Indic scripts)")
 def convert_iiit_indic(out_dir):
     base_dir = DATA_DIR / "iiit-indic-hw"
