@@ -36,7 +36,10 @@ def rgb_to_input(img: Image.Image) -> torch.Tensor:
     fx, fy = f(x / xn), f(y / yn)
     L = (116 * fy - 16) / 100.0
     a = (500 * (fx - fy) + 128) / 255.0
-    return torch.tensor(np.stack([L, a], axis=0), dtype=torch.float32)
+    # Quantize to uint8 for 4× smaller shards; dequantize with dequantize_input()
+    L_u8 = np.clip(L * 255, 0, 255).astype(np.uint8)
+    a_u8 = np.clip(a * 255, 0, 255).astype(np.uint8)
+    return torch.tensor(np.stack([L_u8, a_u8], axis=0), dtype=torch.uint8)
 
 
 class ColorProjection(nn.Module):
@@ -56,5 +59,7 @@ class ColorProjection(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """(B, 2, H, W) → (B, 1, H, W)"""
+        """(B, 2, H, W) → (B, 1, H, W). Accepts uint8 or float32 input."""
+        if x.dtype == torch.uint8:
+            x = x.float() / 255.0
         return self.net(x)
