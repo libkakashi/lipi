@@ -259,8 +259,8 @@ def discover_fonts(active_scripts, word_lists):
         else:
             print(f"  {script:<15}   0 fonts — SKIPPED")
 
-    if len(valid_scripts) < 2:
-        print("ERROR: Need at least 2 scripts with fonts")
+    if len(valid_scripts) < 1:
+        print("ERROR: No scripts with fonts found")
         sys.exit(1)
 
     return script_fonts, valid_scripts
