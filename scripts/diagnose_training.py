@@ -1,152 +1,242 @@
-#!/usr/bin/env python3
-"""Quick diagnostic: checks data labels, gradient norms, and LID-1 signal."""
+"""
+Diagnose CJK training issues. Run on the training machine:
+    python -m scripts.diagnose_training --data data/shards_cjk
+"""
+import argparse
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import torch
-from src.model.lid import SCRIPT_TO_ID, GROUP_TO_ID, SCRIPT_TO_GROUP, GROUPS, SCRIPTS
+import torch.nn.functional as F
 
-data_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("data/all_shards_v5")
 
-print("=" * 60)
-print("1. CHECKING DATA LABELS vs lid.py")
-print("=" * 60)
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data", required=True)
+    args = parser.parse_args()
 
-shard_files = sorted(data_dir.glob("shard_*.pt")) + sorted(data_dir.glob("char_shard_*.pt"))
-print(f"Found {len(shard_files)} shards in {data_dir}")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Device: {device}")
 
-# Sample a few shards and check IDs
-bad_shards = []
-gid_counts = {}
-sid_counts = {}
-total_samples = 0
+    # ── 1. Load data ──
+    print("\n" + "=" * 60)
+    print("1. LOADING DATA")
+    print("=" * 60)
 
-for sf in shard_files[:10]:  # check first 10 shards
-    s = torch.load(sf, weights_only=False)
-    gids = s["group_ids"]
-    sids = s["script_ids"]
-    labels = s["labels"]
-    n = len(labels)
-    total_samples += n
+    from src.training.moe_data import (
+        load_shards, build_script_tokenizers, encode_labels, remap_ids,
+    )
+    from src.model.lid import SCRIPT_TO_GROUP
 
-    for gid in gids.unique().tolist():
-        gid_counts[gid] = gid_counts.get(gid, 0) + (gids == gid).sum().item()
-    for sid in sids.unique().tolist():
-        sid_counts[sid] = sid_counts.get(sid, 0) + (sids == sid).sum().item()
+    images, labels, sids_global, gids_global, meta = load_shards(Path(args.data))
+    active_scripts = meta["active_scripts"]
+    active_groups = list(dict.fromkeys(
+        SCRIPT_TO_GROUP[s] for s in active_scripts if s in SCRIPT_TO_GROUP))
+    n_groups = len(active_groups)
 
-    # Verify consistency: script_id should map to group_id correctly
-    for sid_val in sids.unique().tolist():
-        if sid_val >= len(SCRIPTS):
-            bad_shards.append((sf.name, f"script_id {sid_val} out of range (max {len(SCRIPTS)-1})"))
+    print(f"  Samples: {len(labels)}")
+    print(f"  Images: {images.shape}")
+    print(f"  Scripts: {active_scripts}")
+    print(f"  Groups: {active_groups}")
+
+    group_ids, local_sids, _ = remap_ids(
+        active_scripts, active_groups, sids_global, gids_global)
+
+    group_toks, group_vocab_sizes, group_names = build_script_tokenizers(
+        active_scripts, active_groups)
+    print(f"  Vocab sizes: {group_vocab_sizes}")
+
+    # ── 2. Encode labels ──
+    print("\n" + "=" * 60)
+    print("2. ENCODING LABELS")
+    print("=" * 60)
+
+    targets, tgt_lens = encode_labels(
+        labels, group_ids, local_sids, active_groups, group_toks)
+
+    enc_len = images.shape[3] // 4
+    print(f"  Encoder length T = {enc_len}")
+    print(f"  Target lengths: min={tgt_lens.min()}, max={tgt_lens.max()}, "
+          f"mean={tgt_lens.float().mean():.1f}")
+    print(f"  Zero-length: {(tgt_lens == 0).sum()}")
+    too_long = tgt_lens > enc_len
+    print(f"  Too long (> {enc_len}): {too_long.sum()}")
+    valid = (tgt_lens > 0) & (tgt_lens <= enc_len)
+    print(f"  Valid: {valid.sum()} / {len(valid)}")
+
+    # Check for blank IDs in targets
+    blank_count = sum(
+        1 for i in range(len(targets))
+        if tgt_lens[i] > 0 and (targets[i, :tgt_lens[i]] == 0).any())
+    print(f"  Samples with blank ID in targets: {blank_count}")
+
+    # ── 3. Verify decomposition ──
+    print("\n" + "=" * 60)
+    print("3. DECOMPOSITION CHECK")
+    print("=" * 60)
+
+    from src.data.decompose import (
+        decompose_han_kana, reconstruct_han_kana,
+        _load_cjk_decomposition,
+    )
+    from src.data import decompose as d
+    _load_cjk_decomposition()
+
+    if d._cjk_char_to_tokens:
+        print(f"  Decomposition table loaded: {len(d._cjk_char_to_tokens)} chars")
+    else:
+        print("  *** DECOMPOSITION TABLE EMPTY — THIS IS THE BUG ***")
+        print("  Check that training_data/word_lists/cjk_decomposition.tsv exists")
+        sys.exit(1)
+
+    # Check roundtrip on actual labels
+    rt_fail = 0
+    for i in range(min(1000, len(labels))):
+        label = labels[i]
+        dec = decompose_han_kana(label)
+        rec = reconstruct_han_kana(list(dec))
+        if rec != label:
+            rt_fail += 1
+            if rt_fail <= 3:
+                print(f"  ROUNDTRIP FAIL: '{label}' -> '{rec}'")
+    print(f"  Roundtrip failures: {rt_fail}/1000")
+
+    # ── 4. Image check ──
+    print("\n" + "=" * 60)
+    print("4. IMAGE CHECK")
+    print("=" * 60)
+
+    print(f"  Shape: {images.shape}, dtype: {images.dtype}")
+    print(f"  Min: {images.min():.4f}, Max: {images.max():.4f}, "
+          f"Mean: {images.mean():.4f}")
+
+    ink = images.abs().sum(dim=(1, 2, 3))
+    blank = (ink < 10).sum()
+    print(f"  Blank images (< 10 ink): {blank} / {len(images)}")
+
+    # ── 5. Sample inspection ──
+    print("\n" + "=" * 60)
+    print("5. SAMPLE INSPECTION")
+    print("=" * 60)
+
+    for i in range(min(10, len(labels))):
+        label = labels[i]
+        dec = decompose_han_kana(label)
+        ids = targets[i, :tgt_lens[i]].tolist()
+        img_ink = images[i].abs().sum().item()
+        print(f"  [{i}] label='{label}' tgt_len={tgt_lens[i]} "
+              f"ids={ids[:8]}{'...' if len(ids) > 8 else ''} ink={img_ink:.0f}")
+
+    # ── 6. Mini training loop ──
+    print("\n" + "=" * 60)
+    print("6. MINI TRAINING (100 steps, batch=32, fresh model)")
+    print("=" * 60)
+
+    from src.model.moe_encoder import LipiMoEEncoder
+
+    model = LipiMoEEncoder(
+        shared_dim=256, shared_blocks_4x4=4, shared_blocks_4x16=2,
+        stage1_dim=256, stage1_blocks=6,
+        stage2_dim=256, stage2_blocks=4,
+        num_groups=n_groups,
+        group_script_vocab_sizes=group_vocab_sizes,
+        group_script_names=group_names,
+        head_hidden=384,
+    ).to(device)
+    model.train()
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=0.01)
+
+    # Use only valid samples
+    keep = valid.nonzero(as_tuple=True)[0]
+    v_images = images[keep]
+    v_targets = targets[keep]
+    v_tgt_lens = tgt_lens[keep]
+    v_gids = group_ids[keep]
+    v_sids = local_sids[keep]
+
+    losses = []
+    bs = min(32, len(v_images))
+    steps = min(100, len(v_images) // bs)
+
+    for step in range(steps):
+        s, e = step * bs, (step + 1) * bs
+        imgs = v_images[s:e].to(device)
+        tgts = v_targets[s:e].to(device)
+        tlens = v_tgt_lens[s:e].to(device)
+        gids_b = v_gids[s:e].to(device)
+        sids_b = v_sids[s:e].to(device)
+
+        out = model(imgs, group_ids=gids_b, script_ids=sids_b)
+
+        # Compute CTC loss directly
+        ok = (tlens <= out["lengths"]) & (tlens > 0)
+        if not ok.any():
+            print(f"  Step {step}: NO VALID SAMPLES (all targets > enc_length)")
             continue
-        script_name = SCRIPTS[sid_val]
-        expected_gid = GROUP_TO_ID[SCRIPT_TO_GROUP[script_name]]
-        actual_gids = gids[sids == sid_val].unique().tolist()
-        if actual_gids != [expected_gid]:
-            bad_shards.append((sf.name, f"script {script_name} (sid={sid_val}): "
-                             f"group_id={actual_gids}, expected={expected_gid} ({SCRIPT_TO_GROUP[script_name]})"))
 
-print(f"\nSampled {total_samples} samples from {min(10, len(shard_files))} shards")
+        ctc_total = torch.zeros(1, device=device)
+        ctc_n = 0
+        for g in range(n_groups):
+            for s_idx, vs in enumerate(group_vocab_sizes[g]):
+                mask = ok & (gids_b == g) & (sids_b == s_idx)
+                if not mask.any():
+                    continue
+                log_probs = (out["logits"][mask, :, :vs].float()
+                             .log_softmax(dim=-1).permute(1, 0, 2))
+                loss = F.ctc_loss(
+                    log_probs, tgts[mask], out["lengths"][mask], tlens[mask],
+                    blank=0, reduction="sum", zero_infinity=True)
+                ctc_total += loss
+                ctc_n += tlens[mask].sum().item()
 
-print(f"\nGroup ID distribution:")
-for gid in sorted(gid_counts):
-    gname = GROUPS[gid] if gid < len(GROUPS) else f"UNKNOWN({gid})"
-    print(f"  {gid:>2} {gname:<20} {gid_counts[gid]:>6} samples")
+        if ctc_n > 0:
+            ctc_loss = ctc_total / ctc_n
+        else:
+            ctc_loss = torch.zeros(1, device=device, requires_grad=True)
 
-print(f"\nScript ID distribution:")
-for sid in sorted(sid_counts):
-    sname = SCRIPTS[sid] if sid < len(SCRIPTS) else f"UNKNOWN({sid})"
-    print(f"  {sid:>2} {sname:<20} {sid_counts[sid]:>6} samples")
+        optimizer.zero_grad()
+        ctc_loss.backward()
 
-if bad_shards:
-    print(f"\n*** FOUND {len(bad_shards)} LABEL MISMATCHES ***")
-    for shard, msg in bad_shards:
-        print(f"  {shard}: {msg}")
-else:
-    print(f"\n✓ All script→group mappings are consistent with lid.py")
+        # Check gradient norms
+        shared_norm = torch.nn.utils.clip_grad_norm_(
+            [p for n, p in model.named_parameters()
+             if not any(k in n for k in ("stage1.", "stage2.", "ctc_modules."))],
+            max_norm=25.0)
+        expert_norm = torch.nn.utils.clip_grad_norm_(
+            [p for n, p in model.named_parameters()
+             if any(k in n for k in ("stage1.", "stage2.", "ctc_modules."))],
+            max_norm=25.0)
 
-# Check metadata too
-meta_path = data_dir / "metadata.pt"
-if meta_path.exists():
-    meta = torch.load(meta_path, weights_only=False)
-    print(f"\nMetadata scripts: {meta.get('active_scripts', 'MISSING')}")
-    print(f"Metadata groups:  {meta.get('active_groups', 'MISSING')}")
-    # Check if metadata groups match lid.py
-    meta_groups = meta.get('active_groups', [])
-    if meta_groups != list(GROUPS[:len(meta_groups)]):
-        print(f"*** METADATA GROUP ORDER MISMATCH ***")
-        print(f"  metadata: {meta_groups}")
-        print(f"  lid.py:   {list(GROUPS[:len(meta_groups)])}")
+        optimizer.step()
 
-print(f"\n{'=' * 60}")
-print("2. CHECKING GRADIENT FLOW (one batch)")
-print("=" * 60)
+        loss_val = ctc_loss.item()
+        losses.append(loss_val)
 
-# Quick gradient check with synthetic data
-device = torch.device("cuda" if torch.cuda.is_available()
-                      else "mps" if torch.backends.mps.is_available() else "cpu")
+        if step % 10 == 0 or step == steps - 1:
+            print(f"  Step {step:3d}: ctc={loss_val:.4f}  "
+                  f"gnorm s={shared_norm:.2f} e={expert_norm:.2f}")
 
-from src.model.moe_encoder import LipiMoEEncoder
-from src.data.vocab import get_all_script_vocabs
+    # ── 7. Diagnosis ──
+    print("\n" + "=" * 60)
+    print("7. DIAGNOSIS")
+    print("=" * 60)
 
-active_scripts = list(SCRIPTS)
-active_groups = list(GROUPS)
-_, group_vocab_sizes = get_all_script_vocabs(active_scripts, active_groups)
-group_script_names = []
-for g, gname in enumerate(active_groups):
-    scripts = [s for s in active_scripts if SCRIPT_TO_GROUP.get(s) == gname]
-    group_script_names.append(scripts)
+    if not losses:
+        print("  *** NO TRAINING HAPPENED — check data ***")
+    elif losses[-1] < losses[0] * 0.9:
+        print(f"  Loss decreased: {losses[0]:.2f} -> {losses[-1]:.2f}")
+        print("  Model CAN learn from this data.")
+        print("  The issue is likely:")
+        print("    - Checkpoint resume corrupted weights (try without --resume)")
+        print("    - LR schedule decayed too fast (try --epochs 50 --lr 1e-3)")
+    else:
+        print(f"  Loss STUCK: {losses[0]:.2f} -> {losses[-1]:.2f}")
+        print("  Possible causes:")
+        print("    - Images don't match labels (check section 5)")
+        print("    - Images are blank/unreadable (check section 4)")
+        print("    - Encoding is broken (check section 3)")
 
-model = LipiMoEEncoder(
-    num_groups=len(active_groups),
-    group_script_vocab_sizes=group_vocab_sizes,
-    group_script_names=group_script_names,
-).to(device)
 
-# Synthetic batch
-B = 16
-imgs = torch.randn(B, 2, 32, 64, device=device)
-gids = torch.randint(0, len(active_groups), (B,), device=device)
-
-model.train()
-with torch.amp.autocast(device.type, enabled=(device.type == "cuda"), dtype=torch.bfloat16):
-    out = model(imgs, group_ids=None)
-
-loss = torch.nn.functional.cross_entropy(out["group_logits"], gids)
-(3 * loss).backward()  # lid1_weight=3
-
-# Measure gradient norms per component
-def grad_norm(params):
-    grads = [p.grad for p in params if p.grad is not None]
-    if not grads:
-        return 0.0
-    return torch.cat([g.flatten() for g in grads]).norm().item()
-
-lid1_params = [p for n, p in model.named_parameters() if "lid_coarse" in n]
-shared_params = [p for n, p in model.named_parameters()
-                 if not any(k in n for k in ("stage1.", "stage2.", "ctc_modules.", "lid_coarse"))]
-expert_params = [p for n, p in model.named_parameters()
-                 if any(k in n for k in ("stage1.", "stage2.", "ctc_modules."))]
-
-lid1_norm = grad_norm(lid1_params)
-shared_norm = grad_norm(shared_params)
-expert_norm = grad_norm(expert_params)
-total_norm = grad_norm(list(model.parameters()))
-
-print(f"Gradient norms (LID-1 loss only, weight=3):")
-print(f"  LID-1 classifier:  {lid1_norm:.2f}  ({sum(p.numel() for p in lid1_params)/1e3:.0f}K params)")
-print(f"  Shared SWA + stem: {shared_norm:.2f}  ({sum(p.numel() for p in shared_params)/1e6:.1f}M params)")
-print(f"  Expert + CTC:      {expert_norm:.2f}  ({sum(p.numel() for p in expert_params)/1e6:.1f}M params)")
-print(f"  Total:             {total_norm:.2f}")
-print(f"  max_norm=25 clip:  {25.0/total_norm:.1%} of gradient preserved" if total_norm > 25 else "  max_norm=25: no clipping needed")
-print(f"  LID-1 share:       {lid1_norm/total_norm:.1%} of total norm" if total_norm > 0 else "")
-
-if total_norm > 25:
-    effective_lid1 = lid1_norm * (25.0 / total_norm)
-    print(f"\n  *** LID-1 effective gradient after clip: {effective_lid1:.4f} (was {lid1_norm:.2f})")
-    print(f"  *** This means LID-1 gets {effective_lid1/lid1_norm:.1%} of its gradient — rest is wasted on expert blocks")
-
-print(f"\n{'=' * 60}")
-print("DONE")
-print("=" * 60)
+if __name__ == "__main__":
+    main()

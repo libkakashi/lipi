@@ -5,7 +5,7 @@ CJK (han_kana): atom-based decomposition with SEP-aware BPE.
     Base: 387 leaf atoms + 12 IDS operators.
     SEP appended to prefix-collision chars BEFORE BPE, so BPE naturally
     merges high-frequency (atom, SEP) pairs into single tokens.
-    ~1,390 BPE merged tokens. Each CJK char maps to a short token
+    ~2,500 BPE merged tokens. Each CJK char maps to a short token
     sequence via a pre-built table. Kana pass through unchanged.
 
 Korean: hybrid — top-250 common syllables kept whole,

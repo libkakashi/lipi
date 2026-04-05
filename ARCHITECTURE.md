@@ -86,7 +86,7 @@ Projection: Linear(768 → vocab_size)
 | greek | 423 | malayalam | 173 |
 | arabic | 491 | tamil | 127 |
 | hebrew | 189 | sinhala | 147 |
-| han_kana | 2017 | thai | 142 |
+| han_kana | 3213 | thai | 142 |
 | korean | 373 | lao | 141 |
 | devanagari | 216 | burmese | 215 |
 | gurmukhi | 136 | khmer | 169 |

@@ -5,7 +5,7 @@ Pipeline:
   1. Parse cjkvi-ids and decompose all 27,584 CJK chars to leaf atoms
   2. Assign minimal unambiguous representations (bag → bag_ops → ordered → full)
   3. Find prefix collisions on base sequences, append SEP to those chars
-  4. Run 1,390 frequency-weighted BPE merges on SEP-augmented sequences
+  4. Run 2,500 frequency-weighted BPE merges on SEP-augmented sequences
      (BPE naturally merges high-frequency atom+SEP pairs into single tokens)
 
 Outputs:
@@ -49,7 +49,7 @@ SEP_CHAR = chr(SEP_CODEPOINT)
 # BPE merged tokens go into PUA starting at U+E000
 PUA_START = 0xE000
 
-NUM_BPE_MERGES = 1390
+NUM_BPE_MERGES = 2500
 
 # Kana atom replacements: the IDS database uses 3 katakana as shape
 # placeholders (コ ス ユ). We replace them with PUA tokens so kana

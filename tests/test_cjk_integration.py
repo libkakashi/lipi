@@ -31,8 +31,8 @@ class TestCJKVocabLoading:
 
     def test_han_kana_vocab_size(self):
         vocab = _load_vocab()
-        # 709 base + 1390 BPE + 1 BLANK = 2100
-        assert 2000 <= len(vocab) <= 2200, f"Expected ~2100 tokens, got {len(vocab)}"
+        # 712 base + 2500 BPE + 1 BLANK = 3213
+        assert 3100 <= len(vocab) <= 3400, f"Expected ~3213 tokens, got {len(vocab)}"
 
     def test_blank_token_at_index_zero(self):
         from src.data.bigrams import BLANK_TOKEN

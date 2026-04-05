@@ -28,23 +28,23 @@ effectively creating "standalone" tokens as a side effect. No manual dual-identi
 mechanism needed — BPE optimally allocates merges between content compression
 and SEP elimination based on frequency.
 
-## Chosen Vocab: ~2,103 total (712 base + 1,390 BPE merges + 1 BLANK)
+## Chosen Vocab: ~3,213 total (712 base + 2,500 BPE merges + 1 BLANK)
 
 Base: 179 kana + 387 atoms + 3 kana-replacement atoms + 12 IDS operators + 1 SEP + 130 punct/ASCII = 712
-BPE merges: 1,390 (SEP-aware, PUA codepoints U+E000+)
+BPE merges: 2,500 (SEP-aware, PUA codepoints U+E000+)
 BLANK (CTC): 1
 
 Verified against Jun Da frequency corpus (193.5M tokens):
 
 | Metric                      | Value |
 |------------------------------|-------|
-| Avg tokens/char              |  1.27 |
+| Avg tokens/char              |  1.10 |
 | Median tokens/char           |     1 |
-| % 1-token (freq-weighted)   | 84.0% |
-| % 2-token                   |  8.2% |
-| % 3-token                   |  5.5% |
-| % >3-token                  |  2.3% |
-| Bare SEP remaining          |   401 |
+| % 1-token (freq-weighted)   | 93.1% |
+| % 2-token                   |  3.5% |
+| % 3-token                   |  2.5% |
+| % >3-token                  |  1.0% |
+| Bare SEP remaining          |   283 |
 
 ### SEP-aware BPE: why it works
 
@@ -58,7 +58,7 @@ BPE naturally merges (atom, SEP) for high-frequency single-token chars that
 need disambiguation. Each such merge helps every character containing that
 atom+SEP pair, making it far more efficient than dedicated standalone tokens.
 
-At 1,500 merges, BPE merges away SEP for the vast majority of collisions.
+At 2,500 merges, BPE merges away SEP for the vast majority of collisions (2,561/2,844).
 
 ### Comparison: SEP-aware BPE vs alternatives (at equal vocab budget)
 
@@ -162,12 +162,13 @@ adjacent pairs. SEP tokens participate in merges naturally.
 | BPE merges | Avg tok/char | Median | % 1-tok | % 2-tok | % 3-tok | % >3-tok |
 |------------|--------------|--------|---------|---------|---------|----------|
 |          0 |         3.81 |      3 |   10.2% |   14.6% |   24.7% |    50.5% |
-|        790 |         1.51 |      1 |   70.8% |    ... |    ... |    ...  |
-|      1,000 |         1.40 |      1 |   76.4% |    ... |    ... |    ...  |
-|      1,267 |         1.31 |      1 |   82.0% |   8.9% |   6.5% |     2.6% |
-|      1,390 |         1.27 |      1 |   84.0% |   8.2% |   5.5% |     2.3% |
-|      1,500 |         1.24 |      1 |   85.5% |   7.7% |   4.8% |     2.0% |
-|      2,000 |         1.15 |      1 |   90.8% |    ... |    ... |    ...  |
+|      1,000 |         1.47 |      1 |   74.0% |   12.3% |    9.3% |     4.4% |
+|      1,500 |         1.28 |      1 |   83.8% |    7.9% |    5.8% |     2.5% |
+|      2,000 |         1.18 |      1 |   89.7% |    5.1% |    3.8% |     1.5% |
+|    **2,500** |   **1.10** |  **1** | **93.1%** | **3.5%** | **2.5%** | **1.0%** |
+|      3,000 |         1.08 |      1 |   95.2% |    2.5% |    1.7% |     0.6% |
+|      4,000 |         1.04 |      1 |   97.8% |    1.2% |    0.8% |     0.3% |
+|      5,000 |         1.02 |      1 |   99.0% |    0.5% |    0.3% |     0.1% |
 
 ## Optimal Vocab Size Analysis
 
@@ -176,11 +177,14 @@ More merges reduces n but increases vocab (which may reduce p).
 
 Model: p(vocab) = base_p × (400/vocab)^alpha, where alpha = vocab size penalty.
 
-Chosen: 1,390 BPE merges (2,100 total vocab). Rationale:
+Chosen: 2,500 BPE merges (3,213 total vocab). Rationale:
 - Standard Chinese OCR uses 6,000-8,000 classes without issue
-- CTC head is a simple linear projection; 2,100 classes is trivial
-- 84% of real text is single-token — effectively direct classification
-- Diminishing returns beyond ~1,400 merges
+- CTC head is a simple linear projection; 3,213 classes is trivial
+- 93% of real text is single-token — effectively direct classification
+- The dominant cost of multi-token chars is CTC alignment tax (not softmax
+  dilution), so reducing multi-token chars from 16% to 7% is worth more
+  than the negligible per-token accuracy loss from the larger vocab
+- Diminishing returns beyond ~2,500 merges (3k→5k buys only 4% more 1-tok)
 
 ## Collision Overrides
 
