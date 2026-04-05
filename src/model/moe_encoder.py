@@ -5,10 +5,10 @@ Architecture:
     Input: (B, 2, 32, W) — L+a from rgb_to_input
     -> ColorProjection: L+a → 1ch
     -> ResNet Stem: 1→64ch, stride 2×2  → (B, 64, 16, W/2)
-    -> Shared SWA 4×4: character-level universal features  (h=16, w=W/2)
-    -> Shared SWA 4×16: sequence-level universal features
+    -> Shared SWA 8×8: character-level universal features   (h=16, w=W/2)
+    -> Shared SWA 8×32: sequence-level universal features
     -> LID-1: 13-group classification
-    -> Expert SWA 4×4: group-specific character features   (h=16, w=W/2)
+    -> Expert SWA 8×8: group-specific character features    (h=16, w=W/2)
     -> Height pool 16→4 + Width pool 2×                    (h=4, w=W/4)
     -> Expert SWA 4×16: group-specific sequence features   (h=4, w=W/4)
     -> Height pool 4→2
@@ -177,17 +177,18 @@ class LipiMoEEncoder(nn.Module):
         # Channel projection
         self.proj_shared = nn.Linear(stem_channels, shared_dim)
 
-        # Shared SWA: 4×4 (local) then 4×16 (wide context)
+        # Shared SWA: 8×8 (local) then 8×32 (wide context)
+        # Window sizes scaled 2× from original 4×4/4×16 to match 2×2 stem
         self.shared_swa = nn.ModuleList()
         for i in range(shared_blocks_4x4):
             self.shared_swa.append(
                 SWABlock(dim=shared_dim, num_heads=shared_dim // 32,
-                         window_h=4, window_w=4,
+                         window_h=8, window_w=8,
                          shift=(i % 2 == 1), mlp_ratio=shared_mlp_ratio))
         for i in range(shared_blocks_4x16):
             self.shared_swa.append(
                 SWABlock(dim=shared_dim, num_heads=shared_dim // 32,
-                         window_h=4, window_w=16,
+                         window_h=8, window_w=32,
                          shift=(i % 2 == 1), mlp_ratio=shared_mlp_ratio))
 
         # LID-1
@@ -196,10 +197,10 @@ class LipiMoEEncoder(nn.Module):
         # Channel projection
         self.proj1 = nn.Linear(shared_dim, stage1_dim) if shared_dim != stage1_dim else nn.Identity()
 
-        # Expert SWA Stage 1
+        # Expert SWA Stage 1 (8×8 windows, same scale as shared)
         self.stage1 = nn.ModuleList([
             FullyExpertSWABlock(dim=stage1_dim, num_heads=stage1_dim // 32,
-                                num_groups=num_groups, window_h=4, window_w=4,
+                                num_groups=num_groups, window_h=8, window_w=8,
                                 shift=(i % 2 == 1), mlp_ratio=stage1_mlp_ratio)
             for i in range(stage1_blocks)
         ])
