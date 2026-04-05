@@ -117,11 +117,14 @@ def compute_alignment_ce_loss(
     you should be producing token X" — a strong per-token learning signal
     that complements CTC's sequence-level loss.
 
-    Uses the same per-script vocab slicing as compute_ctc_loss.
+    Processes samples in mini-chunks to avoid OOM from materializing the
+    full (N*T, vocab) tensor. Uses the same per-script vocab slicing as
+    compute_ctc_loss.
     """
     device = logits.device
     ce_loss = torch.zeros(1, device=device)
     ce_frames = 0
+    chunk_size = 64  # Process this many samples at a time
 
     for g, script_vocabs in enumerate(group_script_vocabs):
         for s, vs in enumerate(script_vocabs):
@@ -133,34 +136,38 @@ def compute_alignment_ce_loss(
             s_targets = targets[s_mask]      # (N, U_max)
             s_tgt_lens = tgt_lens[s_mask]    # (N,)
             s_enc_lens = enc_lengths[s_mask]  # (N,)
+            n = s_logits.shape[0]
 
-            # Slice to exact vocab size
-            s_logits_vs = s_logits[:, :, :vs].float()  # (N, T, vs)
-            n, t_max, _ = s_logits_vs.shape
+            for chunk_start in range(0, n, chunk_size):
+                chunk_end = min(chunk_start + chunk_size, n)
+                c_logits = s_logits[chunk_start:chunk_end, :, :vs].float()
+                c_targets = s_targets[chunk_start:chunk_end]
+                c_tgt_lens = s_tgt_lens[chunk_start:chunk_end]
+                c_enc_lens = s_enc_lens[chunk_start:chunk_end]
+                cn, t_max, _ = c_logits.shape
 
-            # Build frame-level targets by uniformly spreading target tokens
-            frame_targets = torch.zeros(n, t_max, dtype=torch.long, device=device)
-            frame_mask = torch.zeros(n, t_max, dtype=torch.bool, device=device)
+                # Build frame-level targets via uniform spread (vectorized)
+                # frame_idx[i, f] = f * U_i / T_i, clamped to [0, U_i-1]
+                frames = torch.arange(t_max, device=device).unsqueeze(0)  # (1, T)
+                u = c_tgt_lens.unsqueeze(1).float()  # (cn, 1)
+                t = c_enc_lens.unsqueeze(1).float()   # (cn, 1)
+                # Avoid division by zero
+                t = t.clamp(min=1)
+                tgt_indices = (frames * u / t).long().clamp(
+                    min=0, max=c_targets.shape[1] - 1)  # (cn, T)
 
-            for i in range(n):
-                t_len = s_enc_lens[i].item()
-                u_len = s_tgt_lens[i].item()
-                if t_len == 0 or u_len == 0:
-                    continue
-                tgt = s_targets[i, :u_len]
-                # Assign each frame to a target token via uniform spread
-                # Frame f maps to target token index: f * U / T
-                indices = torch.arange(t_len, device=device) * u_len // t_len
-                indices = indices.clamp(max=u_len - 1)
-                frame_targets[i, :t_len] = tgt[indices]
-                frame_mask[i, :t_len] = True
+                # Gather target tokens for each frame
+                frame_targets = c_targets.gather(1, tgt_indices)  # (cn, T)
 
-            if frame_mask.any():
-                masked_logits = s_logits_vs[frame_mask]    # (K, vs)
-                masked_targets = frame_targets[frame_mask]  # (K,)
-                ce_loss = ce_loss + F.cross_entropy(
-                    masked_logits, masked_targets, reduction="sum")
-                ce_frames += frame_mask.sum().item()
+                # Mask: only frames within encoder length
+                frame_mask = frames < c_enc_lens.unsqueeze(1)  # (cn, T)
+
+                if frame_mask.any():
+                    masked_logits = c_logits[frame_mask]      # (K, vs)
+                    masked_targets = frame_targets[frame_mask]  # (K,)
+                    ce_loss = ce_loss + F.cross_entropy(
+                        masked_logits, masked_targets, reduction="sum")
+                    ce_frames += frame_mask.sum().item()
 
     if ce_frames > 0:
         ce_loss = torch.clamp(ce_loss / ce_frames, min=0.0, max=100.0)
