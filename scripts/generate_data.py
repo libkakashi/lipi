@@ -138,17 +138,39 @@ def filter_fonts_by_style(fonts: list[str], style: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def get_renderable_chars(script: str) -> list[str]:
-    """Get standalone-renderable characters from the frozen vocab.
+    """Get standalone-renderable characters for training image generation.
 
-    Excludes:
-      - Blank token
-      - Non-printable chars (space, control)
-      - Combining marks (Unicode category M*: Mn, Mc, Me) — these need a
-        base character to render (e.g., Devanagari matras, anusvara, virama).
-        They're kept in the vocab for word-level CTC but can't render alone.
+    For han_kana: returns all CJK Unified + Ext-A characters plus kana,
+    NOT the decomposition tokens (atoms/BPE). The actual characters are
+    rendered as images; decomposition into tokens happens during training.
+
+    For other scripts: returns chars from the frozen vocab, excluding
+    blank, non-printable, and combining marks.
     """
     import unicodedata
     from src.data.bigrams import BLANK_TOKEN
+
+    if script == "han_kana":
+        chars = []
+        # CJK Ext-A (U+3400-U+4DBF)
+        for cp in range(0x3400, 0x4DC0):
+            c = chr(cp)
+            if unicodedata.category(c) != 'Cn':
+                chars.append(c)
+        # CJK Unified (U+4E00-U+9FFF)
+        for cp in range(0x4E00, 0xA000):
+            c = chr(cp)
+            if unicodedata.category(c) != 'Cn':
+                chars.append(c)
+        # Hiragana (U+3041-U+3096)
+        for cp in range(0x3041, 0x3097):
+            chars.append(chr(cp))
+        # Katakana (U+30A1-U+30FA + prolonged sound mark)
+        for cp in range(0x30A1, 0x30FB):
+            chars.append(chr(cp))
+        chars.append('\u30FC')  # ー (prolonged sound mark)
+        return chars
+
     group = SCRIPT_TO_GROUP[script]
     vocab = build_script_vocab(script, group)
     return [ch for ch in vocab

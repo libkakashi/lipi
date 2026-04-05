@@ -1109,14 +1109,26 @@ class TestCharGeneration:
     def test_chars_subset_of_vocab(self):
         from scripts.generate_data import get_renderable_chars as _get_script_chars
         from src.data.vocab import build_script_vocab
+        from src.data.decompose import decompose_text, DECOMPOSE_GROUPS
         from src.model.lid import SCRIPTS, SCRIPT_TO_GROUP
         for script in SCRIPTS:
             if script == "emoji":
                 continue
+            group = SCRIPT_TO_GROUP[script]
             chars = set(_get_script_chars(script))
-            vocab = set(build_script_vocab(script, SCRIPT_TO_GROUP[script]))
-            outside = chars - vocab
-            assert not outside
+            vocab = set(build_script_vocab(script, group))
+            if group in DECOMPOSE_GROUPS:
+                # Renderable chars are full characters that get decomposed
+                # into vocab tokens at training time; verify decomposition works
+                for ch in chars:
+                    decomposed = decompose_text(ch, group)
+                    for tok in decomposed:
+                        assert tok in vocab, (
+                            f"{script}: char U+{ord(ch):04X} decomposes to "
+                            f"token U+{ord(tok):04X} not in vocab")
+            else:
+                outside = chars - vocab
+                assert not outside
 
     def test_chars_are_printable(self):
         from scripts.generate_data import get_renderable_chars as _get_script_chars
