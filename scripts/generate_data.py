@@ -324,7 +324,7 @@ def build_char_chunks(valid_scripts, script_fonts, tasks, args, shard_dir, start
     script_word_target = {s: t for s, t in tasks}
 
     print(f"\n{'='*60}")
-    print(f"Generating single-character images (max {CHAR_BUDGET_RATIO:.0%} of word budget)")
+    print(f"Generating single-character images")
     print(f"{'='*60}")
 
     char_chunks = []
@@ -337,12 +337,9 @@ def build_char_chunks(valid_scripts, script_fonts, tasks, args, shard_dir, start
         if not chars:
             continue
 
-        word_target = script_word_target.get(script, args.samples_per_script)
-        char_budget = int(word_target * CHAR_BUDGET_RATIO)
-        reps = max(1, min(args.char_reps, char_budget // len(chars)))
+        reps = args.char_reps
         est = len(chars) * reps
-        print(f"  {script:<15} {len(chars):>5} unique chars × {reps} reps = ~{est} images "
-              f"(word budget: {word_target})")
+        print(f"  {script:<15} {len(chars):>5} unique chars × {reps} reps = ~{est} images")
 
         chunk_size = max(200, len(chars) // max(1, args.workers // len(valid_scripts)))
         for ci in range(0, len(chars), chunk_size):
