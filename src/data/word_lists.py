@@ -26,7 +26,7 @@ _SCRIPT_EXTRA_FILES = {
     "cyrillic": ["ukrainian.txt"],
     "devanagari": ["marathi.txt", "hindi_legal.txt"],
     "arabic": ["persian.txt", "urdu.txt"],
-    "han_kana": ["japanese.txt"],  # script name, not group name
+    "han_kana": ["chinese.txt", "japanese.txt"],
 }
 
 

@@ -8,8 +8,7 @@ Losses:
   - LID-1: group classification (cross-entropy)
   - LID-2: script classification within multi-script groups (cross-entropy)
   - CTC: sequence-level character recognition
-  - Alignment CE: per-frame cross-entropy using CTC's forced alignment,
-    giving partial credit for multi-token characters
+  - Regional token: spatial partial credit for multi-token characters
 """
 
 import torch
@@ -96,7 +95,55 @@ def compute_ctc_loss(
     return ctc_loss
 
 
-def compute_alignment_ce_loss(
+def _regional_token_loss_single(
+    logits: Tensor,
+    targets: Tensor,
+    tgt_len: int,
+    enc_len: int,
+) -> tuple[Tensor, int]:
+    """Compute regional token loss for a single sample.
+
+    Divides the encoder frames into regions (one per target token),
+    max-pools each region's logits, and computes CE against the
+    target token for that region.
+
+    Args:
+        logits: (T, vocab) — encoder output for this sample
+        targets: (U_max,) — target token IDs (padded)
+        tgt_len: number of valid target tokens
+        enc_len: number of valid encoder frames
+
+    Returns:
+        (loss_sum, n_regions) — unnormalized loss and count
+    """
+    if tgt_len == 0 or enc_len == 0:
+        return torch.zeros(1, device=logits.device), 0
+
+    T = enc_len
+    U = tgt_len
+    loss = torch.zeros(1, device=logits.device)
+
+    for u in range(U):
+        # Assign each target token to a region of frames
+        frame_start = u * T // U
+        frame_end = (u + 1) * T // U
+        if frame_end <= frame_start:
+            frame_end = frame_start + 1
+        frame_end = min(frame_end, T)
+
+        # Max-pool this region: best logit per vocab token across frames
+        # Shape: (region_len, vocab) → (vocab,)
+        region_logits = logits[frame_start:frame_end]
+        pooled = region_logits.max(dim=0).values  # (vocab,)
+
+        # CE: this region should contain target token u
+        target = targets[u].unsqueeze(0)  # (1,)
+        loss = loss + F.cross_entropy(pooled.unsqueeze(0), target, reduction="sum")
+
+    return loss, U
+
+
+def compute_regional_token_loss(
     logits: Tensor,
     targets: Tensor,
     enc_lengths: Tensor,
@@ -106,25 +153,24 @@ def compute_alignment_ce_loss(
     true_script_ids: Tensor,
     group_script_vocabs: list[list[int]],
 ) -> Tensor:
-    """Per-frame cross-entropy giving partial credit for multi-token chars.
+    """Regional token loss: spatial partial credit for multi-token characters.
 
-    Spreads target tokens uniformly across encoder frames, then computes
-    cross-entropy at each frame. This works from epoch 1 (unlike forced
-    alignment which requires the model to already produce non-blank output).
+    Divides encoder frames into regions (one per target token) and checks
+    whether each region contains the correct token via max-pooled CE.
 
-    For a target of length U and encoder length T, each target token gets
-    assigned to T/U consecutive frames. The model learns "around frame 10
-    you should be producing token X" — a strong per-token learning signal
-    that complements CTC's sequence-level loss.
+    Unlike CTC (all-or-nothing at sequence level), this gives partial credit:
+    getting 3/5 tokens in the right regions = 60% credit. Complements CTC
+    by providing per-token gradient signal.
 
-    Processes samples in mini-chunks to avoid OOM from materializing the
-    full (N*T, vocab) tensor. Uses the same per-script vocab slicing as
-    compute_ctc_loss.
+    Unlike uniform-spread alignment CE, this uses max-pooling instead of
+    forcing each frame to predict one token — compatible with CTC's blank
+    output pattern.
+
+    Same per-script vocab slicing as compute_ctc_loss.
     """
     device = logits.device
-    ce_loss = torch.zeros(1, device=device)
-    ce_frames = 0
-    chunk_size = 64  # Process this many samples at a time
+    total_loss = torch.zeros(1, device=device)
+    total_regions = 0
 
     for g, script_vocabs in enumerate(group_script_vocabs):
         for s, vs in enumerate(script_vocabs):
@@ -133,42 +179,21 @@ def compute_alignment_ce_loss(
             if s_logits.shape[0] == 0:
                 continue
 
-            s_targets = targets[s_mask]      # (N, U_max)
-            s_tgt_lens = tgt_lens[s_mask]    # (N,)
-            s_enc_lens = enc_lengths[s_mask]  # (N,)
-            n = s_logits.shape[0]
+            s_logits = s_logits[:, :, :vs].float()
+            s_targets = targets[s_mask]
+            s_tgt_lens = tgt_lens[s_mask]
+            s_enc_lens = enc_lengths[s_mask]
 
-            for chunk_start in range(0, n, chunk_size):
-                chunk_end = min(chunk_start + chunk_size, n)
-                c_logits = s_logits[chunk_start:chunk_end, :, :vs].float()
-                c_targets = s_targets[chunk_start:chunk_end]
-                c_tgt_lens = s_tgt_lens[chunk_start:chunk_end]
-                c_enc_lens = s_enc_lens[chunk_start:chunk_end]
-                cn, t_max, _ = c_logits.shape
+            for i in range(s_logits.shape[0]):
+                loss_i, n_i = _regional_token_loss_single(
+                    s_logits[i],
+                    s_targets[i],
+                    s_tgt_lens[i].item(),
+                    s_enc_lens[i].item(),
+                )
+                total_loss = total_loss + loss_i
+                total_regions += n_i
 
-                # Build frame-level targets via uniform spread (vectorized)
-                # frame_idx[i, f] = f * U_i / T_i, clamped to [0, U_i-1]
-                frames = torch.arange(t_max, device=device).unsqueeze(0)  # (1, T)
-                u = c_tgt_lens.unsqueeze(1).float()  # (cn, 1)
-                t = c_enc_lens.unsqueeze(1).float()   # (cn, 1)
-                # Avoid division by zero
-                t = t.clamp(min=1)
-                tgt_indices = (frames * u / t).long().clamp(
-                    min=0, max=c_targets.shape[1] - 1)  # (cn, T)
-
-                # Gather target tokens for each frame
-                frame_targets = c_targets.gather(1, tgt_indices)  # (cn, T)
-
-                # Mask: only frames within encoder length
-                frame_mask = frames < c_enc_lens.unsqueeze(1)  # (cn, T)
-
-                if frame_mask.any():
-                    masked_logits = c_logits[frame_mask]      # (K, vs)
-                    masked_targets = frame_targets[frame_mask]  # (K,)
-                    ce_loss = ce_loss + F.cross_entropy(
-                        masked_logits, masked_targets, reduction="sum")
-                    ce_frames += frame_mask.sum().item()
-
-    if ce_frames > 0:
-        ce_loss = torch.clamp(ce_loss / ce_frames, min=0.0, max=100.0)
-    return ce_loss
+    if total_regions > 0:
+        total_loss = torch.clamp(total_loss / total_regions, min=0.0, max=100.0)
+    return total_loss

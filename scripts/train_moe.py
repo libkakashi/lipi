@@ -29,7 +29,7 @@ from src.training.moe_data import (
 )
 from src.training.moe_losses import (
     compute_lid1_loss, compute_lid2_loss, compute_ctc_loss,
-    compute_alignment_ce_loss,
+    compute_regional_token_loss,
 )
 from src.training.routing import get_predicted_script_ids, build_routing_masks
 from src.training.cpu_offload import CPUOffloadOptimizer
@@ -482,9 +482,9 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         lid2_loss = compute_lid2_loss(
             out["script_logits_per_group"], sids, all_true, ce_loss_fn)
 
-        # Alignment CE loss (partial credit for multi-token chars)
+        # Regional token loss (spatial partial credit for multi-token chars)
         if align_ce_weight > 0:
-            ace_loss = compute_alignment_ce_loss(
+            ace_loss = compute_regional_token_loss(
                 out["logits"], targets, out["lengths"], tgt_lens,
                 all_ok, gids, sids, group_script_vocabs)
         else:
