@@ -1,8 +1,10 @@
 """
 Character decomposition for CJK and Korean.
 
-CJK (han_kana): depth-2 decomposition using CHISE IDS database.
-    ~1,700 components represent all 20,992 CJK chars.
+CJK (han_kana): atom-based decomposition with BPE merges.
+    336 leaf atoms + 12 IDS operators + 250 BPE merged tokens.
+    Each CJK char maps to a short token sequence via a pre-built table.
+    A SEP token separates characters in the decomposed output.
     Kana pass through unchanged.
 
 Korean: hybrid — top-250 common syllables kept whole,
@@ -31,12 +33,20 @@ _MEDIAL_MAP = {c: i for i, c in enumerate(MEDIALS)}
 # Unicode ranges
 _HANGUL_BASE = 0xAC00  # First Hangul syllable block
 _HANGUL_END = 0xD7A3   # Last Hangul syllable block
-_CJK_START = 0x4E00    # CJK Unified Ideographs start
-_CJK_END = 0x9FFF      # CJK Unified Ideographs end
+_CJK_UNIFIED_START = 0x4E00
+_CJK_UNIFIED_END = 0x9FFF
+_CJK_EXT_A_START = 0x3400
+_CJK_EXT_A_END = 0x4DBF
 _HIRAGANA_START = 0x3041
 _HIRAGANA_END = 0x3096
 _KATAKANA_START = 0x30A1
 _KATAKANA_END = 0x30FA
+
+# SEP token: U+2E3B THREE-EM DASH (separates CJK characters in decomposed form)
+SEP_CHAR = "\u2E3B"
+
+# PUA range for BPE merged tokens
+_PUA_START = 0xE000
 
 # Top-250 common Hangul syllables (kept whole, not decomposed).
 # Frozen from frequency analysis of Korean word list. Covers 77.4% of
@@ -76,7 +86,7 @@ def decompose_hangul_char(char: str) -> list[str]:
 
 
 def decompose_korean(text: str) -> str:
-    """Decompose Korean text. Common syllables stay whole, rare → jamo."""
+    """Decompose Korean text. Common syllables stay whole, rare -> jamo."""
     parts = []
     for ch in text:
         if _is_hangul(ch) and ch not in _common_hangul:
@@ -124,166 +134,133 @@ def reconstruct_korean(tokens: list[str]) -> str:
 
 
 # =========================================================================
-# CJK IDS decomposition (depth-2)
+# CJK atom-based decomposition with BPE
 # =========================================================================
 
 STRUCTURE_OPS = frozenset("⿰⿱⿲⿳⿴⿵⿶⿷⿸⿹⿺⿻")
 
-_OP_ARITY = {
-    "⿰": 2, "⿱": 2, "⿴": 2, "⿵": 2, "⿶": 2,
-    "⿷": 2, "⿸": 2, "⿹": 2, "⿺": 2, "⿻": 2,
-    "⿲": 3, "⿳": 3,
-}
-
-_ids_char_to_seq: dict[str, str] | None = None
-_ids_seq_to_char: dict[str, str] | None = None
+# Loaded lazily at module init
+_cjk_char_to_tokens: dict[str, list[str]] | None = None
+_cjk_tokens_to_char: dict[tuple[str, ...], str] | None = None
+_cjk_vocab_tokens: set[str] | None = None  # All tokens that can appear in CJK decompositions
 
 
-def _load_ids():
-    """Load IDS decomposition database (once)."""
-    global _ids_char_to_seq, _ids_seq_to_char
-    if _ids_char_to_seq is not None:
+def _is_cjk(ch: str) -> bool:
+    cp = ord(ch)
+    return (_CJK_UNIFIED_START <= cp <= _CJK_UNIFIED_END or
+            _CJK_EXT_A_START <= cp <= _CJK_EXT_A_END)
+
+
+def _load_cjk_decomposition():
+    """Load the pre-built CJK decomposition table and BPE merges (once)."""
+    global _cjk_char_to_tokens, _cjk_tokens_to_char, _cjk_vocab_tokens
+    if _cjk_char_to_tokens is not None:
         return
 
-    _ids_char_to_seq = {}
-    _ids_seq_to_char = {}
+    _cjk_char_to_tokens = {}
+    _cjk_tokens_to_char = {}
+    _cjk_vocab_tokens = set()
 
-    ids_path = Path(__file__).parent.parent.parent / "training_data" / "ids_decomposition.txt"
-    if not ids_path.exists():
+    decomp_path = (Path(__file__).parent.parent.parent /
+                   "training_data" / "word_lists" / "cjk_decomposition.tsv")
+    if not decomp_path.exists():
         return
 
-    for line in ids_path.read_text(encoding="utf-8", errors="ignore").splitlines():
-        if line.startswith(";") or not line.strip():
+    for line in decomp_path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("character\t"):
             continue
         parts = line.split("\t")
         if len(parts) < 3:
             continue
-        char = parts[1]
-        decomp = parts[2].split("[")[0].strip()
-        if not char or not decomp or len(char) != 1 or "&" in decomp:
-            continue
-        cp = ord(char)
-        if _CJK_START <= cp <= _CJK_END:
-            _ids_char_to_seq[char] = decomp
-            _ids_seq_to_char[decomp] = char
+        char = parts[0]
+        tokens = parts[2].split()
+        if char and tokens:
+            _cjk_char_to_tokens[char] = tokens
+            # Build reverse map: token tuple -> char
+            key = tuple(tokens)
+            # For unresolved chars, first one wins (deterministic)
+            if key not in _cjk_tokens_to_char:
+                _cjk_tokens_to_char[key] = char
+            _cjk_vocab_tokens.update(tokens)
 
-
-def _is_cjk(ch: str) -> bool:
-    return _CJK_START <= ord(ch) <= _CJK_END
-
-
-def _decompose_cjk_depth2(char: str) -> list[str]:
-    """Decompose one CJK character at depth 2.
-
-    Level 1: char → structure + components
-    Level 2: each component that's itself decomposable → structure + sub-components
-    Components at level 2 that still have decompositions are kept whole (depth limit).
-    """
-    _load_ids()
-    if not _is_cjk(char) or _ids_char_to_seq is None:
-        return [char]
-    if char not in _ids_char_to_seq:
-        return [char]
-
-    decomp = _ids_char_to_seq[char]
-    tokens = []
-    for c in decomp:
-        if c in STRUCTURE_OPS:
-            tokens.append(c)
-        elif _is_cjk(c) and c in _ids_char_to_seq:
-            # Depth 2: decompose this component one more level
-            sub_decomp = _ids_char_to_seq[c]
-            for sc in sub_decomp:
-                if sc.strip() and ord(sc) >= 0x80:
-                    tokens.append(sc)
-        elif c.strip() and ord(c) >= 0x80:
-            tokens.append(c)
-    return tokens if tokens else [char]
+    # Also include IDS operators as CJK vocab tokens
+    _cjk_vocab_tokens.update(STRUCTURE_OPS)
 
 
 def decompose_han_kana(text: str) -> str:
-    """Decompose han_kana text. CJK chars → depth-2 components, kana unchanged."""
-    _load_ids()
-    parts = []
+    """Decompose han_kana text.
+
+    CJK chars -> atom/BPE token sequence + SEP between characters.
+    Kana and punctuation pass through unchanged.
+    """
+    _load_cjk_decomposition()
+    if _cjk_char_to_tokens is None:
+        return text
+
+    parts: list[str] = []
     for ch in text:
         if _is_cjk(ch):
-            parts.extend(_decompose_cjk_depth2(ch))
+            tokens = _cjk_char_to_tokens.get(ch)
+            if tokens:
+                parts.extend(tokens)
+            else:
+                # Unknown CJK char: emit as-is
+                parts.append(ch)
+            parts.append(SEP_CHAR)
         else:
             parts.append(ch)
     return "".join(parts)
 
 
-def _consume_component(tokens: list[str], pos: int) -> tuple[str, int]:
-    """Consume one component at pos, handling nested structure operators.
-
-    Returns (substring, next_position).
-    """
-    if pos >= len(tokens):
-        return "", pos
-    ch = tokens[pos]
-    if ch in STRUCTURE_OPS:
-        arity = _OP_ARITY.get(ch, 2)
-        result = ch
-        p = pos + 1
-        for _ in range(arity):
-            sub, p = _consume_component(tokens, p)
-            result += sub
-        return result, p
-    return ch, pos + 1
-
-
-def _reconstruct_component(tokens: list[str], pos: int) -> tuple[str, int]:
-    """Recursively reconstruct one component, resolving inner structures first.
-
-    For depth-2: inner ⿰木目 → 相, then outer ⿱相心 → 想.
-    Returns (reconstructed_char_or_fallback, next_position).
-    """
-    if pos >= len(tokens):
-        return "", pos
-    ch = tokens[pos]
-    if ch not in STRUCTURE_OPS:
-        return ch, pos + 1
-
-    # Parse the structure: operator + N args (each arg may be nested)
-    arity = _OP_ARITY.get(ch, 2)
-    args = []
-    p = pos + 1
-    for _ in range(arity):
-        arg, p = _reconstruct_component(tokens, p)
-        args.append(arg)
-
-    # Try to look up: operator + reconstructed args
-    seq = ch + "".join(args)
-    reconstructed = _ids_seq_to_char.get(seq) if _ids_seq_to_char else None
-    if reconstructed:
-        return reconstructed, p
-
-    # Fallback: return the sequence as-is
-    return seq, p
-
-
 def reconstruct_han_kana(tokens: list[str]) -> str:
-    """Reconstruct CJK text from depth-2 component sequence.
+    """Reconstruct CJK text from atom/BPE token sequence.
 
-    Uses recursive bottom-up reconstruction: resolves inner structures
-    first (⿰木目 → 相), then outer (⿱相心 → 想).
+    Splits on SEP tokens to get per-character groups, then looks up
+    each group in the reconstruction table.
     """
-    _load_ids()
-    if _ids_seq_to_char is None:
+    _load_cjk_decomposition()
+    if _cjk_tokens_to_char is None:
         return "".join(tokens)
 
-    result = []
-    i = 0
-    n = len(tokens)
-    while i < n:
-        ch = tokens[i]
-        if ch in STRUCTURE_OPS:
-            reconstructed, new_i = _reconstruct_component(tokens, i)
-            result.append(reconstructed)
-            i = new_i
+    result: list[str] = []
+    current_group: list[str] = []
+
+    for token in tokens:
+        if token == SEP_CHAR:
+            if current_group:
+                key = tuple(current_group)
+                char = _cjk_tokens_to_char.get(key)
+                if char:
+                    result.append(char)
+                else:
+                    # Fallback: emit tokens as-is
+                    result.extend(current_group)
+                current_group = []
+        elif token in _cjk_vocab_tokens:
+            # Part of a CJK decomposition (atom, BPE token, or IDS operator)
+            current_group.append(token)
         else:
-            result.append(ch)
-            i += 1
+            # Non-CJK token (kana, punctuation, etc.)
+            if current_group:
+                # Flush any pending CJK group (missing SEP)
+                key = tuple(current_group)
+                char = _cjk_tokens_to_char.get(key)
+                if char:
+                    result.append(char)
+                else:
+                    result.extend(current_group)
+                current_group = []
+            result.append(token)
+
+    # Flush final group if any
+    if current_group:
+        key = tuple(current_group)
+        char = _cjk_tokens_to_char.get(key)
+        if char:
+            result.append(char)
+        else:
+            result.extend(current_group)
+
     return "".join(result)
 
 
@@ -297,8 +274,8 @@ DECOMPOSE_GROUPS = frozenset({"sino_japanese", "korean"})
 def decompose_text(text: str, group: str) -> str:
     """Decompose text into component tokens.
 
-    sino_japanese: CJK → depth-2 components, kana unchanged.
-    korean: common syllables whole, rare → jamo.
+    sino_japanese: CJK -> atom/BPE tokens + SEP, kana unchanged.
+    korean: common syllables whole, rare -> jamo.
     Others: unchanged.
     """
     if group == "korean":
@@ -325,32 +302,18 @@ def get_vocab_tokens(group: str) -> list[str]:
         return sorted(tokens)
 
     if group == "sino_japanese":
-        _load_ids()
-        tokens = set()
+        # Vocab is now defined entirely by the frozen vocab file.
+        # This function is only used for reference/testing.
+        _load_cjk_decomposition()
+        tokens: set[str] = set()
 
-        # All depth-2 components: decompose every IDS entry one more level
-        if _ids_char_to_seq:
-            for char, decomp in _ids_char_to_seq.items():
-                for c in decomp:
-                    if c in STRUCTURE_OPS:
-                        tokens.add(c)
-                    elif _is_cjk(c) and c in _ids_char_to_seq:
-                        # Level 2: add the sub-components
-                        for sc in _ids_char_to_seq[c]:
-                            if sc.strip() and ord(sc) >= 0x80:
-                                tokens.add(sc)
-                    elif c.strip() and ord(c) >= 0x80:
-                        tokens.add(c)
+        # All tokens from the decomposition table
+        if _cjk_char_to_tokens:
+            for char_tokens in _cjk_char_to_tokens.values():
+                tokens.update(char_tokens)
 
-        # CJK chars not in IDS (atomic)
-        decomposed = set(_ids_char_to_seq.keys()) if _ids_char_to_seq else set()
-        for cp in range(_CJK_START, _CJK_END + 1):
-            ch = chr(cp)
-            if ch not in decomposed:
-                tokens.add(ch)
-
-        # Structure operators
-        tokens.update(STRUCTURE_OPS)
+        # SEP token
+        tokens.add(SEP_CHAR)
 
         # Hiragana + Katakana
         for cp in range(_HIRAGANA_START, _HIRAGANA_END + 1):

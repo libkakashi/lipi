@@ -193,12 +193,13 @@ class TestFrozenVocabContent:
                     f"{script}: unassigned U+{ord(ch):04X}")
 
     def test_no_control_characters(self, all_vocabs):
-        """No C0/C1 control chars except whitespace."""
+        """No C0/C1 control chars except whitespace and PUA (BPE tokens)."""
         for script, vocab in all_vocabs.items():
             for ch in vocab:
                 cat = unicodedata.category(ch)
                 if cat.startswith("C") and cat != "Cn":
-                    assert cat == "Cf" or ch in ("\t", "\n"), (
+                    # Allow: Cf (format chars), Co (PUA for BPE merged tokens)
+                    assert cat in ("Cf", "Co") or ch in ("\t", "\n"), (
                         f"{script}: control char U+{ord(ch):04X} ({cat})")
 
     def test_no_duplicates(self, all_vocabs):
