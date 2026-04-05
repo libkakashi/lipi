@@ -82,36 +82,31 @@ def render_text_freetype(text: str, font_path: str, font_size: int,
         # Create RGB image with background color
         arr = np.full((img_h, img_w, 3), bg, dtype=np.uint8)
 
-        # Render glyphs
+        # Render glyphs (vectorized — no Python pixel loops)
+        ink_arr = np.array(ink, dtype=np.float32)
         for (x, y, w, h, buf, pitch) in positions:
             gx = x + pad_x
             gy = y - min_y + pad_y
 
-            # Convert bitmap buffer to numpy array
-            glyph_arr = np.zeros((h, w), dtype=np.uint8)
-            for row in range(h):
-                for col in range(w):
-                    glyph_arr[row, col] = buf[row * pitch + col]
+            # Convert bitmap buffer to numpy array (single frombuffer call)
+            if pitch == w:
+                glyph_arr = np.frombuffer(buf, dtype=np.uint8).reshape(h, w)
+            else:
+                raw = np.frombuffer(buf, dtype=np.uint8).reshape(h, pitch)
+                glyph_arr = raw[:, :w]
 
-            # Blend glyph onto image
-            for c in range(3):
-                y0 = max(0, gy)
-                y1 = min(img_h, gy + h)
-                x0 = max(0, gx)
-                x1 = min(img_w, gx + w)
+            # Clip to image bounds
+            y0, y1 = max(0, gy), min(img_h, gy + h)
+            x0, x1 = max(0, gx), min(img_w, gx + w)
+            if y1 <= y0 or x1 <= x0:
+                continue
+            gy0, gx0 = y0 - gy, x0 - gx
+            glyph_crop = glyph_arr[gy0:gy0 + (y1 - y0), gx0:gx0 + (x1 - x0)]
 
-                gy0 = y0 - gy
-                gy1 = gy0 + (y1 - y0)
-                gx0 = x0 - gx
-                gx1 = gx0 + (x1 - x0)
-
-                if y1 <= y0 or x1 <= x0:
-                    continue
-
-                alpha = glyph_arr[gy0:gy1, gx0:gx1].astype(np.float32) / 255.0
-                arr[y0:y1, x0:x1, c] = (
-                    arr[y0:y1, x0:x1, c] * (1 - alpha) + ink[c] * alpha
-                ).astype(np.uint8)
+            # Vectorized alpha blend (all 3 channels at once)
+            alpha = glyph_crop.astype(np.float32)[..., np.newaxis] / 255.0
+            region = arr[y0:y1, x0:x1].astype(np.float32)
+            arr[y0:y1, x0:x1] = (region * (1 - alpha) + ink_arr * alpha).astype(np.uint8)
 
         # Resize to target height
         img = Image.fromarray(arr)
