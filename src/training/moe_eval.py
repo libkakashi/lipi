@@ -84,8 +84,10 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
             if script_logits is not None:
                 pred_sids[group_mask.cpu()] = script_logits.argmax(-1).cpu()
 
-        # CTC decode
-        preds = out["logits"].float().cpu().argmax(dim=-1)
+        # CTC decode — slice to per-script vocab size before argmax
+        # (positions beyond vocab_size are zero-padded and would win argmax
+        # once real logits go negative during training)
+        all_logits = out["logits"].float().cpu()
         pred_gids_cpu = pred_gids.cpu().tolist()
         gids_cpu = gids.cpu().tolist()
         sids_cpu = sids.cpu().tolist()
@@ -110,7 +112,11 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
             # Use predicted script's tokenizer (logits came from that CTC head)
             pred_sid_safe = min(pred_sid, len(group_tokenizers[pred_g]) - 1)
             tok = group_tokenizers[pred_g][pred_sid_safe]
-            seq = preds[i].tolist()
+            # Slice logits to this script's exact vocab size before argmax
+            # (positions beyond vocab_size are zero-padded and would win
+            # argmax once real logits go negative during training)
+            vs = tok.vocab_size
+            seq = all_logits[i, :, :vs].argmax(dim=-1).tolist()
             chars = []
             prev = -1
             for t in seq:

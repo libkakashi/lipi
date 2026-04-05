@@ -92,7 +92,7 @@ def compute_ctc_loss(
             ctc_samples += tgt_lens[s_mask].sum()
 
     if ctc_samples > 0:
-        ctc_loss = torch.clamp(ctc_loss / ctc_samples, min=0.0, max=100.0)
+        ctc_loss = ctc_loss / ctc_samples
     return ctc_loss
 
 
