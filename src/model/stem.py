@@ -1,7 +1,7 @@
 """
 Convolutional Stems for OCR encoder.
 
-Output stride 4×4: (B, C_in, 32, W) → (B, out_channels, 8, W/4)
+Output stride 2×2: (B, C_in, 32, W) → (B, out_channels, 16, W/2)
 Default in_channels comes from src.data.color.INPUT_CHANNELS.
 """
 
@@ -20,13 +20,13 @@ class ConvNeXtStem(nn.Module):
     def __init__(self, in_channels: int = INPUT_CHANNELS, out_channels: int = 64):
         super().__init__()
         self.layers = nn.Sequential(
-            nn.Conv2d(in_channels, 32, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.Conv2d(in_channels, 32, kernel_size=3, stride=(2, 1), padding=1, bias=False),
             nn.GroupNorm(1, 32),
             nn.GELU(),
             nn.Conv2d(32, 32, kernel_size=3, stride=1, padding=1, bias=False),
             nn.GroupNorm(1, 32),
             nn.GELU(),
-            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.Conv2d(32, 64, kernel_size=3, stride=(1, 2), padding=1, bias=False),
             nn.GroupNorm(1, 64),
             nn.GELU(),
             nn.Conv2d(64, out_channels, kernel_size=3, stride=1, padding=1, bias=False),
@@ -63,12 +63,15 @@ class ResNetStem(nn.Module):
     Better for larger backbones (25M+) where the stem cost is small
     relative to total params but the feature quality matters.
 
+    Output stride 2×2: (B, C_in, 32, W) → (B, out_channels, 16, W/2)
+    Height reduced 2× by first conv, width reduced 2× by second conv.
+
     depth=2 (default, ~500K params):
-      Conv 3→64, stride 2      (32×W → 16×W/2)
-      ResBlock 64               (refine)
-      Conv 64→128, stride 2     (16×W/2 → 8×W/4)
-      ResBlock 128              (refine)
-      Conv 128→out_channels     (project to stage 1 dim)
+      Conv 3→64, stride (2,1)   (32×W → 16×W)
+      ResBlock 64                (refine)
+      Conv 64→128, stride (1,2)  (16×W → 16×W/2)
+      ResBlock 128               (refine)
+      Conv 128→out_channels      (project to stage 1 dim)
 
     depth=3 (~630K params):
       Same as depth=2, plus an extra ResBlock at out_channels.
@@ -79,14 +82,14 @@ class ResNetStem(nn.Module):
                  depth: int = 2):
         super().__init__()
         layers = [
-            # Downsample 2× and expand channels
-            nn.Conv2d(in_channels, 64, kernel_size=3, stride=2, padding=1, bias=False),
+            # Downsample 2× height, expand channels
+            nn.Conv2d(in_channels, 64, kernel_size=3, stride=(2, 1), padding=1, bias=False),
             nn.GroupNorm(1, 64),
             nn.GELU(),
             # Residual refinement
             _ResBlock(64),
-            # Downsample 2× and expand channels
-            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1, bias=False),
+            # Downsample 2× width, expand channels
+            nn.Conv2d(64, 128, kernel_size=3, stride=(1, 2), padding=1, bias=False),
             nn.GroupNorm(1, 128),
             nn.GELU(),
             # Residual refinement

@@ -12,15 +12,15 @@ Takes a cropped word image and outputs the text. Script identification and chara
 ```
 Word Image (32 × W × 3)
   → Color Projection (RGB → L+a → 1ch)
-  → ResNet Stem (stride 4×, 64ch)
-  → Shared SWA (12 blocks, dim=288)     ← universal visual features
-  → LID-1 (13-group classifier)         ← which script family?
-  → Expert SWA Stage 1 (12 blocks)      ← group-specific features
-  → Height Pool (8→4)
-  → Expert SWA Stage 2 (8 blocks)       ← deep group-specific features
-  → Height Pool (4→1)
-  → LID-2 (per-script classifier)       ← which exact script?
-  → Per-Script CTC Head                 ← character sequence
+  → ResNet Stem (stride 2×2, 64ch)       → (16 × W/2)
+  → Shared SWA (12 blocks, dim=288)      ← universal visual features
+  → LID-1 (13-group classifier)          ← which script family?
+  → Expert SWA Stage 1 (12 blocks)       ← group-specific features (h=16, w=W/2)
+  → Height Pool (16→4) + Width Pool (2×) → (h=4, w=W/4)
+  → Expert SWA Stage 2 (8 blocks)        ← deep group-specific features
+  → Height Pool (4→2), fold h into C
+  → LID-2 (per-script classifier)        ← which exact script?
+  → Per-Script CTC Head (T=W/4)          ← character sequence
   → Output: decoded text
 ```
 

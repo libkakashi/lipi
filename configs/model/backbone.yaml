@@ -39,12 +39,12 @@ stage3:
 height_pooling:
   pool1:
     channels: 192
-    h_in: 8
+    h_in: 16
     h_out: 4
   pool2:
     channels: 384
     h_in: 4
-    h_out: 1
+    h_out: 2
 
 output_dim: 384
 

@@ -4,17 +4,18 @@ Lipi MoE Vision Encoder.
 Architecture:
     Input: (B, 2, 32, W) — L+a from rgb_to_input
     -> ColorProjection: L+a → 1ch
-    -> ResNet Stem: 1→64ch, stride 4×
-    -> Shared SWA 4×4: character-level universal features
+    -> ResNet Stem: 1→64ch, stride 2×2  → (B, 64, 16, W/2)
+    -> Shared SWA 4×4: character-level universal features  (h=16, w=W/2)
     -> Shared SWA 4×16: sequence-level universal features
-    -> LID-1: 10-group classification
-    -> Expert SWA 4×4: group-specific character features
-    -> Height pool 8→4
-    -> Expert SWA 4×16: group-specific sequence features
-    -> Height pool 4→1
+    -> LID-1: 13-group classification
+    -> Expert SWA 4×4: group-specific character features   (h=16, w=W/2)
+    -> Height pool 16→4 + Width pool 2×                    (h=4, w=W/4)
+    -> Expert SWA 4×16: group-specific sequence features   (h=4, w=W/4)
+    -> Height pool 4→2
+    -> Fold h=2 into channels → (B, W/4, C*2)
     -> LayerNorm
     -> LID-2: per-script classification (multi-script groups only)
-    -> Per-script BiLSTM CTC heads
+    -> Per-script CTC heads (T=W/4, same as before but richer features)
 """
 
 import torch
@@ -79,15 +80,13 @@ class GroupCTCModule(nn.Module):
 
         # LID-2 with learned spatial projection (only for multi-script groups)
         if self.multi_script:
-            # Conv1d reduction: T(=48) → 12 → 1
-            # groups=16: cross-channel mixing at every layer
+            # Conv1d reduction: T → T//4 → 1 (adaptive pool handles any T)
             g = 16
             self.lid2_pool = nn.Sequential(
                 nn.Conv1d(enc_dim, enc_dim, kernel_size=4, stride=4,
-                          groups=g),                           # 48 → 12
+                          groups=g),
                 nn.GELU(),
-                nn.Conv1d(enc_dim, enc_dim, kernel_size=12,
-                          groups=g),                           # 12 → 1
+                nn.AdaptiveAvgPool1d(1),
             )
             self.lid2_classifier = nn.Sequential(
                 nn.Linear(enc_dim, enc_dim // 4),
@@ -205,8 +204,13 @@ class LipiMoEEncoder(nn.Module):
             for i in range(stage1_blocks)
         ])
 
-        # Height pool 8→4
-        self.pool1 = LearnedHeightPooling(channels=stage1_dim, h_in=8, h_out=4)
+        # Height pool 16→4 + width pool 2× (learned stride-2 conv along width)
+        self.pool1 = LearnedHeightPooling(channels=stage1_dim, h_in=16, h_out=4)
+        self.width_pool = nn.Sequential(
+            nn.Conv1d(stage1_dim, stage1_dim, kernel_size=3, stride=2, padding=1),
+            nn.GroupNorm(1, stage1_dim),
+            nn.GELU(),
+        )
 
         # Channel projection
         self.proj2 = nn.Linear(stage1_dim, stage2_dim) if stage1_dim != stage2_dim else nn.Identity()
@@ -219,11 +223,12 @@ class LipiMoEEncoder(nn.Module):
             for i in range(stage2_blocks)
         ])
 
-        # Height pool 4→1
-        self.pool2 = LearnedHeightPooling(channels=stage2_dim, h_in=4, h_out=1)
+        # Height pool 4→2 (fold h=2 into channels after this, preserving vertical info)
+        self.pool2 = LearnedHeightPooling(channels=stage2_dim, h_in=4, h_out=2)
 
-        # Final norm
-        self.norm = nn.LayerNorm(stage2_dim)
+        # Final norm (after folding h=2 into channels: dim = stage2_dim * 2)
+        self.enc_out_dim = stage2_dim * 2
+        self.norm = nn.LayerNorm(self.enc_out_dim)
 
         # CTC heads: per-script within each group (with LID-2 for multi-script groups)
         if group_script_vocab_sizes is not None:
@@ -233,7 +238,7 @@ class LipiMoEEncoder(nn.Module):
                                       for vs in group_script_vocab_sizes]
             self.ctc_modules = nn.ModuleList([
                 GroupCTCModule(
-                    enc_dim=stage2_dim,
+                    enc_dim=self.enc_out_dim,
                     script_vocab_sizes=group_script_vocab_sizes[g],
                     script_names=group_script_names[g],
                     hidden_dim=head_hidden,
@@ -250,7 +255,7 @@ class LipiMoEEncoder(nn.Module):
                 vocab_sizes = [171] * num_groups
             self.ctc_modules = nn.ModuleList([
                 GroupCTCModule(
-                    enc_dim=stage2_dim,
+                    enc_dim=self.enc_out_dim,
                     script_vocab_sizes=[vocab_sizes[g]],
                     script_names=[f"group{g}"],
                     hidden_dim=head_hidden,
@@ -260,7 +265,7 @@ class LipiMoEEncoder(nn.Module):
                 for g in range(num_groups)
             ])
 
-        self.output_dim = stage2_dim
+        self.output_dim = self.enc_out_dim
 
     def forward(
         self,
@@ -271,7 +276,7 @@ class LipiMoEEncoder(nn.Module):
     ) -> dict:
         B = images.shape[0]
         W = images.shape[3]
-        T = W // 4
+        T = W // 4  # stem 2× + width_pool 2×
 
         # Color projection
         x = self.color_proj(images)
@@ -309,25 +314,29 @@ class LipiMoEEncoder(nn.Module):
         for block in self.stage1:
             x = block(x, h=h, w=w, group_ids=group_ids)
 
-        # Height pool 8→4
+        # Height pool 16→4, width pool 2×
         C1 = x.shape[-1]
-        x = x.reshape(B, h, w, C1).permute(0, 3, 1, 2)
-        x = self.pool1(x)
+        x = x.reshape(B, h, w, C1).permute(0, 3, 1, 2)  # (B, C1, h, w)
+        x = self.pool1(x)                                  # (B, C1, 4, w)
         h = 4
+        # Width pool: (B, C1, 4, w) → reshape to (B*4, C1, w) → conv → (B*4, C1, w//2)
+        x = x.reshape(B * h, C1, w)
+        x = self.width_pool(x)
+        w = x.shape[2]
+        x = x.reshape(B, h, C1, w).permute(0, 1, 3, 2).reshape(B, h * w, C1)
 
         # Project to stage2
-        x = x.permute(0, 2, 3, 1).reshape(B, h * w, C1)
         x = self.proj2(x)
 
         # Expert SWA Stage 2
         for block in self.stage2:
             x = block(x, h=h, w=w, group_ids=group_ids)
 
-        # Height pool 4→1
+        # Height pool 4→2, then fold h=2 into channels
         C2 = x.shape[-1]
-        x = x.reshape(B, h, w, C2).permute(0, 3, 1, 2)
-        x = self.pool2(x)
-        x = x.squeeze(2).permute(0, 2, 1)  # (B, T, C2)
+        x = x.reshape(B, h, w, C2).permute(0, 3, 1, 2)  # (B, C2, h, w)
+        x = self.pool2(x)                                  # (B, C2, 2, w)
+        x = x.permute(0, 3, 2, 1).reshape(B, w, C2 * 2)   # (B, T, C2*2)
 
         # Final norm
         x = self.norm(x)

@@ -3,16 +3,17 @@ Lipi Vision Encoder (Backbone).
 
 Full architecture:
     Input: (B, 3, 32, W)
-    -> ConvNeXt-V2 Stem -> (B, 64, 8, W/4)
+    -> Stem -> (B, 64, 16, W/2)              stride 2×2
     -> Channel projection 64->192
     -> Stage 1: 3x SWA blocks (window 4x4, C=192, 6 heads, RoPE-2D)
-    -> Learned Height Pooling 8->4
+    -> Learned Height Pooling 16->4
     -> Channel projection 192->384
     -> Stage 2: 4x SWA blocks (window 4x8, C=384, 12 heads, RoPE-2D)
-    -> Learned Height Pooling 4->1
-    -> Stage 3: 3x Global SA blocks (C=384, 12 heads, RoPE-1D)
+    -> Learned Height Pooling 4->2
+    -> Fold h=2 into channels → (B, W/2, 768)
+    -> Stage 3: 3x Global SA blocks (C=768, 12 heads, RoPE-1D)
     -> LayerNorm
-    -> Output: (B, T, 384) where T = W/4
+    -> Output: (B, T, 768) where T = W/2
 
 ~35.4M parameters.
 """
@@ -77,9 +78,9 @@ class LipiEncoder(nn.Module):
             for i in range(stage1_blocks)
         ])
 
-        # Height pooling: 8 -> 4
+        # Height pooling: 16 -> 4
         self.pool1 = LearnedHeightPooling(
-            channels=stage1_dim, h_in=8, h_out=4
+            channels=stage1_dim, h_in=16, h_out=4
         )
 
         # Channel projection: stage1_dim -> stage2_dim
@@ -96,9 +97,9 @@ class LipiEncoder(nn.Module):
             for i in range(stage2_blocks)
         ])
 
-        # Height pooling: 4 -> 1 (full collapse)
+        # Height pooling: 4 -> 2 (fold h=2 into channels after this)
         self.pool2 = LearnedHeightPooling(
-            channels=stage2_dim, h_in=4, h_out=1
+            channels=stage2_dim, h_in=4, h_out=2
         )
 
         # Stage 3: after height collapse (1D sequence)
@@ -134,18 +135,18 @@ class LipiEncoder(nn.Module):
             x: (B, 3, 32, W) — batch of height-normalized word crop images.
 
         Returns:
-            features: (B, T, 384) — encoded sequence features, T = W // 4.
+            features: (B, T, C) — encoded sequence features, T = W // 2.
             lengths: (B,) — valid sequence lengths (all equal to T for now,
                      but kept for future padding support).
         """
         B = x.shape[0]
         W = x.shape[3]
-        T = W // 4  # Output sequence length
+        T = W // 2  # Output sequence length
 
         # Stage 0: Stem
-        # (B, 3, 32, W) -> (B, 64, 8, W/4)
+        # (B, 3, 32, W) -> (B, 64, 16, W/2)
         x = self.stem(x)
-        _, C, h, w = x.shape  # h=8, w=W/4
+        _, C, h, w = x.shape  # h=16, w=W/2
 
         # Reshape to sequence: (B, C, h, w) -> (B, h*w, C)
         x = x.permute(0, 2, 3, 1).reshape(B, h * w, C)
@@ -153,12 +154,11 @@ class LipiEncoder(nn.Module):
         # Channel projection 64 -> 192
         x = self.proj1(x)
 
-        # Stage 1: SWA blocks (h=8, w=W/4)
+        # Stage 1: SWA blocks (h=16, w=W/2)
         for block in self.stage1:
             x = block(x, h=h, w=w)
 
-        # Height pooling 8 -> 4
-        # Reshape back to 4D for pooling: (B, h*w, C) -> (B, C, h, w)
+        # Height pooling 16 -> 4
         C1 = x.shape[-1]
         x = x.reshape(B, h, w, C1).permute(0, 3, 1, 2)
         x = self.pool1(x)
@@ -168,16 +168,16 @@ class LipiEncoder(nn.Module):
         x = x.permute(0, 2, 3, 1).reshape(B, h * w, C1)
         x = self.proj2(x)
 
-        # Stage 2: SWA blocks (h=4, w=W/4)
+        # Stage 2: SWA blocks (h=4, w=W/2)
         for block in self.stage2:
             x = block(x, h=h, w=w)
 
-        # Height pooling 4 -> 1
+        # Height pooling 4 -> 2, fold h=2 into channels
         C2 = x.shape[-1]
         x = x.reshape(B, h, w, C2).permute(0, 3, 1, 2)
         x = self.pool2(x)
-        # (B, C2, 1, w) -> squeeze height -> (B, w, C2) = (B, T, 384)
-        x = x.squeeze(2).permute(0, 2, 1)
+        # (B, C2, 2, w) -> fold h into channels -> (B, w, C2*2)
+        x = x.permute(0, 3, 2, 1).reshape(B, w, C2 * 2)
 
         # Stage 3: 1D sequence attention (global or wide SWA)
         for block in self.stage3:
