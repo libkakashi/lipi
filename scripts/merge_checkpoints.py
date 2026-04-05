@@ -11,7 +11,7 @@ Usage:
 
 This takes everything from --base, then overwrites stage1, stage2,
 and ctc_modules weights for the specified group indices from --donor.
-Shape mismatches (e.g., CTC head after vocab change) are skipped.
+Shape mismatches (e.g., CTC head after vocab change) use the donor's version.
 """
 
 import argparse
@@ -56,7 +56,7 @@ def main():
     )
 
     replaced = 0
-    skipped_shape = 0
+    reshaped = 0
     skipped_missing = 0
 
     for key, donor_tensor in donor_state.items():
@@ -75,17 +75,16 @@ def main():
             continue
 
         if base_state[key].shape != donor_tensor.shape:
-            print(f"  Shape mismatch, skipped: {key} "
-                  f"(base: {base_state[key].shape}, donor: {donor_tensor.shape})")
-            skipped_shape += 1
-            continue
+            print(f"  Shape changed, using donor: {key} "
+                  f"(base: {base_state[key].shape} → donor: {donor_tensor.shape})")
+            reshaped += 1
 
         base_state[key] = donor_tensor
         replaced += 1
 
     print(f"\nReplaced {replaced} layers from donor")
-    if skipped_shape:
-        print(f"Skipped {skipped_shape} layers (shape mismatch — e.g., vocab change)")
+    if reshaped:
+        print(f"  Including {reshaped} with shape changes (e.g., vocab resize)")
     if skipped_missing:
         print(f"Skipped {skipped_missing} layers (not in base checkpoint)")
 
