@@ -27,7 +27,10 @@ from src.training.moe_data import (
     load_shards, build_script_tokenizers, encode_labels,
     remap_ids, MoEDataset, collate_moe,
 )
-from src.training.moe_losses import compute_lid1_loss, compute_lid2_loss, compute_ctc_loss
+from src.training.moe_losses import (
+    compute_lid1_loss, compute_lid2_loss, compute_ctc_loss,
+    compute_alignment_ce_loss,
+)
 from src.training.routing import get_predicted_script_ids, build_routing_masks
 from src.training.cpu_offload import CPUOffloadOptimizer
 from src.training.moe_eval import evaluate
@@ -73,6 +76,9 @@ def parse_args():
     parser.add_argument("--head-hidden", type=int, default=384)
     parser.add_argument("--no-compile", action="store_true")
     parser.add_argument("--lid1-weight", type=float, default=1.0)
+    parser.add_argument("--align-ce-weight", type=float, default=0.0,
+                        help="Weight for forced-alignment CE loss. Gives partial credit "
+                             "for multi-token CJK chars. Recommended: 0.1-0.3")
     parser.add_argument("--routing-penalty", type=float, default=0.0,
                         help="Extra LID-1 weight proportional to misroute rate. "
                              "Effective weight = lid1_weight + penalty * (1 - ctc_ok_frac)")
@@ -423,7 +429,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                     ce_loss_fn, device, device_type, use_amp, amp_dtype,
                     epoch, total_epochs, grad_accum, log_interval,
                     lid1_weight, routing_penalty, group_script_vocabs,
-                    detach_for_experts=False):
+                    detach_for_experts=False, align_ce_weight=0.0):
     model.train()
     n_batches = 0
 
@@ -443,6 +449,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
     log_ctc = torch.zeros(1, device=device)
     log_lid1 = torch.zeros(1, device=device)
     log_lid2 = torch.zeros(1, device=device)
+    log_ace = torch.zeros(1, device=device)
     log_total = torch.zeros(1, device=device)
     log_count = 0
 
@@ -475,7 +482,18 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         lid2_loss = compute_lid2_loss(
             out["script_logits_per_group"], sids, all_true, ce_loss_fn)
 
-        loss = ctc_loss + lid1_weight * lid1_loss.float() + lid2_loss.float()
+        # Alignment CE loss (partial credit for multi-token chars)
+        if align_ce_weight > 0:
+            ace_loss = compute_alignment_ce_loss(
+                out["logits"], targets, out["lengths"], tgt_lens,
+                all_ok, gids, sids, group_script_vocabs)
+        else:
+            ace_loss = torch.zeros(1, device=device)
+
+        loss = (ctc_loss
+                + lid1_weight * lid1_loss.float()
+                + lid2_loss.float()
+                + align_ce_weight * ace_loss.float())
 
         if grad_accum > 1:
             loss = loss / grad_accum
@@ -501,6 +519,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         log_ctc += ctc_loss.detach()
         log_lid1 += lid1_loss.detach()
         log_lid2 += lid2_loss.detach()
+        log_ace += ace_loss.detach()
         log_total += loss.detach() * mult
         n_batches += 1
         log_count += 1
@@ -509,6 +528,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             avg_ctc = log_ctc.item() / log_count
             avg_lid1 = log_lid1.item() / log_count
             avg_lid2 = log_lid2.item() / log_count
+            avg_ace = log_ace.item() / log_count
             avg_total = log_total.item() / log_count
             lr = scheduler.get_last_lr()[0]
             steps = len(train_loader)
@@ -525,14 +545,16 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                     lid2_correct += (pred == true).sum().item()
                     lid2_total += true.shape[0]
             lid2_acc = 100 * lid2_correct / max(lid2_total, 1)
+            ace_str = f" ace={avg_ace:.4f}" if align_ce_weight > 0 else ""
             print(f"  [{epoch}/{total_epochs}] batch {batch_idx+1}/{steps}  "
                   f"loss={avg_total:.4f} "
-                  f"(ctc={avg_ctc:.4f} lid1={avg_lid1:.4f} lid2={avg_lid2:.4f})  "
+                  f"(ctc={avg_ctc:.4f} lid1={avg_lid1:.4f} lid2={avg_lid2:.4f}{ace_str})  "
                   f"lr={lr:.2e}  lid1={lid1_acc:.2f}% lid2={lid2_acc:.2f}%  "
                   f"gnorm s={shared_norm:.1f} e={expert_norm:.1f}")
             log_ctc.zero_()
             log_lid1.zero_()
             log_lid2.zero_()
+            log_ace.zero_()
             log_total.zero_()
             log_count = 0
 
@@ -612,7 +634,8 @@ def main():
     print(f"\n{'=' * 60}")
     print(f"TRAINING: epochs {start_epoch}-{args.epochs}, lr={args.lr}")
     print(f"  Batch: {args.batch_size} x {args.grad_accum} = {eff_batch} effective")
-    print(f"  Losses: CTC x1.0 + LID1 x{args.lid1_weight}")
+    ace_str = f" + ACE x{args.align_ce_weight}" if args.align_ce_weight > 0 else ""
+    print(f"  Losses: CTC x1.0 + LID1 x{args.lid1_weight}{ace_str}")
     print(f"  Routing: predicted (skip CTC on LID-1/LID-2 misroutes)")
     print(f"  Per-script vocabs: {data['group_script_vocab_sizes']}")
     print(f"{'=' * 60}")
@@ -629,7 +652,8 @@ def main():
             args.log_interval, lid1_weight=args.lid1_weight,
             routing_penalty=args.routing_penalty,
             group_script_vocabs=data["group_script_vocab_sizes"],
-            detach_for_experts=detach)
+            detach_for_experts=detach,
+            align_ce_weight=args.align_ce_weight)
 
         elapsed = time.time() - t0
         if metrics:
