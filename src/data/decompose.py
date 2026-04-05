@@ -1,15 +1,15 @@
 """
 Character decomposition for CJK and Korean.
 
-CJK (han_kana): atom-based decomposition with BPE merges.
-    336 leaf atoms + 12 IDS operators + 250 BPE merged tokens.
-    Each CJK char maps to a short token sequence via a pre-built table.
-    A SEP token separates characters in the decomposed output.
-    Kana pass through unchanged.
+CJK (han_kana): atom-based decomposition with SEP-aware BPE.
+    Base: 387 leaf atoms + 12 IDS operators.
+    SEP appended to prefix-collision chars BEFORE BPE, so BPE naturally
+    merges high-frequency (atom, SEP) pairs into single tokens.
+    ~1,390 BPE merged tokens. Each CJK char maps to a short token
+    sequence via a pre-built table. Kana pass through unchanged.
 
 Korean: hybrid — top-250 common syllables kept whole,
     rare syllables decomposed to jamo (51 unique).
-    Total vocab ~301 tokens.
 
 Other scripts: pass through unchanged.
 """
@@ -42,11 +42,10 @@ _HIRAGANA_END = 0x3096
 _KATAKANA_START = 0x30A1
 _KATAKANA_END = 0x30FA
 
-# SEP token: U+2E3B THREE-EM DASH (separates CJK characters in decomposed form)
+# SEP token: U+2E3B THREE-EM DASH
+# In decomposition table, SEP appears only after chars with prefix collisions.
+# BPE may merge (atom, SEP) pairs into single PUA tokens.
 SEP_CHAR = "\u2E3B"
-
-# PUA range for BPE merged tokens
-_PUA_START = 0xE000
 
 # Top-250 common Hangul syllables (kept whole, not decomposed).
 # Frozen from frequency analysis of Korean word list. Covers 77.4% of
@@ -134,7 +133,7 @@ def reconstruct_korean(tokens: list[str]) -> str:
 
 
 # =========================================================================
-# CJK atom-based decomposition with BPE
+# CJK atom-based decomposition with SEP-aware BPE
 # =========================================================================
 
 STRUCTURE_OPS = frozenset("⿰⿱⿲⿳⿴⿵⿶⿷⿸⿹⿺⿻")
@@ -142,7 +141,7 @@ STRUCTURE_OPS = frozenset("⿰⿱⿲⿳⿴⿵⿶⿷⿸⿹⿺⿻")
 # Loaded lazily at module init
 _cjk_char_to_tokens: dict[str, list[str]] | None = None
 _cjk_tokens_to_char: dict[tuple[str, ...], str] | None = None
-_cjk_vocab_tokens: set[str] | None = None  # All tokens that can appear in CJK decompositions
+_cjk_vocab_tokens: set[str] | None = None
 
 
 def _is_cjk(ch: str) -> bool:
@@ -152,7 +151,12 @@ def _is_cjk(ch: str) -> bool:
 
 
 def _load_cjk_decomposition():
-    """Load the pre-built CJK decomposition table and BPE merges (once)."""
+    """Load the pre-built CJK decomposition table (once).
+
+    The table already contains SEP tokens where needed (for chars with
+    prefix collisions). BPE merges may have fused (atom, SEP) pairs
+    into single PUA tokens.
+    """
     global _cjk_char_to_tokens, _cjk_tokens_to_char, _cjk_vocab_tokens
     if _cjk_char_to_tokens is not None:
         return
@@ -176,21 +180,20 @@ def _load_cjk_decomposition():
         tokens = parts[2].split()
         if char and tokens:
             _cjk_char_to_tokens[char] = tokens
-            # Build reverse map: token tuple -> char
             key = tuple(tokens)
-            # For unresolved chars, first one wins (deterministic)
             if key not in _cjk_tokens_to_char:
                 _cjk_tokens_to_char[key] = char
             _cjk_vocab_tokens.update(tokens)
 
-    # Also include IDS operators as CJK vocab tokens
+    # Also include IDS operators and SEP as known CJK vocab tokens
     _cjk_vocab_tokens.update(STRUCTURE_OPS)
+    _cjk_vocab_tokens.add(SEP_CHAR)
 
 
 def decompose_han_kana(text: str) -> str:
     """Decompose han_kana text.
 
-    CJK chars -> atom/BPE token sequence + SEP between characters.
+    CJK chars -> pre-built token sequence (SEP included where needed).
     Kana and punctuation pass through unchanged.
     """
     _load_cjk_decomposition()
@@ -204,19 +207,24 @@ def decompose_han_kana(text: str) -> str:
             if tokens:
                 parts.extend(tokens)
             else:
-                # Unknown CJK char: emit as-is
                 parts.append(ch)
-            parts.append(SEP_CHAR)
         else:
             parts.append(ch)
     return "".join(parts)
 
 
 def reconstruct_han_kana(tokens: list[str]) -> str:
-    """Reconstruct CJK text from atom/BPE token sequence.
+    """Reconstruct CJK text from token sequence.
 
-    Splits on SEP tokens to get per-character groups, then looks up
-    each group in the reconstruction table.
+    Uses greedy left-to-right matching: after each CJK token is added
+    to the current group, check if the group matches a character.
+    Non-prefix-collision chars match immediately (no SEP needed).
+    Prefix-collision chars have SEP baked into their sequence, which
+    forces the match to wait for the full sequence.
+
+    Kana never appear in CJK decompositions (the 3 katakana used as
+    IDS shape placeholders are replaced with PUA tokens at build time),
+    so kana tokens always act as group boundaries.
     """
     _load_cjk_decomposition()
     if _cjk_tokens_to_char is None:
@@ -227,22 +235,30 @@ def reconstruct_han_kana(tokens: list[str]) -> str:
 
     for token in tokens:
         if token == SEP_CHAR:
+            # SEP is an explicit boundary. Try with SEP in the key first
+            # (prefix-collision chars have SEP in their reverse map key).
             if current_group:
-                key = tuple(current_group)
-                char = _cjk_tokens_to_char.get(key)
+                key_with = tuple(current_group) + (SEP_CHAR,)
+                key_without = tuple(current_group)
+                char = _cjk_tokens_to_char.get(key_with)
+                if char is None:
+                    char = _cjk_tokens_to_char.get(key_without)
                 if char:
                     result.append(char)
                 else:
-                    # Fallback: emit tokens as-is
                     result.extend(current_group)
                 current_group = []
         elif token in _cjk_vocab_tokens:
-            # Part of a CJK decomposition (atom, BPE token, or IDS operator)
             current_group.append(token)
+            # Greedy match: try to resolve after every token
+            key = tuple(current_group)
+            char = _cjk_tokens_to_char.get(key)
+            if char:
+                result.append(char)
+                current_group = []
         else:
             # Non-CJK token (kana, punctuation, etc.)
             if current_group:
-                # Flush any pending CJK group (missing SEP)
                 key = tuple(current_group)
                 char = _cjk_tokens_to_char.get(key)
                 if char:
@@ -252,7 +268,7 @@ def reconstruct_han_kana(tokens: list[str]) -> str:
                 current_group = []
             result.append(token)
 
-    # Flush final group if any
+    # Flush final group
     if current_group:
         key = tuple(current_group)
         char = _cjk_tokens_to_char.get(key)
@@ -274,7 +290,7 @@ DECOMPOSE_GROUPS = frozenset({"sino_japanese", "korean"})
 def decompose_text(text: str, group: str) -> str:
     """Decompose text into component tokens.
 
-    sino_japanese: CJK -> atom/BPE tokens + SEP, kana unchanged.
+    sino_japanese: CJK -> atom/BPE tokens (SEP included where needed), kana unchanged.
     korean: common syllables whole, rare -> jamo.
     Others: unchanged.
     """
@@ -302,17 +318,15 @@ def get_vocab_tokens(group: str) -> list[str]:
         return sorted(tokens)
 
     if group == "sino_japanese":
-        # Vocab is now defined entirely by the frozen vocab file.
-        # This function is only used for reference/testing.
         _load_cjk_decomposition()
         tokens: set[str] = set()
 
-        # All tokens from the decomposition table
+        # All tokens from the decomposition table (atoms, BPE, SEP, operators)
         if _cjk_char_to_tokens:
             for char_tokens in _cjk_char_to_tokens.values():
                 tokens.update(char_tokens)
 
-        # SEP token
+        # SEP token (in case no char has bare SEP remaining)
         tokens.add(SEP_CHAR)
 
         # Hiragana + Katakana
