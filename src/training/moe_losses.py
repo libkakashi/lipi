@@ -106,12 +106,16 @@ def compute_alignment_ce_loss(
     true_script_ids: Tensor,
     group_script_vocabs: list[list[int]],
 ) -> Tensor:
-    """Per-frame cross-entropy using CTC's forced alignment.
+    """Per-frame cross-entropy giving partial credit for multi-token chars.
 
-    For each sample, finds the best CTC alignment (argmax path), then
-    computes cross-entropy at every non-blank frame against its aligned
-    target token. This gives partial credit for multi-token characters:
-    if 4/5 tokens are correct, 4 frames get low CE loss.
+    Spreads target tokens uniformly across encoder frames, then computes
+    cross-entropy at each frame. This works from epoch 1 (unlike forced
+    alignment which requires the model to already produce non-blank output).
+
+    For a target of length U and encoder length T, each target token gets
+    assigned to T/U consecutive frames. The model learns "around frame 10
+    you should be producing token X" — a strong per-token learning signal
+    that complements CTC's sequence-level loss.
 
     Uses the same per-script vocab slicing as compute_ctc_loss.
     """
@@ -126,52 +130,31 @@ def compute_alignment_ce_loss(
             if s_logits.shape[0] == 0:
                 continue
 
-            s_targets = targets[s_mask]          # (N, U_max)
-            s_tgt_lens = tgt_lens[s_mask]        # (N,)
-            s_enc_lens = enc_lengths[s_mask]      # (N,)
+            s_targets = targets[s_mask]      # (N, U_max)
+            s_tgt_lens = tgt_lens[s_mask]    # (N,)
+            s_enc_lens = enc_lengths[s_mask]  # (N,)
 
             # Slice to exact vocab size
             s_logits_vs = s_logits[:, :, :vs].float()  # (N, T, vs)
+            n, t_max, _ = s_logits_vs.shape
 
-            # Get best alignment: argmax over vocab at each frame
-            best_path = s_logits_vs.argmax(dim=-1)  # (N, T)
-
-            # For each sample, build frame-level targets from the alignment.
-            # Non-blank frames get the corresponding target token.
-            # Blank frames are ignored (masked out of the CE computation).
-            n, t_max = best_path.shape
-
-            # Expand targets into frame-level labels via the alignment
+            # Build frame-level targets by uniformly spreading target tokens
             frame_targets = torch.zeros(n, t_max, dtype=torch.long, device=device)
             frame_mask = torch.zeros(n, t_max, dtype=torch.bool, device=device)
 
             for i in range(n):
-                path = best_path[i, :s_enc_lens[i]]
-                tgt = s_targets[i, :s_tgt_lens[i]]
+                t_len = s_enc_lens[i].item()
+                u_len = s_tgt_lens[i].item()
+                if t_len == 0 or u_len == 0:
+                    continue
+                tgt = s_targets[i, :u_len]
+                # Assign each frame to a target token via uniform spread
+                # Frame f maps to target token index: f * U / T
+                indices = torch.arange(t_len, device=device) * u_len // t_len
+                indices = indices.clamp(max=u_len - 1)
+                frame_targets[i, :t_len] = tgt[indices]
+                frame_mask[i, :t_len] = True
 
-                # Walk the alignment: skip blanks and repeats to map
-                # each non-blank frame to a target token position
-                tgt_idx = 0
-                prev = -1
-                for f in range(path.shape[0]):
-                    token_id = path[f].item()
-                    if token_id == 0:  # blank
-                        prev = 0
-                        continue
-                    if token_id == prev:  # repeat
-                        # Same target as previous non-blank frame
-                        if tgt_idx > 0:
-                            frame_targets[i, f] = tgt[tgt_idx - 1]
-                            frame_mask[i, f] = True
-                        continue
-                    # New non-blank token
-                    prev = token_id
-                    if tgt_idx < tgt.shape[0]:
-                        frame_targets[i, f] = tgt[tgt_idx]
-                        frame_mask[i, f] = True
-                        tgt_idx += 1
-
-            # Compute CE only on valid (non-blank, aligned) frames
             if frame_mask.any():
                 masked_logits = s_logits_vs[frame_mask]    # (K, vs)
                 masked_targets = frame_targets[frame_mask]  # (K,)
