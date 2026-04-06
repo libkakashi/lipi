@@ -30,29 +30,15 @@ from src.model.lid import LIDCoarse, NUM_GROUPS
 
 
 class CTCHead(nn.Module):
-    """MLP CTC head for one script/group.
+    """Linear CTC head — SWA blocks already provide full context."""
 
-    The encoder (32 SWA blocks) already provides rich contextual features.
-    A 3-layer MLP refines per-timestep features before projecting to vocab.
-    No sequential LSTM bottleneck — fully parallel across timesteps.
-    """
-
-    def __init__(self, enc_dim: int, vocab_size: int,
-                 hidden_dim: int = 384, num_layers: int = 2, dropout: float = 0.1):
+    def __init__(self, enc_dim: int, vocab_size: int, **_kwargs):
         super().__init__()
         self.vocab_size = vocab_size
-        # Two conv layers for 5-timestep receptive field + linear projection.
-        self.convs = nn.Sequential(
-            nn.Conv1d(enc_dim, enc_dim, kernel_size=3, padding=1),
-            nn.GELU(),
-            nn.Conv1d(enc_dim, enc_dim, kernel_size=3, padding=1),
-            nn.GELU(),
-        )
         self.proj = nn.Linear(enc_dim, vocab_size)
 
     def forward(self, features: Tensor) -> Tensor:
-        x = self.convs(features.permute(0, 2, 1)).permute(0, 2, 1)
-        return self.proj(x)
+        return self.proj(features)
 
 
 class GroupCTCModule(nn.Module):
@@ -63,8 +49,7 @@ class GroupCTCModule(nn.Module):
     """
 
     def __init__(self, enc_dim: int, script_vocab_sizes: list[int],
-                 script_names: list[str],
-                 hidden_dim: int = 384, num_layers: int = 2, dropout: float = 0.1):
+                 script_names: list[str], **_kwargs):
         super().__init__()
         self.n_scripts = len(script_vocab_sizes)
         self.script_names = script_names
@@ -73,8 +58,7 @@ class GroupCTCModule(nn.Module):
 
         # Per-script CTC heads
         self.heads = nn.ModuleList([
-            CTCHead(enc_dim, vs, hidden_dim, num_layers, dropout)
-            for vs in script_vocab_sizes
+            CTCHead(enc_dim, vs) for vs in script_vocab_sizes
         ])
 
         # LID-2 with learned spatial projection (only for multi-script groups)
