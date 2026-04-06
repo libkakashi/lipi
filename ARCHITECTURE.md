@@ -86,7 +86,7 @@ Projection: Linear(768 → vocab_size)
 | greek | 423 | malayalam | 173 |
 | arabic | 491 | tamil | 127 |
 | hebrew | 189 | sinhala | 147 |
-| han_kana | 3213 | thai | 142 |
+| han_kana | 2838 | thai | 142 |
 | korean | 373 | lao | 141 |
 | devanagari | 216 | burmese | 215 |
 | gurmukhi | 136 | khmer | 169 |
@@ -136,7 +136,7 @@ loss = CTC_loss + lid1_weight × LID1_loss + LID2_loss
 
 ### Decomposition
 
-- **Han_kana**: CJK depth-2 IDS decomposition (21K chars → 1900 components)
+- **Han_kana**: 13-symbol arbitrary encoding (27,584 CJK chars → 13 base symbols + SEP, word-level BPE)
 - **Korean**: hybrid jamo (rare syllables → 67 jamo, top-250 common syllables kept whole)
 
 ### Key Hyperparameters
@@ -182,7 +182,7 @@ src/
     rope.py             RoPE2D
   data/
     vocab.py            Frozen vocab loading (hex files)
-    decompose.py        CJK IDS + Korean jamo decomposition
+    decompose.py        CJK 13-symbol + Korean jamo decomposition
     fonts.py            Font discovery, cmap validation
     rendering.py        Word/char rendering, ink detection
     word_lists.py       Word list loading

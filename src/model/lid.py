@@ -11,7 +11,7 @@ Groups (13):
   2. Cyrillic + Greek (~760 chars, ~300M speakers)
   3. Arabic (~490 chars incl. Persian/Urdu, ~500M)
   4. Hebrew (~190 chars, ~9M)
-  5. Sino-Japanese (~2K decomposed tokens, Chinese/Japanese, ~1.4B)
+  5. Sino-Japanese (~2.8K encoding tokens, Chinese/Japanese, ~1.4B)
   6. Korean (~370 decomposed tokens, Hangul, ~80M)
   7. N+E Indian Brahmic (~850 chars, Devanagari/Gurmukhi/Gujarati/Bengali/Odia, ~1B+)
   8. South Indian Brahmic (~750 chars, Kannada/Telugu/Malayalam/Tamil/Sinhala, ~300M)

@@ -56,3 +56,4 @@ tmp/
 .claude/
 training_data/fonts/
 debug/
+training_data/corpora/

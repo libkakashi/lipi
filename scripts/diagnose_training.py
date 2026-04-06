@@ -86,7 +86,7 @@ def main():
         print(f"  Decomposition table loaded: {len(d._cjk_char_to_tokens)} chars")
     else:
         print("  *** DECOMPOSITION TABLE EMPTY — THIS IS THE BUG ***")
-        print("  Check that training_data/word_lists/cjk_decomposition.tsv exists")
+        print("  Check that training_data/word_lists/cjk_char_codes.tsv exists")
         sys.exit(1)
 
     # Check roundtrip on actual labels

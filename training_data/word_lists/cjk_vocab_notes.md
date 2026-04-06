@@ -1,6 +1,6 @@
 # CJK Vocabulary Analysis
 
-Source: cjkvi-ids database (recursive IDS decomposition)
+Source: 13-symbol arbitrary encoding with word-level BPE
 
 ## Coverage
 
@@ -8,192 +8,70 @@ Source: cjkvi-ids database (recursive IDS decomposition)
 - CJK Ext-A (U+3400-4DBF): 6,592 assigned characters
 - Total target: 27,584 characters
 
-## Token Counts
+## Encoding System
 
-- Unique atoms (leaf components): 336 (+51 collision overrides = 387)
-- IDS spatial operators (only needed for 532 chars, but in vocab): 12
-- CJK punctuation: 33
-- Separator: 1
+13 arbitrary symbols (PUA codepoints U+E000-E00C) + 1 SEP token (U+2E3B).
 
-## Base Vocab: 400 CJK tokens (387 atoms + 12 operators + 1 separator)
+All 27,584 CJK chars are ranked by real-world frequency (from wordfreq library,
+saved at `training_data/corpora/chinese_word_freq.tsv`). Character frequency is
+derived from the word corpus by summing word frequencies weighted by char occurrence.
 
-### SEP / Prefix Collision Analysis (trie-based, on base sequences pre-BPE)
+### Code Assignment (vary-first enumeration)
 
-2,868 chars (10.4%) have token sequences that are prefixes of other characters.
-These get SEP appended to their base sequences BEFORE BPE runs.
-By frequency: 45.1% of text needs SEP at the base level.
+Leftmost position varies fastest:
+- 1 symbol + SEP = 2 tokens: top 13 chars
+- 2 symbols + SEP = 3 tokens: next 169 chars (13^2)
+- 3 symbols + SEP = 4 tokens: next 2,197 chars (13^3)
+- 4 symbols + SEP = 5 tokens: remaining ~25,205 chars (13^4)
 
-BPE then naturally merges high-frequency (token, SEP) pairs into single tokens,
-effectively creating "standalone" tokens as a side effect. No manual dual-identity
-mechanism needed — BPE optimally allocates merges between content compression
-and SEP elimination based on frequency.
+Vary-first means 3-symbol codes are: [0,0,0], [1,0,0], [2,0,0], ..., [12,0,0],
+[0,1,0], [1,1,0], ..., giving leftmost symbols the most diversity (good for BPE).
 
-## Chosen Vocab: ~3,213 total (712 base + 2,500 BPE merges + 1 BLANK)
+### Word-Level BPE
 
-Base: 179 kana + 387 atoms + 3 kana-replacement atoms + 12 IDS operators + 1 SEP + 130 punct/ASCII = 712
-BPE merges: 2,500 (SEP-aware, PUA codepoints U+E000+)
+2,500 BPE merges run on word-level sequences (not per-char). This allows merges
+to cross character boundaries within words, capturing common multi-char patterns.
+
+BPE merged tokens use PUA codepoints U+E00D onwards.
+
+SEP gets fully absorbed by BPE after ~500 merges — it becomes a dead token.
+
+At 2,500 BPE merges: ~0.893 tokens/char (frequency-weighted).
+
+## Vocab Composition
+
+Base symbols: 13 (U+E000-E00C)
+SEP: 1 (U+2E3B)
+BPE merges: 2,500 (U+E00D+)
+Kana: ~179 (hiragana + katakana)
+Punctuation/ASCII/fullwidth: ~130
 BLANK (CTC): 1
 
-Verified against Jun Da frequency corpus (193.5M tokens):
+Total: ~2,824 tokens
 
-| Metric                      | Value |
-|------------------------------|-------|
-| Avg tokens/char              |  1.10 |
-| Median tokens/char           |     1 |
-| % 1-token (freq-weighted)   | 93.1% |
-| % 2-token                   |  3.5% |
-| % 3-token                   |  2.5% |
-| % >3-token                  |  1.0% |
-| Bare SEP remaining          |   283 |
+## Why 13 Symbols?
 
-### SEP-aware BPE: why it works
+13 symbols gives a good balance:
+- 13^1 = 13 (top chars at 2 tokens)
+- 13^2 = 169 (common chars at 3 tokens)
+- 13^3 = 2,197 (mid-frequency chars at 4 tokens)
+- 13^4 = 28,561 (capacity for all 27,584 chars)
 
-The key insight: include SEP in sequences BEFORE running BPE, not after.
+With fewer symbols, more chars would need 4-symbol codes.
+With more symbols, the base vocab is larger but codes are shorter.
+13 is near-optimal for minimizing total tokens at 2,500 BPE merges.
 
-1. Start with base atom decompositions (sorted, optimized, no BPE)
-2. Find prefix collisions on base sequences → append SEP to those chars
-3. Run BPE on the SEP-augmented sequences
+## Advantages Over IDS Decomposition
 
-BPE naturally merges (atom, SEP) for high-frequency single-token chars that
-need disambiguation. Each such merge helps every character containing that
-atom+SEP pair, making it far more efficient than dedicated standalone tokens.
-
-At 2,500 merges, BPE merges away SEP for the vast majority of collisions (2,561/2,844).
-
-### Comparison: SEP-aware BPE vs alternatives (at equal vocab budget)
-
-| Budget | Method A (no-SEP BPE + dual-identity) | Method B (SEP-aware BPE) |
-|--------|---------------------------------------|--------------------------|
-|    790 | 1.91 avg, 56.5% 1-tok                | 1.51 avg, 70.8% 1-tok   |
-|  1,000 | 1.64 avg, 67.2% 1-tok                | 1.40 avg, 76.4% 1-tok   |
-|  1,267 | 1.45 avg, 76.4% 1-tok                | 1.31 avg, 82.0% 1-tok   |
-|  1,500 | 1.34 avg, 82.0% 1-tok                | 1.24 avg, 85.5% 1-tok   |
-|  2,000 | 1.20 avg, 89.3% 1-tok                | 1.15 avg, 90.8% 1-tok   |
-
-SEP-aware BPE wins at every budget. Dual-identity wastes vocab slots on
-per-character standalone tokens; BPE merges amortize across many characters.
-
-### Greedy vs optimal BPE
-
-Stochastic beam search (top-k sampling with temperature) found <0.03% improvement
-over greedy. Greedy BPE is near-optimal — it captures 83.5% of maximum possible
-token savings using only 3% of the merges needed to make everything single-token.
-
-## Atom Breakdown
-
-- Atoms that are CJK Unified chars: 228 (of which 257 undecomposed target chars)
-- Atoms that are Ext-A chars: 6
-- Atoms external to target range: 59
-  - CJK Radicals Supplement: 4
-  - CJK Strokes: 5
-  - CJK Compatibility Ideograph: 1
-  - Non-BMP stroke fragments (Ext-B+): 35
-  - Placeholders (circled numbers, etc.): 14
-- Collision overrides (frequent char in IDS-duplicate pairs): 51
-- Kana atom replacements: 3 (コ→U+F000, ス→U+F001, ユ→U+F002)
-
-### Kana Atom Replacements
-
-The IDS database uses 3 katakana as shape placeholders for CJK components:
-- コ (U+30B3) → U+F000: right-angle enclosure component (317 chars)
-- ス (U+30B9) → U+F001: diagonal stroke pair (8 chars)
-- ユ (U+30E6) → U+F002: horizontal hook component (27 chars)
-
-Replaced at build time so kana codepoints never appear in CJK decompositions.
-This avoids ambiguity with standalone kana in mixed Japanese/Chinese text.
-
-## Undecomposed Target Characters: 277
-
-- Used as components in other chars: 242 (genuinely atomic)
-- Not used anywhere (likely database gaps): 35
-
-## IDS Operators Used (12 of 16)
-
-⿰⿱⿲⿳⿴⿵⿶⿷⿸⿹⿺⿻
-
-## CJK Punctuation: 33
-
-、。〈〉《》「」『』【】〜︰！（），－／：；？［］｜～·—…""※
-
-## Operator Redundancy Analysis (fully recursive, leaf atoms)
-
-Considering fully-recursed leaf atoms only:
-
-- Atomic (1 token, no decomposition):              277 chars
-- Atoms only (unordered, no operators needed):   25,606 chars (93.8% of composable)
-- Atoms + operators (both unordered):             1,148 chars  (4.2%)
-- Atom order only (no operators needed):            391 chars  (1.4%)
-- Full sequence (order + operators):                 60 chars  (0.2%)
-- Unresolvable (IDS database duplicates):           102 chars  (0.4%)
-
-## Encoding Strategy: Flat atoms + SEP-aware BPE
-
-We use flat encoding: decompose to leaf atoms, then run SEP-aware BPE.
-
-Steps:
-1. Decompose each CJK char to its minimal atom sequence (bag/bag_ops/ordered/full)
-2. Build trie of all sequences, find prefix collisions
-3. Append SEP token to chars whose sequence is a prefix of another's
-4. Run greedy BPE on the SEP-augmented sequences
-
-BPE handles both content compression and separator elimination in one pass.
-High-frequency (atom, SEP) pairs get merged into single tokens automatically.
-
-Decoding:
-- Single tokens (including BPE-merged atom+SEP): look up directly
-- Multi-token sequences: collect tokens until SEP or non-CJK token, look up
-- Non-CJK tokens (kana, punctuation) pass through directly
-
-Why flat wins for CTC:
-- Shorter sequences than recursive
-- Order doesn't matter for 93.8% of chars -> more valid CTC paths -> easier training
-- Same atom tokens as recursive, just without 116,112 redundant operator tokens
-
-For the 1.9% ambiguous chars (532), operators appear in the sequence to disambiguate.
-
-Source: Jun Da's Modern Chinese Character Frequency List (~193.5M token corpus).
-
-## BPE Merges: Vocab Size vs Tokens/Char (SEP-aware)
-
-Starting from the 400-token CJK base vocab with SEP pre-appended to prefix-collision
-chars, BPE merges on frequency-weighted sequences greedily combine the most impactful
-adjacent pairs. SEP tokens participate in merges naturally.
-
-| BPE merges | Avg tok/char | Median | % 1-tok | % 2-tok | % 3-tok | % >3-tok |
-|------------|--------------|--------|---------|---------|---------|----------|
-|          0 |         3.81 |      3 |   10.2% |   14.6% |   24.7% |    50.5% |
-|      1,000 |         1.47 |      1 |   74.0% |   12.3% |    9.3% |     4.4% |
-|      1,500 |         1.28 |      1 |   83.8% |    7.9% |    5.8% |     2.5% |
-|      2,000 |         1.18 |      1 |   89.7% |    5.1% |    3.8% |     1.5% |
-|    **2,500** |   **1.10** |  **1** | **93.1%** | **3.5%** | **2.5%** | **1.0%** |
-|      3,000 |         1.08 |      1 |   95.2% |    2.5% |    1.7% |     0.6% |
-|      4,000 |         1.04 |      1 |   97.8% |    1.2% |    0.8% |     0.3% |
-|      5,000 |         1.02 |      1 |   99.0% |    0.5% |    0.3% |     0.1% |
-
-## Optimal Vocab Size Analysis
-
-Character accuracy = Σ freq(char) × p^n, where p = per-token accuracy, n = tokens for char.
-More merges reduces n but increases vocab (which may reduce p).
-
-Model: p(vocab) = base_p × (400/vocab)^alpha, where alpha = vocab size penalty.
-
-Chosen: 2,500 BPE merges (3,213 total vocab). Rationale:
-- Standard Chinese OCR uses 6,000-8,000 classes without issue
-- CTC head is a simple linear projection; 3,213 classes is trivial
-- 93% of real text is single-token — effectively direct classification
-- The dominant cost of multi-token chars is CTC alignment tax (not softmax
-  dilution), so reducing multi-token chars from 16% to 7% is worth more
-  than the negligible per-token accuracy loss from the larger vocab
-- Diminishing returns beyond ~2,500 merges (3k→5k buys only 4% more 1-tok)
-
-## Collision Overrides
-
-51 character pairs have identical decompositions in the IDS database (e.g., 土/士 both
-decompose to ⿱十一). For each pair, the more frequent character gets a dedicated
-single token; the less frequent keeps the shared decomposition.
+1. **No external database**: No dependency on cjkvi-ids or any decomposition DB
+2. **Zero collisions by construction**: Every char gets a unique code
+3. **Simpler reconstruction**: SEP always marks char boundary, no greedy matching
+4. **Better BPE compression**: Word-level BPE crosses char boundaries
+5. **Deterministic**: No collision resolution levels (bag/bag_ops/ordered/full)
+6. **Lower token count**: ~0.89 tok/char vs ~1.10 tok/char with IDS
 
 ## Verification
 
-- 0 reconstruction collisions across all 27,584 characters
-- han_kana.txt word list: 20,756 CJK chars, all covered
+- 0 reconstruction collisions across all 27,584 characters (by construction)
 - Full round-trip: decompose -> encode -> decode -> reconstruct = original
+- All code tokens present in frozen vocab

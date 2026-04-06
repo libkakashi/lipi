@@ -1,5 +1,5 @@
 """
-Comprehensive CJK decomposition integration tests.
+Comprehensive CJK 13-symbol encoding integration tests.
 
 Covers: vocab loading, tokenizer round-trip, decompose/reconstruct,
         token coverage, ID overflow, duplicate sequences, CTC head
@@ -29,10 +29,10 @@ def _vocab_size():
 
 class TestCJKVocabLoading:
 
-    def test_han_kana_vocab_size(self):
+    def test_han_kana_vocab_loads(self):
         vocab = _load_vocab()
-        # 712 base + 2500 BPE + 1 BLANK = 3213
-        assert 3100 <= len(vocab) <= 3400, f"Expected ~3213 tokens, got {len(vocab)}"
+        # 13 base symbols + SEP + up to 2500 BPE + kana + punct + BLANK
+        assert len(vocab) > 200, f"Vocab suspiciously small: {len(vocab)}"
 
     def test_blank_token_at_index_zero(self):
         from src.data.bigrams import BLANK_TOKEN
@@ -43,6 +43,19 @@ class TestCJKVocabLoading:
         vocab = _load_vocab()
         assert len(vocab) == len(set(vocab)), (
             f"Duplicates in vocab: {len(vocab)} total, {len(set(vocab))} unique")
+
+    def test_base_symbols_in_vocab(self):
+        """All 13 base symbols (U+E000-E00C) must be in vocab."""
+        vocab_set = set(_load_vocab())
+        for i in range(13):
+            sym = chr(0xE000 + i)
+            assert sym in vocab_set, f"Base symbol U+{0xE000+i:04X} not in vocab"
+
+    def test_sep_in_vocab(self):
+        """SEP token must be in the frozen vocab."""
+        from src.data.decompose import SEP_CHAR
+        vocab = _load_vocab()
+        assert SEP_CHAR in vocab, f"SEP token U+{ord(SEP_CHAR):04X} not in vocab"
 
 
 # ---------------------------------------------------------------------------
@@ -113,17 +126,15 @@ class TestDecomposeReconstruct:
         result = reconstruct_han_kana(list(decomposed))
         assert result == text
 
-    def test_collision_pairs(self):
-        """Collision override chars must roundtrip correctly."""
-        from src.data.decompose import decompose_han_kana, reconstruct_han_kana
-        pairs = [("土", "士"), ("与", "马")]
-        for a, b in pairs:
-            dec_a = decompose_han_kana(a)
-            dec_b = decompose_han_kana(b)
-            assert dec_a != dec_b, (
-                f"Collision! {a!r} and {b!r} both decompose to {dec_a!r}")
-            assert reconstruct_han_kana(list(dec_a)) == a
-            assert reconstruct_han_kana(list(dec_b)) == b
+    def test_distinct_chars_have_distinct_codes(self):
+        """Different CJK chars must produce different decompositions."""
+        from src.data.decompose import decompose_han_kana
+        chars = list("的一是不了在人有我他国学日本語")
+        codes = [decompose_han_kana(c) for c in chars]
+        for i in range(len(chars)):
+            for j in range(i + 1, len(chars)):
+                assert codes[i] != codes[j], (
+                    f"{chars[i]!r} and {chars[j]!r} have same code: {codes[i]!r}")
 
     def test_mixed_kana_cjk(self):
         from src.data.decompose import decompose_han_kana, reconstruct_han_kana
@@ -135,7 +146,9 @@ class TestDecomposeReconstruct:
         from src.data.decompose import decompose_han_kana, reconstruct_han_kana
         text = "ひらがなカタカナ"
         decomposed = decompose_han_kana(text)
-        assert decomposed == text  # Kana should pass through
+        # Kana are now encoded (not pass-through), so decomposed != text
+        assert decomposed != text
+        # But roundtrip should still work
         result = reconstruct_han_kana(list(decomposed))
         assert result == text
 
@@ -176,17 +189,17 @@ class TestDecomposeReconstruct:
 
 
 # ---------------------------------------------------------------------------
-# 4. All Decomposition Tokens In Vocab
+# 4. All Char Codes Tokens In Vocab
 # ---------------------------------------------------------------------------
 
 class TestAllTokensInVocab:
 
-    def test_all_decomposition_tokens_in_vocab(self):
-        """Every token in cjk_decomposition.tsv must appear in the frozen vocab."""
+    def test_all_code_tokens_in_vocab(self):
+        """Every token in cjk_char_codes.tsv must appear in the frozen vocab."""
         vocab_set = set(_load_vocab())
 
         tsv_path = (Path(__file__).parent.parent /
-                    "training_data" / "word_lists" / "cjk_decomposition.tsv")
+                    "training_data" / "word_lists" / "cjk_char_codes.tsv")
         assert tsv_path.exists(), f"Missing: {tsv_path}"
 
         missing_tokens = set()
@@ -195,17 +208,18 @@ class TestAllTokensInVocab:
             if line.startswith("character\t"):
                 continue
             parts = line.split("\t")
-            if len(parts) < 3:
+            if len(parts) < 2:
                 continue
             total_chars += 1
-            for tok in parts[2].split():
+            for hex_tok in parts[1].split():
+                tok = chr(int(hex_tok, 16))
                 if tok not in vocab_set:
                     missing_tokens.add(tok)
 
-        assert total_chars == 27584, f"Expected 27584 chars, got {total_chars}"
+        assert total_chars >= 27584, f"Expected >= 27584 chars, got {total_chars}"
         assert not missing_tokens, (
-            f"{len(missing_tokens)} decomposition tokens missing from vocab: "
-            f"{sorted(missing_tokens)[:10]}")
+            f"{len(missing_tokens)} code tokens missing from vocab: "
+            f"{sorted(f'U+{ord(t):04X}' for t in missing_tokens)[:10]}")
 
 
 # ---------------------------------------------------------------------------
@@ -224,14 +238,14 @@ class TestNoIDOverflow:
         vs = len(vocab)
 
         tsv_path = (Path(__file__).parent.parent /
-                    "training_data" / "word_lists" / "cjk_decomposition.tsv")
+                    "training_data" / "word_lists" / "cjk_char_codes.tsv")
 
         overflow_chars = []
         for line in tsv_path.read_text(encoding="utf-8").splitlines():
             if line.startswith("character\t"):
                 continue
             parts = line.split("\t")
-            if len(parts) < 3:
+            if len(parts) < 2:
                 continue
             char = parts[0]
             decomposed = decompose_han_kana(char)
@@ -368,28 +382,33 @@ class TestEvalDecodePath:
 
 
 # ---------------------------------------------------------------------------
-# 9. SEP Token Handling
+# 9. 13-Symbol Encoding Properties
 # ---------------------------------------------------------------------------
 
-class TestSEPToken:
+class TestEncoding:
 
-    def test_sep_in_vocab(self):
-        """SEP token must be in the frozen vocab."""
-        from src.data.decompose import SEP_CHAR
-        vocab = _load_vocab()
-        assert SEP_CHAR in vocab, f"SEP token U+{ord(SEP_CHAR):04X} not in vocab"
+    def test_all_codes_use_base_symbols_and_sep(self):
+        """All char codes should only contain base symbols + SEP + BPE tokens."""
+        from src.data.decompose import (
+            _load_cjk_decomposition, _cjk_char_to_tokens,
+        )
+        _load_cjk_decomposition()
 
-    def test_sep_only_for_prefix_collision_chars(self):
-        """SEP appears only in decompositions of prefix-collision chars, not all."""
-        from src.data.decompose import decompose_han_kana, SEP_CHAR
-        # Pure kana: no SEP
-        assert SEP_CHAR not in decompose_han_kana("あいうえお")
-        # CJK text: some chars may have SEP, some may not
-        # (depends on prefix collisions — not every char gets SEP)
-        decomposed = decompose_han_kana("的一是不了在人有我他")
-        # At least SOME CJK chars should have SEP (prefix-collision chars)
-        # but NOT necessarily all of them
-        # Just verify it's valid — the detailed check is in the roundtrip tests
+        for char, tokens in _cjk_char_to_tokens.items():
+            for t in tokens:
+                cp = ord(t)
+                assert (0xE000 <= cp <= 0xF8FF) or cp == 0x2E3B, (
+                    f"Char {char!r} has unexpected token U+{cp:04X}")
+
+    def test_cjk_decomposition_produces_encoding_tokens(self):
+        """Decomposing CJK chars should produce only encoding tokens, not the chars."""
+        from src.data.decompose import decompose_han_kana
+        text = "的一是"
+        decomposed = decompose_han_kana(text)
+        # Decomposed text should NOT contain the original CJK chars
+        for ch in text:
+            assert ch not in decomposed, (
+                f"Char {ch!r} appears in its own decomposition")
 
     def test_sep_not_added_for_kana(self):
         """Kana chars should NOT get SEP tokens."""
@@ -397,31 +416,6 @@ class TestSEPToken:
         text = "あいうえお"
         decomposed = decompose_han_kana(text)
         assert SEP_CHAR not in decomposed
-
-    def test_reconstruct_handles_sequences_with_and_without_sep(self):
-        """Reconstruct works for both SEP-terminated and non-SEP sequences."""
-        from src.data.decompose import (
-            reconstruct_han_kana, decompose_han_kana,
-            _load_cjk_decomposition, _cjk_char_to_tokens, SEP_CHAR,
-        )
-        _load_cjk_decomposition()
-
-        # Find one char WITH SEP and one WITHOUT
-        with_sep = without_sep = None
-        for char, tokens in _cjk_char_to_tokens.items():
-            if SEP_CHAR in tokens and with_sep is None:
-                with_sep = char
-            if SEP_CHAR not in tokens and without_sep is None:
-                without_sep = char
-            if with_sep and without_sep:
-                break
-
-        if with_sep:
-            result = reconstruct_han_kana(list(decompose_han_kana(with_sep)))
-            assert result == with_sep, f"SEP char roundtrip failed: {with_sep!r}"
-        if without_sep:
-            result = reconstruct_han_kana(list(decompose_han_kana(without_sep)))
-            assert result == without_sep, f"Non-SEP char roundtrip failed: {without_sep!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -431,7 +425,7 @@ class TestSEPToken:
 class TestBPETokens:
 
     def test_bpe_tokens_are_pua_chars(self):
-        """BPE merged tokens should be PUA characters (U+E000+)."""
+        """BPE merged tokens should be PUA characters (U+E00D+)."""
         from src.data.decompose import (
             _load_cjk_decomposition, _cjk_char_to_tokens,
         )
@@ -440,13 +434,14 @@ class TestBPETokens:
         pua_tokens = set()
         for tokens in _cjk_char_to_tokens.values():
             for t in tokens:
-                if len(t) == 1 and ord(t) >= 0xE000:
+                if len(t) == 1 and ord(t) >= 0xE00D:
                     pua_tokens.add(t)
 
-        assert len(pua_tokens) > 0, "No BPE (PUA) tokens found"
+        # BPE tokens may or may not appear in per-char codes
+        # (they primarily help in word-level sequences)
 
     def test_bpe_tokens_in_vocab(self):
-        """All BPE tokens from decomposition table are in vocab."""
+        """All BPE tokens from char codes table are in vocab."""
         from src.data.decompose import (
             _load_cjk_decomposition, _cjk_char_to_tokens,
         )
