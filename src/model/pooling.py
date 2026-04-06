@@ -5,9 +5,7 @@ Reduces the height dimension of feature maps using a learned linear projection
 rather than a fixed stride or average pool. This lets the model learn which
 vertical positions carry the most information for each channel.
 
-Used twice in the encoder:
-  - After Stage 1: h=8 -> h=4
-  - After Stage 2: h=4 -> h=1 (full height collapse)
+Used in the encoder after Stage 1: h=16 -> h=4.
 """
 
 import torch.nn as nn

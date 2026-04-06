@@ -11,11 +11,10 @@ Architecture:
     -> Expert SWA 8×8: group-specific character features    (h=16, w=W/2)
     -> Height pool 16→4 + Width pool 2×                    (h=4, w=W/4)
     -> Expert SWA 4×16: group-specific sequence features   (h=4, w=W/4)
-    -> Height pool 4→2
-    -> Fold h=2 into channels → (B, W/4, C*2)
+    -> Fold h=4 into channels → (B, W/4, C*4)
     -> LayerNorm
     -> LID-2: per-script classification (multi-script groups only)
-    -> Per-script CTC heads (T=W/4, same as before but richer features)
+    -> Per-script CTC heads (T=W/4, richer features from direct h=4 fold)
 """
 
 import torch
@@ -224,11 +223,8 @@ class LipiMoEEncoder(nn.Module):
             for i in range(stage2_blocks)
         ])
 
-        # Height pool 4→2 (fold h=2 into channels after this, preserving vertical info)
-        self.pool2 = LearnedHeightPooling(channels=stage2_dim, h_in=4, h_out=2)
-
-        # Final norm (after folding h=2 into channels: dim = stage2_dim * 2)
-        self.enc_out_dim = stage2_dim * 2
+        # Fold h=4 directly into channels (no height pool — SWA already contextualized)
+        self.enc_out_dim = stage2_dim * 4
         self.norm = nn.LayerNorm(self.enc_out_dim)
 
         # CTC heads: per-script within each group (with LID-2 for multi-script groups)
@@ -333,11 +329,10 @@ class LipiMoEEncoder(nn.Module):
         for block in self.stage2:
             x = block(x, h=h, w=w, group_ids=group_ids)
 
-        # Height pool 4→2, then fold h=2 into channels
+        # Fold h=4 directly into channels
         C2 = x.shape[-1]
-        x = x.reshape(B, h, w, C2).permute(0, 3, 1, 2)  # (B, C2, h, w)
-        x = self.pool2(x)                                  # (B, C2, 2, w)
-        x = x.permute(0, 3, 2, 1).reshape(B, w, C2 * 2)   # (B, T, C2*2)
+        x = x.reshape(B, h, w, C2)                         # (B, 4, w, C2)
+        x = x.permute(0, 2, 1, 3).reshape(B, w, C2 * h)   # (B, T, C2*4)
 
         # Final norm
         x = self.norm(x)
