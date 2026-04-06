@@ -22,7 +22,7 @@ from torch.utils.data import DataLoader
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.model.moe_encoder import LipiMoEEncoder
-from src.model.lid import SCRIPT_TO_GROUP
+from src.model.lid import SCRIPT_TO_GROUP, NUM_GROUPS, GROUPS
 from src.training.moe_data import (
     load_shards, build_script_tokenizers, encode_labels,
     remap_ids, MoEDataset, collate_moe,
@@ -141,32 +141,37 @@ def load_and_prepare_data(args, device):
         active_scripts = [s for s in active_scripts if s in selected]
     print(f"Scripts: {active_scripts}")
 
-    # Active groups
-    active_groups = []
-    seen = set()
+    # Active data groups (from data scripts)
+    active_data_groups = set()
     for s in active_scripts:
         g = SCRIPT_TO_GROUP.get(s)
-        if g and g not in seen:
-            active_groups.append(g)
-            seen.add(g)
-    n_groups = len(active_groups)
-    assert n_groups > 0, "No active groups found — check --scripts and SCRIPT_TO_GROUP mapping"
-    print(f"Groups: {n_groups} -> {active_groups}")
+        if g:
+            active_data_groups.add(g)
+    assert active_data_groups, "No active groups found"
+    print(f"Data groups: {sorted(active_data_groups)}")
 
-    # Remap IDs
+    # Always build model with ALL 13 groups for checkpoint compatibility.
+    # Inactive groups exist in the model but never see data — zero VRAM overhead
+    # beyond ~3.5M extra CTC head params (trivial vs 27M total).
+    active_groups = list(GROUPS)
+    all_scripts = list(SCRIPT_TO_GROUP.keys())
+    n_groups = NUM_GROUPS
+    print(f"Model groups: {n_groups} (full architecture, data for {len(active_data_groups)})")
+
+    # Remap IDs using full group list (global IDs match model's group indices)
     group_ids, local_script_ids, global_to_local_group = remap_ids(
-        active_scripts, active_groups, script_ids_global, group_ids_global)
+        all_scripts, active_groups, script_ids_global, group_ids_global)
 
-    # Tokenizers (fixed vocabs from Unicode ranges, not data-dependent)
+    # Tokenizers for all groups
     print("\nBuilding per-script tokenizers...")
     group_tokenizers, group_script_vocab_sizes, group_script_names = build_script_tokenizers(
-        active_scripts, active_groups)
+        all_scripts, active_groups)
     print(f"  Per-script vocab sizes: {group_script_vocab_sizes}")
 
     # Encode labels
     print("Pre-encoding labels...")
     target_tensor, target_len_tensor = encode_labels(
-        labels, group_ids, local_script_ids, active_groups, group_tokenizers)
+        labels, group_ids, local_script_ids, list(GROUPS), group_tokenizers)
     print(f"  Max label length: {target_len_tensor.max().item()}")
 
     # Pre-filter empty/too-long labels
