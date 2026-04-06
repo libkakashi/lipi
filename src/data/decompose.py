@@ -230,12 +230,11 @@ def _apply_bpe(parts: list[str], bpe_merges: list[tuple[str, str, str]]) -> list
 _word_cache: dict[str, dict[str, str]] = {}
 
 
-def _decompose_arbitrary(text: str, script_name: str,
-                         cross_char_bpe: bool = False) -> str:
+def _decompose_arbitrary(text: str, script_name: str) -> str:
     """Decompose text using arbitrary encoding.
 
-    1. Script chars -> per-char token codes (already have intra-char BPE).
-    2. If cross_char_bpe: apply word-level BPE merges across char boundaries.
+    1. Script chars -> per-char token codes.
+    2. Apply word-level BPE merges (always cross-char).
     Non-script chars pass through unchanged.
 
     Results are cached per-word for fast repeated lookups.
@@ -245,11 +244,9 @@ def _decompose_arbitrary(text: str, script_name: str,
     if not char_to_tokens:
         return text
 
-    # Check word cache
-    cache_key = script_name if not cross_char_bpe else f"{script_name}_xbpe"
-    if cache_key not in _word_cache:
-        _word_cache[cache_key] = {}
-    cache = _word_cache[cache_key]
+    if script_name not in _word_cache:
+        _word_cache[script_name] = {}
+    cache = _word_cache[script_name]
 
     if text in cache:
         return cache[text]
@@ -263,11 +260,10 @@ def _decompose_arbitrary(text: str, script_name: str,
         else:
             parts.append(ch)
 
-    # Step 2: apply word-level BPE merges across character boundaries
-    if cross_char_bpe:
-        bpe_merges = enc["bpe_merges"]
-        if bpe_merges:
-            parts = _apply_bpe(parts, bpe_merges)
+    # Step 2: always apply word-level BPE merges across character boundaries
+    bpe_merges = enc["bpe_merges"]
+    if bpe_merges:
+        parts = _apply_bpe(parts, bpe_merges)
 
     result = "".join(parts)
     cache[text] = result
@@ -345,7 +341,7 @@ def decompose_han_kana(text: str) -> str:
     CJK chars -> pre-built token sequence (base symbols + SEP + BPE merges).
     Kana and punctuation pass through unchanged.
     """
-    return _decompose_arbitrary(text, "han_kana", cross_char_bpe=True)
+    return _decompose_arbitrary(text, "han_kana")
 
 
 def reconstruct_han_kana(tokens: list[str]) -> str:
@@ -370,7 +366,7 @@ def decompose_korean(text: str) -> str:
     Hangul syllables -> pre-built token sequence (base symbols + SEP + BPE merges).
     Non-Hangul characters pass through unchanged.
     """
-    return _decompose_arbitrary(text, "korean", cross_char_bpe=True)
+    return _decompose_arbitrary(text, "korean")
 
 
 def reconstruct_korean(tokens: list[str]) -> str:
@@ -473,7 +469,7 @@ def decompose_text(text: str, group: str) -> str:
     if group == "sino_japanese":
         return decompose_han_kana(text)
     if group == "arabic":
-        return _decompose_arbitrary(text, "arabic", cross_char_bpe=True)
+        return _decompose_arbitrary(text, "arabic")
     return text
 
 
