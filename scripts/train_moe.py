@@ -134,7 +134,8 @@ def load_and_prepare_data(args, device):
     device_type = device.type
     data_path = Path(args.data)
     print(f"\nLoading data from {data_path}/...")
-    images, labels, script_ids_global, group_ids_global, meta = load_shards(data_path)
+    images, labels, script_ids_global, group_ids_global, meta, \
+        shard_target_ids, shard_target_lens = load_shards(data_path)
     active_scripts = meta["active_scripts"]
     if args.scripts != "all":
         selected = set(s.strip() for s in args.scripts.split(","))
@@ -168,10 +169,15 @@ def load_and_prepare_data(args, device):
         all_scripts, active_groups)
     print(f"  Per-script vocab sizes: {group_script_vocab_sizes}")
 
-    # Encode labels
-    print("Pre-encoding labels...")
-    target_tensor, target_len_tensor = encode_labels(
-        labels, group_ids, local_script_ids, list(GROUPS), group_tokenizers)
+    # Encode labels (use pre-encoded from shards if available)
+    if shard_target_ids is not None:
+        print("Using pre-encoded targets from shards...")
+        target_tensor = shard_target_ids
+        target_len_tensor = shard_target_lens
+    else:
+        print("Pre-encoding labels (old shards without target_ids)...")
+        target_tensor, target_len_tensor = encode_labels(
+            labels, group_ids, local_script_ids, list(GROUPS), group_tokenizers)
     print(f"  Max label length: {target_len_tensor.max().item()}")
 
     # Pre-filter empty/too-long labels

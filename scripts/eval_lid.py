@@ -86,7 +86,7 @@ def main():
 
     # Data
     data_path = Path(args.data)
-    images, labels, script_ids_global, group_ids_global, meta = load_shards(data_path)
+    images, labels, script_ids_global, group_ids_global, meta, _, _ = load_shards(data_path)
     active_scripts = meta["active_scripts"]
 
     active_groups = []

@@ -18,7 +18,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.model.lid import SCRIPTS, SCRIPT_TO_GROUP, GROUP_TO_ID, SCRIPT_TO_ID
+from src.model.lid import SCRIPTS, SCRIPT_TO_GROUP, GROUP_TO_ID, SCRIPT_TO_ID, GROUPS
 from src.data.color import rgb_to_input
 from src.data.augmentation import (
     RandAugmentOCR,
@@ -46,6 +46,85 @@ from src.data.word_lists import load_all_word_lists
 CLEAN_RATIO = 0.3
 CHAR_BUDGET_RATIO = 0.25
 MIN_SHARD_BYTES = 100
+
+# ---------------------------------------------------------------------------
+# Label encoding (tokenizers built once per worker process)
+# ---------------------------------------------------------------------------
+
+# Module-level cache for tokenizers (populated lazily in each worker)
+_worker_group_tokenizers = None
+_worker_active_groups = None
+_worker_all_scripts = None
+_worker_group_script_names = None
+
+
+def _ensure_tokenizers():
+    """Build tokenizers once per worker process (lazy init)."""
+    global _worker_group_tokenizers, _worker_active_groups
+    global _worker_all_scripts, _worker_group_script_names
+    if _worker_group_tokenizers is not None:
+        return
+
+    import io
+    from src.training.moe_data import build_script_tokenizers
+
+    _worker_active_groups = list(GROUPS)
+    _worker_all_scripts = list(SCRIPT_TO_GROUP.keys())
+    # Suppress per-script vocab prints in worker processes
+    old_stdout = sys.stdout
+    sys.stdout = io.StringIO()
+    try:
+        _worker_group_tokenizers, _, _worker_group_script_names = build_script_tokenizers(
+            _worker_all_scripts, _worker_active_groups)
+    finally:
+        sys.stdout = old_stdout
+
+
+def _get_local_group_and_script(script: str):
+    """Get (local_group_id, local_script_id) for a script."""
+    _ensure_tokenizers()
+    group_name = SCRIPT_TO_GROUP[script]
+    local_gid = _worker_active_groups.index(group_name)
+    local_sid = _worker_group_script_names[local_gid].index(script)
+    return local_gid, local_sid
+
+
+def encode_labels_for_shard(labels: list[str], script: str) -> tuple[torch.Tensor, torch.Tensor]:
+    """Encode labels into token IDs for a single script.
+
+    Returns:
+        target_ids: (N, max_len) zero-padded token IDs, dtype long
+        target_lens: (N,) actual lengths, dtype long
+    """
+    from src.data.decompose import decompose_text, DECOMPOSE_GROUPS
+
+    _ensure_tokenizers()
+    local_gid, local_sid = _get_local_group_and_script(script)
+    group_name = _worker_active_groups[local_gid]
+    tok = _worker_group_tokenizers[local_gid][local_sid]
+
+    encoded = []
+    max_len = 0
+    for label in labels:
+        if group_name in DECOMPOSE_GROUPS:
+            label_tokens = decompose_text(label, group_name)
+        else:
+            label_tokens = label
+        ids = tok.encode(label_tokens)
+        encoded.append(ids)
+        if len(ids) > max_len:
+            max_len = len(ids)
+
+    if max_len == 0:
+        max_len = 1
+    target_ids = torch.zeros(len(encoded), max_len, dtype=torch.long)
+    target_lens = torch.zeros(len(encoded), dtype=torch.long)
+    for i, ids in enumerate(encoded):
+        target_lens[i] = len(ids)
+        if ids:
+            target_ids[i, :len(ids)] = torch.tensor(ids, dtype=torch.long)
+
+    return target_ids, target_lens
 
 # ---------------------------------------------------------------------------
 # Data styles — font selection + augmentation ops per style
@@ -191,17 +270,23 @@ def shard_exists(path: str) -> bool:
 
 
 def save_shard(images, labels, script, shard_path):
-    """Save a shard to disk."""
+    """Save a shard to disk with pre-encoded token IDs."""
     if not images:
         return 0
     n = len(images)
     script_id = SCRIPT_TO_ID[script]
     group_id = GROUP_TO_ID[SCRIPT_TO_GROUP[script]]
+
+    # Pre-encode labels into token IDs
+    target_ids, target_lens = encode_labels_for_shard(labels, script)
+
     torch.save({
         "images": torch.stack(images),
         "labels": labels,
         "script_ids": torch.full((n,), script_id, dtype=torch.long),
         "group_ids": torch.full((n,), group_id, dtype=torch.long),
+        "target_ids": target_ids,
+        "target_lens": target_lens,
     }, shard_path)
     return n
 
@@ -412,6 +497,7 @@ def save_metadata(valid_scripts, args, shard_dir):
         "augmented": args.augment,
         "samples_per_script": args.samples_per_script,
         "has_labels": True,
+        "has_target_ids": True,
     }, meta_path)
 
     total_shards = len(list(shard_dir.glob("shard_*.pt")))

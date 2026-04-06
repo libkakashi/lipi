@@ -28,7 +28,7 @@ def main():
     )
     from src.model.lid import SCRIPT_TO_GROUP
 
-    images, labels, sids_global, gids_global, meta = load_shards(Path(args.data))
+    images, labels, sids_global, gids_global, meta, _, _ = load_shards(Path(args.data))
     active_scripts = meta["active_scripts"]
     active_groups = list(dict.fromkeys(
         SCRIPT_TO_GROUP[s] for s in active_scripts if s in SCRIPT_TO_GROUP))

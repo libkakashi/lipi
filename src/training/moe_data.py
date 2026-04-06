@@ -28,9 +28,17 @@ def scripts_in_group(active_scripts: list[str], group_name: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def load_shards(shard_dir: Path) -> tuple[
-    torch.Tensor, list[str], torch.Tensor, torch.Tensor, dict
+    torch.Tensor, list[str], torch.Tensor, torch.Tensor, dict,
+    torch.Tensor | None, torch.Tensor | None
 ]:
-    """Load all shards (word + char) in parallel."""
+    """Load all shards (word + char) in parallel.
+
+    Returns:
+        images, labels, script_ids, group_ids, meta, target_ids, target_lens
+
+    target_ids and target_lens are None if shards don't contain pre-encoded
+    targets (backward compat with old shards).
+    """
     if not shard_dir.exists():
         raise FileNotFoundError(f"Shard directory does not exist: {shard_dir}")
 
@@ -50,6 +58,8 @@ def load_shards(shard_dir: Path) -> tuple[
     expected_keys = {"images", "labels", "script_ids", "group_ids"}
 
     all_imgs, all_labels, all_sids, all_gids = [], [], [], []
+    all_tids, all_tlens = [], []
+    has_targets = None  # tri-state: None=unknown, True/False after first shard
     with ThreadPoolExecutor(max_workers=16) as pool:
         for shard in pool.map(lambda p: torch.load(p, weights_only=False), shard_files):
             missing = expected_keys - shard.keys()
@@ -60,12 +70,43 @@ def load_shards(shard_dir: Path) -> tuple[
             all_sids.append(shard["script_ids"])
             all_gids.append(shard["group_ids"])
 
+            # Pre-encoded targets (optional, for backward compat)
+            shard_has = "target_ids" in shard and "target_lens" in shard
+            if has_targets is None:
+                has_targets = shard_has
+            elif has_targets != shard_has:
+                # Mixed shards: some have targets, some don't — fall back
+                has_targets = False
+            if shard_has:
+                all_tids.append(shard["target_ids"])
+                all_tlens.append(shard["target_lens"])
+
     images = torch.cat(all_imgs)
     script_ids = torch.cat(all_sids)
     group_ids = torch.cat(all_gids)
     del all_imgs, all_sids, all_gids
-    print(f"  {len(all_labels)} images loaded")
-    return images, all_labels, script_ids, group_ids, meta
+
+    if has_targets and all_tids:
+        # Pad target_ids to uniform max_len across all shards
+        max_len = max(t.shape[1] for t in all_tids)
+        padded = []
+        for t in all_tids:
+            if t.shape[1] < max_len:
+                pad = torch.zeros(t.shape[0], max_len - t.shape[1], dtype=torch.long)
+                padded.append(torch.cat([t, pad], dim=1))
+            else:
+                padded.append(t)
+        target_ids = torch.cat(padded)
+        target_lens = torch.cat(all_tlens)
+        del padded, all_tids, all_tlens
+        print(f"  {len(all_labels)} images loaded (pre-encoded targets found)")
+    else:
+        target_ids = None
+        target_lens = None
+        del all_tids, all_tlens
+        print(f"  {len(all_labels)} images loaded (no pre-encoded targets)")
+
+    return images, all_labels, script_ids, group_ids, meta, target_ids, target_lens
 
 
 def build_script_tokenizers(
