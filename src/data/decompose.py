@@ -1,18 +1,16 @@
 """
 Character decomposition for CJK, Korean, and Arabic.
 
-CJK (han_kana) and Korean use arbitrary N-symbol encoding with word-level BPE:
+All three use arbitrary N-symbol encoding with word-level BPE:
     Characters in the script's range are assigned fixed codes using N PUA
     symbols, ranked by real-world frequency. Each code ends with SEP (U+2E3B).
-    Top chars get shorter codes (1-symbol), rare chars get longer (4-symbol).
+    Top chars get shorter codes (1-symbol), rare chars get longer (3-4 symbol).
     Word-level BPE compresses further, crossing character boundaries within
     words.
 
-    CJK: 13 symbols (U+E000-E00C), 2500 BPE merges. All chars encoded
-    (CJK + kana + punctuation + digits).
-    Korean: 11 symbols (U+F200-F20A), 2500 BPE merges.
-
-Arabic: character-pair BPE (separate system, unchanged).
+    CJK: 13 symbols (U+E000-E00C), 2500 BPE merges.
+    Korean: 11 symbols (U+EA00-EA0A), 2500 BPE merges.
+    Arabic: 9 symbols (U+EB00-EB08), 2500 BPE merges.
 
 Other scripts: pass through unchanged.
 """
@@ -88,6 +86,18 @@ def _load_arbitrary_encoding(script_name: str) -> dict:
             "bpe_merges": "korean_bpe_merges.tsv",
             "pua_base": 0xEA00,
             "char_ranges": [(_HANGUL_BASE, _HANGUL_END)],
+        },
+        "arabic": {
+            "char_codes": "arabic_char_codes.tsv",
+            "bpe_merges": "arabic_arb_bpe_merges.tsv",
+            "pua_base": 0xEB00,
+            "char_ranges": [
+                (0x0600, 0x06FF),   # Arabic
+                (0x0750, 0x077F),   # Arabic Supplement
+                (0x0870, 0x089F),   # Arabic Extended-B
+                (0x08A0, 0x08FF),   # Arabic Extended-A
+                (0xFB50, 0xFDFF),   # Arabic Presentation Forms-A
+            ],
         },
     }
 
@@ -200,16 +210,51 @@ def _is_encoding_token(ch: str, script_name: str) -> bool:
     return False
 
 
-def _decompose_arbitrary(text: str, script_name: str) -> str:
+def _apply_bpe(parts: list[str], bpe_merges: list[tuple[str, str, str]]) -> list[str]:
+    """Apply BPE merges sequentially. Each merge is applied in one pass."""
+    for a, b, merged in bpe_merges:
+        new_parts: list[str] = []
+        i = 0
+        while i < len(parts):
+            if i + 1 < len(parts) and parts[i] == a and parts[i + 1] == b:
+                new_parts.append(merged)
+                i += 2
+            else:
+                new_parts.append(parts[i])
+                i += 1
+        parts = new_parts
+    return parts
+
+
+# Per-script word→tokens cache (populated lazily during decomposition)
+_word_cache: dict[str, dict[str, str]] = {}
+
+
+def _decompose_arbitrary(text: str, script_name: str,
+                         cross_char_bpe: bool = False) -> str:
     """Decompose text using arbitrary encoding.
 
-    Script chars -> pre-built token sequence.
+    1. Script chars -> per-char token codes (already have intra-char BPE).
+    2. If cross_char_bpe: apply word-level BPE merges across char boundaries.
     Non-script chars pass through unchanged.
+
+    Results are cached per-word for fast repeated lookups.
     """
     enc = _load_arbitrary_encoding(script_name)
     char_to_tokens = enc["char_to_tokens"]
     if not char_to_tokens:
         return text
+
+    # Check word cache
+    cache_key = script_name if not cross_char_bpe else f"{script_name}_xbpe"
+    if cache_key not in _word_cache:
+        _word_cache[cache_key] = {}
+    cache = _word_cache[cache_key]
+
+    if text in cache:
+        return cache[text]
+
+    # Step 1: per-char lookup
     parts: list[str] = []
     for ch in text:
         tokens = char_to_tokens.get(ch)
@@ -217,7 +262,16 @@ def _decompose_arbitrary(text: str, script_name: str) -> str:
             parts.extend(tokens)
         else:
             parts.append(ch)
-    return "".join(parts)
+
+    # Step 2: apply word-level BPE merges across character boundaries
+    if cross_char_bpe:
+        bpe_merges = enc["bpe_merges"]
+        if bpe_merges:
+            parts = _apply_bpe(parts, bpe_merges)
+
+    result = "".join(parts)
+    cache[text] = result
+    return result
 
 
 def _reconstruct_arbitrary(tokens: list[str], script_name: str) -> str:
@@ -291,7 +345,7 @@ def decompose_han_kana(text: str) -> str:
     CJK chars -> pre-built token sequence (base symbols + SEP + BPE merges).
     Kana and punctuation pass through unchanged.
     """
-    return _decompose_arbitrary(text, "han_kana")
+    return _decompose_arbitrary(text, "han_kana", cross_char_bpe=True)
 
 
 def reconstruct_han_kana(tokens: list[str]) -> str:
@@ -316,7 +370,7 @@ def decompose_korean(text: str) -> str:
     Hangul syllables -> pre-built token sequence (base symbols + SEP + BPE merges).
     Non-Hangul characters pass through unchanged.
     """
-    return _decompose_arbitrary(text, "korean")
+    return _decompose_arbitrary(text, "korean", cross_char_bpe=True)
 
 
 def reconstruct_korean(tokens: list[str]) -> str:
@@ -411,7 +465,7 @@ def decompose_text(text: str, group: str) -> str:
 
     sino_japanese: CJK -> N-symbol codes + BPE merges, kana unchanged.
     korean: Hangul syllables -> N-symbol codes + BPE merges.
-    arabic: character pairs -> BPE merged tokens.
+    arabic: Arabic chars -> N-symbol codes + BPE merges.
     Others: unchanged.
     """
     if group == "korean":
@@ -419,7 +473,7 @@ def decompose_text(text: str, group: str) -> str:
     if group == "sino_japanese":
         return decompose_han_kana(text)
     if group == "arabic":
-        return decompose_arabic(text)
+        return _decompose_arbitrary(text, "arabic", cross_char_bpe=True)
     return text
 
 
@@ -430,7 +484,7 @@ def reconstruct_text(text: str, group: str) -> str:
     if group == "sino_japanese":
         return reconstruct_han_kana(list(text))
     if group == "arabic":
-        return reconstruct_arabic(list(text))
+        return _reconstruct_arbitrary(list(text), "arabic")
     return text
 
 
@@ -511,20 +565,15 @@ _korean_merges = _KoreanMergesProxy()
 
 def get_vocab_tokens(group: str) -> list[str]:
     """Get the full set of output tokens for a decomposed group."""
-    if group == "korean":
-        enc = _load_arbitrary_encoding("korean")
+    script_map = {
+        "korean": "korean",
+        "sino_japanese": "han_kana",
+        "arabic": "arabic",
+    }
+    script_name = script_map.get(group)
+    if script_name:
+        enc = _load_arbitrary_encoding(script_name)
         tokens: set[str] = set()
-        # All tokens from char codes (base symbols, BPE merges, SEP)
-        if enc["char_to_tokens"]:
-            for char_tokens in enc["char_to_tokens"].values():
-                tokens.update(char_tokens)
-        tokens.add(SEP_CHAR)
-        return sorted(tokens)
-
-    if group == "sino_japanese":
-        enc = _load_arbitrary_encoding("han_kana")
-        tokens = set()
-        # All tokens from char codes (base symbols, BPE merges, SEP)
         if enc["char_to_tokens"]:
             for char_tokens in enc["char_to_tokens"].values():
                 tokens.update(char_tokens)
