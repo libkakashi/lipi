@@ -17,7 +17,7 @@ import torch
 # Scripts that use arbitrary N-symbol encoding (PUA tokens only in vocab).
 # Their vocabs contain NO direct Unicode characters — only PUA base symbols,
 # BPE merge tokens, and SEP.
-ENCODED_SCRIPTS = {"han_kana", "korean"}
+ENCODED_SCRIPTS = {"han_kana", "korean", "arabic"}
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -223,6 +223,8 @@ class TestFrozenVocabContent:
 
     def test_has_digits(self, all_vocabs):
         for script, vocab in all_vocabs.items():
+            if script in ENCODED_SCRIPTS:
+                continue  # encoded vocabs use PUA tokens, no ASCII digits
             vocab_set = set(vocab)
             for d in "0123456789":
                 assert d in vocab_set, f"{script}: missing digit {d}"

@@ -124,41 +124,6 @@ class LMDBDataset(Dataset):
         self.env.close()
 
 
-class InMemoryDataset(Dataset):
-    """In-memory dataset for small datasets or testing.
-
-    Stores images and labels directly in memory.
-    """
-
-    def __init__(
-        self,
-        images: list[Image.Image],
-        labels: list[str],
-        target_height: int = 32,
-        max_width: int = 320,
-        augment: bool = False,
-    ):
-        assert len(images) == len(labels)
-        self.images = images
-        self.labels = labels
-        self.target_height = target_height
-        self.max_width = max_width
-        self.augmentor = RandAugmentOCR() if augment else None
-
-    def __len__(self) -> int:
-        return len(self.images)
-
-    def __getitem__(self, idx: int) -> tuple[np.ndarray, str]:
-        img = self.images[idx].copy()
-        label = self.labels[idx]
-
-        if self.augmentor is not None:
-            img = self.augmentor(img)
-
-        image = preprocess_crop(img, self.target_height, self.max_width)
-        return image, label
-
-
 def collate_ocr(
     batch: list[tuple[np.ndarray, str]],
 ) -> tuple[Tensor, list[str], Tensor]:

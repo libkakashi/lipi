@@ -376,12 +376,6 @@ def _reconstruct_arbitrary(tokens: list[str], script_name: str) -> str:
 # CJK (han_kana) — uses generic arbitrary encoding
 # =========================================================================
 
-def _is_cjk(ch: str) -> bool:
-    cp = ord(ch)
-    return (_CJK_UNIFIED_START <= cp <= _CJK_UNIFIED_END or
-            _CJK_EXT_A_START <= cp <= _CJK_EXT_A_END)
-
-
 def decompose_han_kana(text: str) -> str:
     """Decompose han_kana text.
 
@@ -402,10 +396,6 @@ def reconstruct_han_kana(tokens: list[str]) -> str:
 # =========================================================================
 # Korean — uses generic arbitrary encoding
 # =========================================================================
-
-def _is_hangul(ch: str) -> bool:
-    return _HANGUL_BASE <= ord(ch) <= _HANGUL_END
-
 
 def decompose_korean(text: str) -> str:
     """Decompose Korean text using arbitrary 11-symbol encoding.

@@ -57,8 +57,8 @@ tmp/
 training_data/fonts/
 debug/
 training_data/corpora/
-render_check_aug/
-render_check_cross/
-render_check_indic/
-training_data/word_lists/raw_japanese/
-training_data/word_lists/raw_chinese/
+render_check_*/
+training_data/word_lists/raw_*/
+
+# Testing
+.pytest_cache/

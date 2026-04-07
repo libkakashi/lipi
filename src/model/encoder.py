@@ -9,9 +9,9 @@ Architecture:
     -> Shared SWA 8×32: sequence-level universal features
     -> LID-1: 13-group classification
     -> Expert SWA 8×8: group-specific character features    (h=16, w=W/2)
-    -> Height pool 16→4 + Width pool 2×                    (h=4, w=W/4)
-    -> Expert SWA 4×16: group-specific sequence features   (h=4, w=W/4)
-    -> Fold h=4 into channels → (B, W/4, C*4)
+    -> Height pool 16→8 + Width pool 2×                    (h=8, w=W/4)
+    -> Expert SWA 8×16: group-specific sequence features   (h=8, w=W/4)
+    -> Fold h=8 into channels → (B, W/4, C*8)
     -> LayerNorm
     -> LID-2: per-script classification (multi-script groups only)
     -> Per-script CTC heads (T=W/4, richer features from direct h=4 fold)
@@ -188,8 +188,8 @@ class LipiMoEEncoder(nn.Module):
             for i in range(stage1_blocks)
         ])
 
-        # Height pool 16→4 + width pool 2× (learned stride-2 conv along width)
-        self.pool1 = LearnedHeightPooling(channels=stage1_dim, h_in=16, h_out=4)
+        # Height pool 16→8 + width pool 2×
+        self.pool1 = LearnedHeightPooling(channels=stage1_dim, h_in=16, h_out=8)
         self.width_pool = nn.Sequential(
             nn.Conv1d(stage1_dim, stage1_dim, kernel_size=3, stride=2, padding=1),
             nn.GroupNorm(1, stage1_dim),
@@ -202,13 +202,13 @@ class LipiMoEEncoder(nn.Module):
         # Expert SWA Stage 2
         self.stage2 = nn.ModuleList([
             FullyExpertSWABlock(dim=stage2_dim, num_heads=stage2_dim // 32,
-                                num_groups=num_groups, window_h=4, window_w=16,
+                                num_groups=num_groups, window_h=8, window_w=16,
                                 shift=(i % 2 == 1), mlp_ratio=stage2_mlp_ratio)
             for i in range(stage2_blocks)
         ])
 
-        # Fold h=4 directly into channels (no height pool — SWA already contextualized)
-        self.enc_out_dim = stage2_dim * 4
+        # Fold h=8 directly into channels (no height pool — SWA already contextualized)
+        self.enc_out_dim = stage2_dim * 8
         self.norm = nn.LayerNorm(self.enc_out_dim)
 
         # CTC heads: per-script within each group (with LID-2 for multi-script groups)
@@ -295,12 +295,12 @@ class LipiMoEEncoder(nn.Module):
         for block in self.stage1:
             x = block(x, h=h, w=w, group_ids=group_ids)
 
-        # Height pool 16→4, width pool 2×
+        # Height pool 16→8, width pool 2×
         C1 = x.shape[-1]
         x = x.reshape(B, h, w, C1).permute(0, 3, 1, 2)  # (B, C1, h, w)
-        x = self.pool1(x)                                  # (B, C1, 4, w)
-        h = 4
-        # Width pool: (B, C1, 4, w) → reshape to (B*4, C1, w) → conv → (B*4, C1, w//2)
+        x = self.pool1(x)                                  # (B, C1, 8, w)
+        h = 8
+        # Width pool: (B, C1, 8, w) → reshape to (B*8, C1, w) → conv → (B*8, C1, w//2)
         x = x.reshape(B * h, C1, w)
         x = self.width_pool(x)
         w = x.shape[2]
@@ -313,10 +313,10 @@ class LipiMoEEncoder(nn.Module):
         for block in self.stage2:
             x = block(x, h=h, w=w, group_ids=group_ids)
 
-        # Fold h=4 directly into channels
+        # Fold h=8 directly into channels
         C2 = x.shape[-1]
-        x = x.reshape(B, h, w, C2)                         # (B, 4, w, C2)
-        x = x.permute(0, 2, 1, 3).reshape(B, w, C2 * h)   # (B, T, C2*4)
+        x = x.reshape(B, h, w, C2)                         # (B, 8, w, C2)
+        x = x.permute(0, 2, 1, 3).reshape(B, w, C2 * h)   # (B, T, C2*8)
 
         # Final norm
         x = self.norm(x)

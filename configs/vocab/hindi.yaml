@@ -1,9 +1,0 @@
-# Hindi (Devanagari) Character + Bigram Vocabulary Configuration
-script_id: hi
-max_bigrams: 150
-# Total tokens: ~83 Latin + ~128 Devanagari + 150 bigrams + blank ≈ 362
-
-word_lists:
-  - training_data/word_lists/english_100k.txt
-  - training_data/word_lists/hindi_legal.txt
-output: training_data/vocabs/hi.json

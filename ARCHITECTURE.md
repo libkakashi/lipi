@@ -10,18 +10,18 @@
 Takes a cropped word image and outputs the text. Script identification and character recognition happen in a single forward pass through a Mixture of Experts architecture.
 
 ```
-Word Image (32 × W × 3)
-  → Color Projection (RGB → L+a → 1ch)
-  → ResNet Stem (stride 2×2, 64ch)       → (16 × W/2)
-  → Shared SWA (12 blocks, dim=288)      ← universal visual features
-  → LID-1 (13-group classifier)          ← which script family?
-  → Expert SWA Stage 1 (12 blocks)       ← group-specific features (h=16, w=W/2)
-  → Height Pool (16→4) + Width Pool (2×) → (h=4, w=W/4)
-  → Expert SWA Stage 2 (8 blocks)        ← deep group-specific features
-  → Height Pool (4→2), fold h into C
-  → LID-2 (per-script classifier)        ← which exact script?
-  → Per-Script CTC Head (T=W/4)          ← character sequence
-  → Output: decoded text
+Word Image (32 x W x 3)
+  -> Color Projection (RGB -> L+a -> 1ch)
+  -> ResNet Stem (stride 2x2, 64ch)       -> (16 x W/2)
+  -> Shared SWA (12 blocks, dim=288)      <- universal visual features
+  -> LID-1 (13-group classifier)          <- which script family?
+  -> Expert SWA Stage 1 (12 blocks)       <- group-specific features (h=16, w=W/2)
+  -> Height Pool (16->4) + Width Pool (2x) -> (h=4, w=W/4)
+  -> Expert SWA Stage 2 (8 blocks)        <- deep group-specific features
+  -> Height Pool (4->1), fold h into C
+  -> LID-2 (per-script classifier)        <- which exact script?
+  -> Per-Script CTC Head (T=W/4)          <- character sequence
+  -> Output: decoded text
 ```
 
 ---
@@ -51,49 +51,38 @@ Word Image (32 × W × 3)
 ### Shared Path (always active, ~13M params)
 
 ```
-ColorProjection:     Conv2d(2→32→16→1, 1×1)     641 params
-ResNet Stem:         depth=3, 64ch, stride 4×    526K params
-Shared SWA 4×4:      8 blocks, dim=288           8.0M params
-Shared SWA 4×16:     4 blocks, dim=288           4.0M params
-LID-1 Classifier:    attn pool (288→64→1) → MLP 288→576→288→13    354K params
+ColorProjection:     Conv2d(2->32->16->1, 1x1)     641 params
+ResNet Stem:         depth=3, 64ch, stride 4x       526K params
+Shared SWA 4x4:     8 blocks, dim=288              8.0M params
+Shared SWA 4x16:    4 blocks, dim=288              4.0M params
+LID-1 Classifier:   attn pool (288->64->1) -> MLP 288->576->288->13    354K params
 ```
 
 ### Expert Path (1 of 13 active, ~52M per group)
 
 ```
 Expert SWA Stage 1:  12 FullyExpertSWABlock, dim=288   12.0M/group
-Height Pool 8→4:     LearnedHeightPooling               13K
-Channel Projection:  Linear(288→576)                    166K
+Height Pool 8->4:    LearnedHeightPooling               13K
+Channel Projection:  Linear(288->576)                   166K
 Expert SWA Stage 2:  8 FullyExpertSWABlock, dim=576    31.9M/group
-Height Pool 4→1:     LearnedHeightPooling               4K
+Height Pool 4->1:    LearnedHeightPooling               4K
 LayerNorm:           dim=576                            1.2K
 ```
 
 ### CTC Heads (1 of 26 active, ~7M per script)
 
 ```
-LID-2:      attention pool → MLP (multi-script groups only)
+LID-2:      attention pool -> MLP (multi-script groups only)
 BiLSTM:     input=576, hidden=384, layers=2, bidirectional
-Projection: Linear(768 → vocab_size)
+Projection: Linear(768 -> vocab_size)
 ```
 
-### Per-Script Vocab Sizes
+### Encoding
 
-| Script | Tokens | Script | Tokens |
-|--------|--------|--------|--------|
-| latin | 797 | kannada | 146 |
-| cyrillic | 361 | telugu | 155 |
-| greek | 423 | malayalam | 173 |
-| arabic | 491 | tamil | 127 |
-| hebrew | 189 | sinhala | 147 |
-| han_kana | 2838 | thai | 142 |
-| korean | 373 | lao | 141 |
-| devanagari | 216 | burmese | 215 |
-| gurmukhi | 136 | khmer | 169 |
-| gujarati | 146 | armenian | 147 |
-| bengali | 154 | georgian | 183 |
-| odia | 148 | ethiopic | 518 |
-| emoji | 107 | tibetan | 267 |
+- **CJK (han_kana)**: 13-symbol arbitrary encoding + SEP + 2500 word-level BPE merges = 2514 vocab
+- **Korean**: 11-symbol decomposition + SEP + 2500 BPE = 2512 vocab
+- **Arabic**: 9-symbol decomposition + SEP + 2500 BPE = 2511 vocab
+- **Other scripts**: direct character tokens, CTC decoded
 
 ### Parameter Summary
 
@@ -112,7 +101,7 @@ Projection: Linear(768 → vocab_size)
 ### Loss Functions
 
 ```
-loss = CTC_loss + lid1_weight × LID1_loss + LID2_loss
+loss = CTC_loss + lid1_weight x LID1_loss + LID2_loss
 ```
 
 - **CTC loss**: per-script vocab slicing before log_softmax. No zero-padding dilution.
@@ -133,11 +122,6 @@ loss = CTC_loss + lid1_weight × LID1_loss + LID2_loss
 - Single-char images at 25% of word budget (adaptive reps)
 - Triple validation: font_covers_text + pre-aug ink + post-aug ink
 - 173 fonts with weighted diversity (70% clean, 20% handwriting, 10% display)
-
-### Decomposition
-
-- **Han_kana**: 13-symbol arbitrary encoding (27,584 CJK chars → 13 base symbols + SEP, word-level BPE)
-- **Korean**: hybrid jamo (rare syllables → 67 jamo, top-250 common syllables kept whole)
 
 ### Key Hyperparameters
 
@@ -164,7 +148,7 @@ checkpointing: all 32 SWA blocks (shared + expert)
 
 1. Ship shared weights (13M, always loaded) + LID-1
 2. User installs language packs (expert group + CTC heads, 25 MB each in FP4)
-3. LID-1 routes → load correct expert group → decode
+3. LID-1 routes -> load correct expert group -> decode
 4. Top-K fallback: if LID-1 uncertain, try top-2 groups, pick best CTC confidence
 
 ---
@@ -174,62 +158,43 @@ checkpointing: all 32 SWA blocks (shared + expert)
 ```
 src/
   model/
-    moe_encoder.py      LipiMoEEncoder (full model)
-    lid.py              SCRIPTS, GROUPS, LIDCoarse
+    encoder.py          LipiMoEEncoder (full model)
     attention.py        SWABlock, FullyExpertSWABlock
     stem.py             ResNetStem
     pooling.py          LearnedHeightPooling
     rope.py             RoPE2D
-  data/
-    vocab.py            Frozen vocab loading (hex files)
+    lid.py              SCRIPTS, GROUPS, LIDCoarse
+  encoding/
     decompose.py        CJK 13-symbol + Korean jamo decomposition
+    encoding.py         Script-aware encoding pipeline
+    tokenizer.py        Per-script tokenizers
+    vocab.py            Frozen vocab loading (hex files)
+    frozen_vocabs/      Pre-built vocab files per script
+  data/
+    augmentation.py     24 augmentation ops
+    color.py            L+a color projection
+    dataset.py          Dataset classes
     fonts.py            Font discovery, cmap validation
     rendering.py        Word/char rendering, ink detection
+    text_renderer.py    FreeType/PIL text rendering
+    width_sampler.py    Width distribution sampling
     word_lists.py       Word list loading
-    color.py            L+a color projection
-    augmentation.py     24 augmentation ops
-    renderer.py         FreeType/PIL text rendering
   training/
-    moe_losses.py       CTC, LID-1, LID-2 loss functions
+    dataloader.py       Data loading and batching
+    losses.py           CTC, LID-1, LID-2 loss functions
     routing.py          Routing mask computation
-    moe_data.py         Data loading, tokenization, encoding
-    moe_eval.py         Per-group/per-script evaluation
+    eval.py             Per-group/per-script evaluation
 
 scripts/
-    train_moe.py        Training orchestration
-    generate_data.py    Synthetic data generation
-    setup_fonts.py      Font downloading (173 fonts)
-    train_lid.py        LID-only training (legacy)
+  train.py              Training orchestration
+  generate.py           Synthetic data generation
+  build_vocab.py        Encoding/vocab builder
+  setup/                One-time setup (fonts, datasets, word lists)
+  tools/                Debugging utilities (renders, diagnostics, merging)
 
 tests/
-    test_moe_pipeline.py     83 tests: vocabs, tokenizers, model, losses, routing
-    test_font_rendering.py   32 tests: ink, cmap, per-script rendering
+  test_moe_pipeline.py       Vocabs, tokenizers, model, losses, routing
+  test_font_rendering.py     Ink, cmap, per-script rendering
+  test_cjk_integration.py    CJK encoding integration tests
+  test_lid.py                LID classifier tests
 ```
-
----
-
-## Results (18-script run, epoch 25)
-
-| Script | LID-1 | Word | Char |
-|--------|-------|------|------|
-| latin | 94.0% | 75.7% | 91.4% |
-| cyrillic | 92.7% | 67.4% | 80.0% |
-| greek | 92.7% | 85.0% | 96.5% |
-| arabic | 95.4% | 22.5% | 50.8% |
-| hebrew | 96.5% | 66.8% | 79.4% |
-| han_kana | 98.1% | 48.7% | 62.0% |
-| korean | 97.0% | 80.5% | 90.7% |
-| devanagari | 95.3% | 52.2% | 76.9% |
-| gurmukhi | 95.3% | 77.3% | 89.9% |
-| gujarati | 95.3% | 67.2% | 81.1% |
-| bengali | 95.3% | 53.0% | 73.2% |
-| kannada | 93.7% | 66.9% | 87.7% |
-| telugu | 93.7% | 57.1% | 81.0% |
-| malayalam | 93.7% | 71.5% | 88.0% |
-| tamil | 93.7% | 85.5% | 94.6% |
-| thai | 94.0% | 60.8% | 86.5% |
-| lao | 94.0% | 59.2% | 85.7% |
-| emoji | 99.5% | 99.5% | 99.5% |
-| **Overall** | **95.5%** | **65.8%** | **82.6%** |
-
-26-script run in progress. 8 new scripts (odia, sinhala, burmese, khmer, armenian, georgian, ethiopic, tibetan) training from scratch.
