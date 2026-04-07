@@ -176,7 +176,8 @@ def load_and_prepare_data(args, device):
     else:
         print("Pre-encoding labels (old shards without target_ids)...")
         target_tensor, target_len_tensor = encode_labels(
-            labels, group_ids, local_script_ids, list(GROUPS), group_tokenizers)
+            labels, group_ids, local_script_ids, list(GROUPS), group_tokenizers,
+            group_script_names)
     print(f"  Max label length: {target_len_tensor.max().item()}")
 
     # Pre-filter empty/too-long labels
