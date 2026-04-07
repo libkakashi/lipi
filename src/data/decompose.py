@@ -210,19 +210,66 @@ def _is_encoding_token(ch: str, script_name: str) -> bool:
     return False
 
 
-def _apply_bpe(parts: list[str], bpe_merges: list[tuple[str, str, str]]) -> list[str]:
-    """Apply BPE merges sequentially. Each merge is applied in one pass."""
-    for a, b, merged in bpe_merges:
+# Per-script BPE merge lookup: {(a, b): (merged, priority)}
+_bpe_lookup: dict[str, dict[tuple[str, str], tuple[str, int]]] = {}
+
+
+def _get_bpe_lookup(script_name: str, bpe_merges: list[tuple[str, str, str]]
+                    ) -> dict[tuple[str, str], tuple[str, int]]:
+    """Build or return cached merge lookup for priority-based BPE."""
+    if script_name not in _bpe_lookup:
+        lookup: dict[tuple[str, str], tuple[str, int]] = {}
+        for priority, (a, b, merged) in enumerate(bpe_merges):
+            pair = (a, b)
+            if pair not in lookup:  # first occurrence has highest priority
+                lookup[pair] = (merged, priority)
+        _bpe_lookup[script_name] = lookup
+    return _bpe_lookup[script_name]
+
+
+def _apply_bpe(parts: list[str], bpe_merges: list[tuple[str, str, str]],
+               script_name: str = "") -> list[str]:
+    """Apply BPE merges using priority-based pair merging.
+
+    Instead of 2500 sequential full passes, uses a lookup dict to find
+    mergeable pairs and processes them in priority order. Much faster
+    for short sequences (typical words are 3-15 chars).
+    """
+    if len(parts) <= 1:
+        return parts
+
+    lookup = _get_bpe_lookup(script_name, bpe_merges)
+
+    # Linked-list style: use indices for efficient merge
+    # For short sequences, iterative approach with lookup is fast enough
+    while True:
+        # Find the highest-priority (lowest index) mergeable pair
+        best_priority = len(bpe_merges)
+        best_pos = -1
+        best_merged = ""
+        for i in range(len(parts) - 1):
+            pair = (parts[i], parts[i + 1])
+            entry = lookup.get(pair)
+            if entry and entry[1] < best_priority:
+                best_merged, best_priority = entry
+                best_pos = i
+
+        if best_pos < 0:
+            break  # no more merges possible
+
+        # Apply this merge at all occurrences (same priority)
+        a, b = parts[best_pos], parts[best_pos + 1]
         new_parts: list[str] = []
         i = 0
         while i < len(parts):
             if i + 1 < len(parts) and parts[i] == a and parts[i + 1] == b:
-                new_parts.append(merged)
+                new_parts.append(best_merged)
                 i += 2
             else:
                 new_parts.append(parts[i])
                 i += 1
         parts = new_parts
+
     return parts
 
 
@@ -263,7 +310,7 @@ def _decompose_arbitrary(text: str, script_name: str) -> str:
     # Step 2: always apply word-level BPE merges across character boundaries
     bpe_merges = enc["bpe_merges"]
     if bpe_merges:
-        parts = _apply_bpe(parts, bpe_merges)
+        parts = _apply_bpe(parts, bpe_merges, script_name)
 
     result = "".join(parts)
     cache[text] = result

@@ -146,6 +146,18 @@ def build_script_tokenizers(
     return group_tokenizers, group_vocab_sizes, group_script_names
 
 
+def _encode_one(args: tuple) -> tuple[list[int], int]:
+    """Encode a single label. Used by encode_labels for parallel processing."""
+    label, gid, lsid, group_name, tok = args
+    if group_name in DECOMPOSE_GROUPS:
+        label_tokens = decompose_text(label, group_name)
+    else:
+        label_tokens = label
+    ids = tok.encode(label_tokens)
+    n_dropped = len(label_tokens) - len(ids)
+    return ids, n_dropped
+
+
 def encode_labels(
     labels: list[str],
     group_ids: torch.Tensor,
@@ -155,16 +167,19 @@ def encode_labels(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pre-encode all labels using each sample's script tokenizer.
 
+    Uses multiprocessing for large datasets (>10K samples).
+
     Returns:
         target_tensor: (N, max_len) padded token IDs
         target_len_tensor: (N,) actual lengths
     """
     n_groups = len(active_groups)
-    max_len = 0
-    encoded = []
-    oov_chars = 0
-    oov_samples = 0
-    for label, gid, lsid in zip(labels, group_ids.tolist(), local_script_ids.tolist()):
+    gid_list = group_ids.tolist()
+    lsid_list = local_script_ids.tolist()
+
+    # Build task args
+    tasks = []
+    for label, gid, lsid in zip(labels, gid_list, lsid_list):
         if gid < 0 or gid >= n_groups:
             raise IndexError(f"group_id {gid} out of range [0, {n_groups})")
         if lsid < 0 or lsid >= len(group_tokenizers[gid]):
@@ -172,26 +187,38 @@ def encode_labels(
                 f"local_script_id {lsid} out of range for group {gid} "
                 f"(has {len(group_tokenizers[gid])} scripts)"
             )
-
         group_name = active_groups[gid]
-        if group_name in DECOMPOSE_GROUPS:
-            label_tokens = decompose_text(label, group_name)
-        else:
-            label_tokens = label
         tok = group_tokenizers[gid][lsid]
-        ids = tok.encode(label_tokens)
-        n_dropped = len(label_tokens) - len(ids)
-        if n_dropped > 0:
-            oov_chars += n_dropped
-            oov_samples += 1
-        encoded.append(ids)
-        max_len = max(max_len, len(ids))
+        tasks.append((label, gid, lsid, group_name, tok))
+
+    # Process — use thread pool for I/O-bound decompose (cache + dict lookups)
+    max_len = 0
+    encoded = []
+    oov_chars = 0
+    oov_samples = 0
+
+    if len(tasks) > 10000:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for ids, n_dropped in pool.map(_encode_one, tasks, chunksize=1000):
+                if n_dropped > 0:
+                    oov_chars += n_dropped
+                    oov_samples += 1
+                encoded.append(ids)
+                max_len = max(max_len, len(ids))
+    else:
+        for task in tasks:
+            ids, n_dropped = _encode_one(task)
+            if n_dropped > 0:
+                oov_chars += n_dropped
+                oov_samples += 1
+            encoded.append(ids)
+            max_len = max(max_len, len(ids))
+
     if oov_chars > 0:
         print(f"  WARNING: {oov_chars} OOV chars dropped across {oov_samples} samples "
               f"({100*oov_samples/len(labels):.1f}% of data has corrupted labels)")
 
-    # Prevent zero-width tensor when every label encodes to an empty sequence
-    # (e.g. all-OOV batch). At least 1 column is needed for valid downstream ops.
     if max_len == 0:
         max_len = 1
     target_tensor = torch.zeros(len(encoded), max_len, dtype=torch.long)
