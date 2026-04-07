@@ -8,9 +8,10 @@ Architecture:
     -> Shared SWA 8×8: character-level universal features   (h=16, w=W/2)
     -> Shared SWA 8×32: sequence-level universal features
     -> LID-1: 13-group classification
-    -> Expert SWA 8×8: group-specific character features    (h=16, w=W/2)
+    -> Expert SWA 8×8: group-specific features (high-res)   (h=16, w=W/2)
     -> Height pool 16→8 + Width pool 2×                    (h=8, w=W/4)
-    -> Expert SWA 8×16: group-specific sequence features   (h=8, w=W/4)
+    -> Expert SWA 8×8: group-specific features (low-res)   (h=8, w=W/4)
+    -> Expert SWA 8×8: group-specific sequence features    (h=8, w=W/4)
     -> Fold h=8 into channels → (B, W/4, C*8)
     -> LayerNorm
     -> LID-2: per-script classification (multi-script groups only)
@@ -133,6 +134,7 @@ class LipiMoEEncoder(nn.Module):
         # Expert SWA Stage 1
         stage1_dim: int = 288,
         stage1_blocks: int = 12,
+        stage1_downsample_after: int = 4,
         stage1_mlp_ratio: int = 4,
         # Expert SWA Stage 2
         stage2_dim: int = 576,
@@ -187,6 +189,7 @@ class LipiMoEEncoder(nn.Module):
                                 shift=(i % 2 == 1), mlp_ratio=stage1_mlp_ratio)
             for i in range(stage1_blocks)
         ])
+        self.stage1_downsample_after = stage1_downsample_after
 
         # Height pool 16→8 + width pool 2×
         self.pool1 = LearnedHeightPooling(channels=stage1_dim, h_in=16, h_out=8)
@@ -199,10 +202,10 @@ class LipiMoEEncoder(nn.Module):
         # Channel projection
         self.proj2 = nn.Linear(stage1_dim, stage2_dim) if stage1_dim != stage2_dim else nn.Identity()
 
-        # Expert SWA Stage 2
+        # Expert SWA Stage 2 (8×8 windows at h=8, full vertical coverage)
         self.stage2 = nn.ModuleList([
             FullyExpertSWABlock(dim=stage2_dim, num_heads=stage2_dim // 32,
-                                num_groups=num_groups, window_h=8, window_w=16,
+                                num_groups=num_groups, window_h=8, window_w=8,
                                 shift=(i % 2 == 1), mlp_ratio=stage2_mlp_ratio)
             for i in range(stage2_blocks)
         ])
@@ -291,8 +294,8 @@ class LipiMoEEncoder(nn.Module):
         # Project to stage1
         x = self.proj1(x)
 
-        # Expert SWA Stage 1
-        for block in self.stage1:
+        # Expert SWA Stage 1 — high-res blocks before downsampling
+        for block in self.stage1[:self.stage1_downsample_after]:
             x = block(x, h=h, w=w, group_ids=group_ids)
 
         # Height pool 16→8, width pool 2×
@@ -305,6 +308,10 @@ class LipiMoEEncoder(nn.Module):
         x = self.width_pool(x)
         w = x.shape[2]
         x = x.reshape(B, h, C1, w).permute(0, 1, 3, 2).reshape(B, h * w, C1)
+
+        # Expert SWA Stage 1 — low-res blocks after downsampling
+        for block in self.stage1[self.stage1_downsample_after:]:
+            x = block(x, h=h, w=w, group_ids=group_ids)
 
         # Project to stage2
         x = self.proj2(x)

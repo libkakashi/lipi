@@ -70,6 +70,8 @@ def parse_args():
     parser.add_argument("--shared-blocks-4x16", type=int, default=2)
     parser.add_argument("--stage1-dim", type=int, default=256)
     parser.add_argument("--stage1-blocks", type=int, default=6)
+    parser.add_argument("--stage1-downsample-after", type=int, default=4,
+                        help="Downsample after this many stage1 blocks")
     parser.add_argument("--stage2-dim", type=int, default=256)
     parser.add_argument("--stage2-blocks", type=int, default=4)
     parser.add_argument("--head-hidden", type=int, default=384)
@@ -231,6 +233,7 @@ def build_model(args, n_groups, group_script_vocab_sizes, group_script_names, de
         shared_blocks_4x16=args.shared_blocks_4x16,
         stage1_dim=args.stage1_dim,
         stage1_blocks=args.stage1_blocks,
+        stage1_downsample_after=args.stage1_downsample_after,
         stage2_dim=args.stage2_dim,
         stage2_blocks=args.stage2_blocks,
         num_groups=n_groups,
