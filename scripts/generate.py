@@ -208,46 +208,53 @@ def filter_fonts_by_style(fonts: list[str], style: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def get_renderable_chars(script: str) -> list[str]:
-    """Get standalone-renderable characters for training image generation.
+    """Get standalone-renderable characters/clusters for training image generation.
 
-    For han_kana: returns all CJK Unified + Ext-A characters plus kana,
-    NOT the decomposition tokens (atoms/BPE). The actual characters are
-    rendered as images; decomposition into tokens happens during training.
-
-    For other scripts: returns chars from the frozen vocab, excluding
-    blank, non-printable, and combining marks.
+    For han_kana: returns all CJK Unified + Ext-A characters plus kana.
+    For fusion scripts: returns base chars + all fusion clusters.
+    For no-fusion scripts: returns chars from the codec.
+    For korean: returns chars from the codec.
     """
     import unicodedata
-    from src.encoding.tokenizer import BLANK_TOKEN
+    from src.encoding.config import (
+        NO_FUSION_SCRIPTS, FUSION_BASE_CHARS, get_fusion_codec,
+        get_korean_codec,
+    )
 
     if script == "han_kana":
         chars = []
-        # CJK Ext-A (U+3400-U+4DBF)
         for cp in range(0x3400, 0x4DC0):
             c = chr(cp)
             if unicodedata.category(c) != 'Cn':
                 chars.append(c)
-        # CJK Unified (U+4E00-U+9FFF)
         for cp in range(0x4E00, 0xA000):
             c = chr(cp)
             if unicodedata.category(c) != 'Cn':
                 chars.append(c)
-        # Hiragana (U+3041-U+3096)
         for cp in range(0x3041, 0x3097):
             chars.append(chr(cp))
-        # Katakana (U+30A1-U+30FA + prolonged sound mark)
         for cp in range(0x30A1, 0x30FB):
             chars.append(chr(cp))
-        chars.append('\u30FC')  # ー (prolonged sound mark)
+        chars.append('\u30FC')
         return chars
 
-    group = SCRIPT_TO_GROUP[script]
-    vocab = build_script_vocab(script)
-    return [ch for ch in vocab
-            if ch.strip()
-            and ord(ch) > 32
-            and ch != BLANK_TOKEN
-            and not unicodedata.category(ch).startswith('M')]
+    if script in FUSION_BASE_CHARS:
+        codec = get_fusion_codec(script)
+        # Base chars (single codepoints) + fusion clusters (multi-codepoint)
+        return codec.base_chars + codec.fusions
+
+    if script == "korean":
+        codec = get_korean_codec()
+        return [t for t in codec.tokens
+                if t.strip() and ord(t[0]) > 32]
+
+    if script in NO_FUSION_SCRIPTS:
+        codec = NO_FUSION_SCRIPTS[script]
+        return [c for c in codec.chars
+                if c.strip() and ord(c) > 32
+                and not unicodedata.category(c).startswith('M')]
+
+    return []
 
 
 # ---------------------------------------------------------------------------
