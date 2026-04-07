@@ -444,7 +444,7 @@ class TestCharRenderingCoverage:
     def test_every_script_char_has_cmap_font(self):
         """Every renderable char in every script must have at least one font
         with a cmap entry. Chars with zero fonts = guaranteed tofu in training."""
-        from scripts.generate_data import get_renderable_chars
+        from scripts.generate import get_renderable_chars
 
         failures = []
         for script in SCRIPTS:
@@ -478,7 +478,7 @@ class TestCharRenderingCoverage:
     def test_render_all_vocab_chars_have_ink(self):
         """Actually render every vocab char for every script and verify ink.
         This catches fonts that have cmap entries but render blank/invisible."""
-        from scripts.generate_data import get_renderable_chars
+        from scripts.generate import get_renderable_chars
 
         failures = []
         for script in SCRIPTS:
