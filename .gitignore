@@ -57,6 +57,10 @@ tmp/
 training_data/fonts/
 debug/
 training_data/corpora/
+# Keep fusion TSVs, CJK vocab, and visual mapping (small, needed at runtime)
+!training_data/corpora/*_fusions.tsv
+!training_data/corpora/cjk_vocab.txt
+!training_data/corpora/cjk_visual_mapping.tsv
 render_check_*/
 training_data/word_lists/raw_*/
 
