@@ -10,7 +10,7 @@ Each script's full vocab = [BLANK_TOKEN] + chars from file.
 
 from pathlib import Path
 
-from src.data.tokenizer import BLANK_TOKEN
+from src.encoding.tokenizer import BLANK_TOKEN
 
 _VOCAB_DIR = Path(__file__).parent / "frozen_vocabs"
 

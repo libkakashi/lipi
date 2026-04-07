@@ -24,7 +24,7 @@ from src.model.lid import SCRIPT_TO_GROUP, LIDCoarse
 from src.model.stem import ResNetStem
 from src.model.attention import SWABlock
 from src.data.color import ColorProjection
-from src.training.moe_data import (
+from src.training.dataloader import (
     load_shards, build_script_tokenizers, encode_labels,
     remap_ids, MoEDataset, collate_moe,
 )

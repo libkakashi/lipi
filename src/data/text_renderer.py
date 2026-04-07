@@ -5,7 +5,7 @@ Much faster than PIL's ImageFont for bulk rendering.
 Supports all Unicode scripts via FreeType + any .ttf/.otf font.
 
 Usage:
-    from src.data.renderer import render_text
+    from src.data.text_renderer import render_text
     img = render_text("Hello", "/path/to/font.ttf", height=32)
     # Returns PIL.Image.Image (RGB) or None on failure
 """

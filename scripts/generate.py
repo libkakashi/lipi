@@ -31,7 +31,7 @@ from src.data.augmentation import (
     noise, color_jitter, to_grayscale,
     occlusion, weather_damage,
 )
-from src.data.vocab import build_script_vocab
+from src.encoding.vocab import build_script_vocab
 from src.data.rendering import (
     render_word, render_emoji, image_has_ink,
     resize_or_pad, filter_fonts_by_cmap, font_covers_text,
@@ -66,7 +66,7 @@ def _ensure_tokenizers():
         return
 
     import io
-    from src.training.moe_data import build_script_tokenizers
+    from src.training.dataloader import build_script_tokenizers
 
     _worker_active_groups = list(GROUPS)
     _worker_all_scripts = list(SCRIPT_TO_GROUP.keys())
@@ -96,7 +96,7 @@ def encode_labels_for_shard(labels: list[str], script: str) -> tuple[torch.Tenso
         target_ids: (N, max_len) zero-padded token IDs, dtype long
         target_lens: (N,) actual lengths, dtype long
     """
-    from src.data.decompose import decompose_text, DECOMPOSE_GROUPS
+    from src.encoding.decompose import decompose_text, DECOMPOSE_GROUPS
 
     _ensure_tokenizers()
     local_gid, local_sid = _get_local_group_and_script(script)
@@ -227,7 +227,7 @@ def get_renderable_chars(script: str) -> list[str]:
     blank, non-printable, and combining marks.
     """
     import unicodedata
-    from src.data.tokenizer import BLANK_TOKEN
+    from src.encoding.tokenizer import BLANK_TOKEN
 
     if script == "han_kana":
         chars = []

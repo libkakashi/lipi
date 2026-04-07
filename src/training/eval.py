@@ -8,7 +8,7 @@ per-group and per-script.
 import torch
 from torch import Tensor
 
-from src.data.decompose import reconstruct_text, DECOMPOSE_GROUPS
+from src.encoding.decompose import reconstruct_text, DECOMPOSE_GROUPS
 
 
 @torch.no_grad()

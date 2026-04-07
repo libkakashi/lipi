@@ -15,7 +15,7 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 def _load_vocab():
-    from src.data.vocab import build_script_vocab
+    from src.encoding.vocab import build_script_vocab
     return build_script_vocab("han_kana", "sino_japanese")
 
 
@@ -35,7 +35,7 @@ class TestCJKVocabLoading:
         assert len(vocab) > 200, f"Vocab suspiciously small: {len(vocab)}"
 
     def test_blank_token_at_index_zero(self):
-        from src.data.tokenizer import BLANK_TOKEN
+        from src.encoding.tokenizer import BLANK_TOKEN
         vocab = _load_vocab()
         assert vocab[0] == BLANK_TOKEN
 
@@ -53,7 +53,7 @@ class TestCJKVocabLoading:
 
     def test_sep_in_vocab(self):
         """SEP token must be in the frozen vocab."""
-        from src.data.decompose import SEP_CHAR
+        from src.encoding.decompose import SEP_CHAR
         vocab = _load_vocab()
         assert SEP_CHAR in vocab, f"SEP token U+{ord(SEP_CHAR):04X} not in vocab"
 
@@ -66,12 +66,12 @@ class TestCJKTokenizerRoundtrip:
 
     @pytest.fixture
     def tok(self):
-        from src.data.tokenizer import LipiTokenizer
+        from src.encoding.tokenizer import LipiTokenizer
         return LipiTokenizer(vocab=_load_vocab())
 
     def test_cjk_roundtrip(self, tok):
         """CJK text: decompose -> encode -> decode -> reconstruct."""
-        from src.data.decompose import decompose_han_kana, reconstruct_han_kana
+        from src.encoding.decompose import decompose_han_kana, reconstruct_han_kana
         words = ["学校", "日本語", "東京", "人工知能"]
         for w in words:
             decomposed = decompose_han_kana(w)
@@ -82,7 +82,7 @@ class TestCJKTokenizerRoundtrip:
 
     def test_kana_roundtrip(self, tok):
         """Pure kana passes through decomposition unchanged."""
-        from src.data.decompose import decompose_han_kana, reconstruct_han_kana
+        from src.encoding.decompose import decompose_han_kana, reconstruct_han_kana
         words = ["ひらがな", "カタカナ", "あいうえお"]
         for w in words:
             decomposed = decompose_han_kana(w)
@@ -93,7 +93,7 @@ class TestCJKTokenizerRoundtrip:
 
     def test_mixed_kana_cjk_roundtrip(self, tok):
         """Mixed kana + CJK text."""
-        from src.data.decompose import decompose_han_kana, reconstruct_han_kana
+        from src.encoding.decompose import decompose_han_kana, reconstruct_han_kana
         text = "こんにちは世界"
         decomposed = decompose_han_kana(text)
         ids = tok.encode(decomposed)
@@ -103,7 +103,7 @@ class TestCJKTokenizerRoundtrip:
 
     def test_encode_ids_in_range(self, tok):
         """All encoded IDs must be < vocab_size."""
-        from src.data.decompose import decompose_han_kana
+        from src.encoding.decompose import decompose_han_kana
         vs = _vocab_size()
         texts = ["的一是不了在人有我他", "学校日本語東京", "こんにちは世界"]
         for text in texts:
@@ -120,7 +120,7 @@ class TestCJKTokenizerRoundtrip:
 class TestDecomposeReconstruct:
 
     def test_common_chars(self):
-        from src.data.decompose import decompose_han_kana, reconstruct_han_kana
+        from src.encoding.decompose import decompose_han_kana, reconstruct_han_kana
         text = "的一是不了在人有我他"
         decomposed = decompose_han_kana(text)
         result = reconstruct_han_kana(list(decomposed))
@@ -128,7 +128,7 @@ class TestDecomposeReconstruct:
 
     def test_distinct_chars_have_distinct_codes(self):
         """Different CJK chars must produce different decompositions."""
-        from src.data.decompose import decompose_han_kana
+        from src.encoding.decompose import decompose_han_kana
         chars = list("的一是不了在人有我他国学日本語")
         codes = [decompose_han_kana(c) for c in chars]
         for i in range(len(chars)):
@@ -137,13 +137,13 @@ class TestDecomposeReconstruct:
                     f"{chars[i]!r} and {chars[j]!r} have same code: {codes[i]!r}")
 
     def test_mixed_kana_cjk(self):
-        from src.data.decompose import decompose_han_kana, reconstruct_han_kana
+        from src.encoding.decompose import decompose_han_kana, reconstruct_han_kana
         text = "こんにちは世界"
         result = reconstruct_han_kana(list(decompose_han_kana(text)))
         assert result == text
 
     def test_pure_kana(self):
-        from src.data.decompose import decompose_han_kana, reconstruct_han_kana
+        from src.encoding.decompose import decompose_han_kana, reconstruct_han_kana
         text = "ひらがなカタカナ"
         decomposed = decompose_han_kana(text)
         # Kana are now encoded (not pass-through), so decomposed != text
@@ -153,19 +153,19 @@ class TestDecomposeReconstruct:
         assert result == text
 
     def test_empty_string(self):
-        from src.data.decompose import decompose_han_kana, reconstruct_han_kana
+        from src.encoding.decompose import decompose_han_kana, reconstruct_han_kana
         assert decompose_han_kana("") == ""
         assert reconstruct_han_kana([]) == ""
 
     def test_single_char(self):
-        from src.data.decompose import decompose_han_kana, reconstruct_han_kana
+        from src.encoding.decompose import decompose_han_kana, reconstruct_han_kana
         for ch in "的あア":
             decomposed = decompose_han_kana(ch)
             result = reconstruct_han_kana(list(decomposed))
             assert result == ch, f"Single char failed: {ch!r}"
 
     def test_punctuation(self):
-        from src.data.decompose import decompose_han_kana, reconstruct_han_kana
+        from src.encoding.decompose import decompose_han_kana, reconstruct_han_kana
         text = "「你好！」"
         decomposed = decompose_han_kana(text)
         result = reconstruct_han_kana(list(decomposed))
@@ -173,7 +173,7 @@ class TestDecomposeReconstruct:
 
     def test_ext_a_chars(self):
         """CJK Extension A chars (U+3400..U+4DBF)."""
-        from src.data.decompose import (
+        from src.encoding.decompose import (
             decompose_han_kana, reconstruct_han_kana,
             _load_arbitrary_encoding,
         )
@@ -231,8 +231,8 @@ class TestNoIDOverflow:
 
     def test_all_chars_encode_within_range(self):
         """Encode all 27,584 CJK chars, verify all IDs < vocab_size."""
-        from src.data.tokenizer import LipiTokenizer
-        from src.data.decompose import decompose_han_kana
+        from src.encoding.tokenizer import LipiTokenizer
+        from src.encoding.decompose import decompose_han_kana
 
         vocab = _load_vocab()
         tok = LipiTokenizer(vocab=vocab)
@@ -269,7 +269,7 @@ class TestNoDuplicateSequences:
 
     def test_unique_token_sequences(self):
         """All 27,584 chars must have unique token sequences."""
-        from src.data.decompose import _load_arbitrary_encoding
+        from src.encoding.decompose import _load_arbitrary_encoding
         enc = _load_arbitrary_encoding("han_kana")
         cjk_ct = enc["char_to_tokens"]
 
@@ -301,7 +301,7 @@ class TestCTCHeadCompatibility:
 
     def test_ctc_head_accepts_vocab_size(self):
         """CTCHead can be created with actual vocab_size."""
-        from src.model.moe_encoder import CTCHead
+        from src.model.encoder import CTCHead
         vs = _vocab_size()
         head = CTCHead(enc_dim=384, vocab_size=vs)
         assert head.vocab_size == vs
@@ -309,7 +309,7 @@ class TestCTCHeadCompatibility:
 
     def test_group_ctc_module_accepts_vocab_size(self):
         """GroupCTCModule accepts actual vocab size."""
-        from src.model.moe_encoder import GroupCTCModule
+        from src.model.encoder import GroupCTCModule
         vs = _vocab_size()
         gcm = GroupCTCModule(
             enc_dim=384,
@@ -320,7 +320,7 @@ class TestCTCHeadCompatibility:
 
     def test_vocab_size_flows_through_model_config(self):
         """Verify the vocab file produces a size accepted by CTCHead."""
-        from src.model.moe_encoder import CTCHead
+        from src.model.encoder import CTCHead
         vs = _vocab_size()
         head = CTCHead(enc_dim=384, vocab_size=vs)
         assert head.proj.out_features == vs
@@ -334,8 +334,8 @@ class TestEvalDecodePath:
 
     def test_ctc_greedy_decode_simulation(self):
         """Simulate CTC greedy decode -> tok.decode() -> reconstruct."""
-        from src.data.tokenizer import LipiTokenizer
-        from src.data.decompose import decompose_han_kana, reconstruct_han_kana
+        from src.encoding.tokenizer import LipiTokenizer
+        from src.encoding.decompose import decompose_han_kana, reconstruct_han_kana
 
         tok = LipiTokenizer(vocab=_load_vocab())
 
@@ -365,14 +365,14 @@ class TestEvalDecodePath:
 
     def test_decode_with_only_blanks(self):
         """All-blank CTC output should produce empty string."""
-        from src.data.tokenizer import LipiTokenizer
+        from src.encoding.tokenizer import LipiTokenizer
         tok = LipiTokenizer(vocab=_load_vocab())
         assert tok.decode([0, 0, 0]) == ""
 
     def test_decode_skips_blank_correctly(self):
         """Blank tokens (ID 0) are filtered out during decode."""
-        from src.data.tokenizer import LipiTokenizer
-        from src.data.decompose import decompose_han_kana
+        from src.encoding.tokenizer import LipiTokenizer
+        from src.encoding.decompose import decompose_han_kana
         tok = LipiTokenizer(vocab=_load_vocab())
 
         decomposed = decompose_han_kana("日")
@@ -389,7 +389,7 @@ class TestEncoding:
 
     def test_all_codes_use_base_symbols_and_sep(self):
         """All char codes should only contain base symbols + SEP + BPE tokens."""
-        from src.data.decompose import _load_arbitrary_encoding
+        from src.encoding.decompose import _load_arbitrary_encoding
         enc = _load_arbitrary_encoding("han_kana")
         cjk_ct = enc["char_to_tokens"]
 
@@ -401,7 +401,7 @@ class TestEncoding:
 
     def test_cjk_decomposition_produces_encoding_tokens(self):
         """Decomposing CJK chars should produce only encoding tokens, not the chars."""
-        from src.data.decompose import decompose_han_kana
+        from src.encoding.decompose import decompose_han_kana
         text = "的一是"
         decomposed = decompose_han_kana(text)
         # Decomposed text should NOT contain the original CJK chars
@@ -411,7 +411,7 @@ class TestEncoding:
 
     def test_sep_not_added_for_kana(self):
         """Kana chars should NOT get SEP tokens."""
-        from src.data.decompose import decompose_han_kana, SEP_CHAR
+        from src.encoding.decompose import decompose_han_kana, SEP_CHAR
         text = "あいうえお"
         decomposed = decompose_han_kana(text)
         assert SEP_CHAR not in decomposed
@@ -425,7 +425,7 @@ class TestBPETokens:
 
     def test_bpe_tokens_are_pua_chars(self):
         """BPE merged tokens should be PUA characters (U+E00D+)."""
-        from src.data.decompose import _load_arbitrary_encoding
+        from src.encoding.decompose import _load_arbitrary_encoding
         enc = _load_arbitrary_encoding("han_kana")
         cjk_ct = enc["char_to_tokens"]
 
@@ -440,7 +440,7 @@ class TestBPETokens:
 
     def test_bpe_tokens_in_vocab(self):
         """All BPE tokens from char codes table are in vocab."""
-        from src.data.decompose import _load_arbitrary_encoding
+        from src.encoding.decompose import _load_arbitrary_encoding
         enc = _load_arbitrary_encoding("han_kana")
         cjk_ct = enc["char_to_tokens"]
 

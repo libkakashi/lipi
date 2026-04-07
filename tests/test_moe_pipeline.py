@@ -47,7 +47,7 @@ def lid_config():
 
 @pytest.fixture(scope="module")
 def all_vocabs():
-    from src.data.vocab import build_script_vocab
+    from src.encoding.vocab import build_script_vocab
     from src.model.lid import SCRIPTS, SCRIPT_TO_GROUP
     vocabs = {}
     for script in SCRIPTS:
@@ -58,8 +58,8 @@ def all_vocabs():
 
 @pytest.fixture(scope="module")
 def all_tokenizers():
-    from src.data.vocab import build_script_vocab
-    from src.data.tokenizer import LipiTokenizer
+    from src.encoding.vocab import build_script_vocab
+    from src.encoding.tokenizer import LipiTokenizer
     from src.model.lid import SCRIPTS, SCRIPT_TO_GROUP
     tokenizers = {}
     for script in SCRIPTS:
@@ -110,8 +110,8 @@ def script_extra_files():
 @pytest.fixture(scope="module")
 def model_and_vocabs():
     """Build model with frozen vocabs — shared across tests."""
-    from src.model.moe_encoder import LipiMoEEncoder
-    from src.data.vocab import get_all_script_vocabs
+    from src.model.encoder import LipiMoEEncoder
+    from src.encoding.vocab import get_all_script_vocabs
     from src.model.lid import SCRIPTS, SCRIPT_TO_GROUP
 
     active_scripts = list(SCRIPTS)
@@ -186,7 +186,7 @@ class TestFrozenVocabContent:
     """Tests for the actual vocab content loaded by build_script_vocab."""
 
     def test_blank_token_at_index_zero(self, all_vocabs):
-        from src.data.tokenizer import BLANK_TOKEN
+        from src.encoding.tokenizer import BLANK_TOKEN
         for script, vocab in all_vocabs.items():
             assert vocab[0] == BLANK_TOKEN, (
                 f"{script}: vocab[0] is {repr(vocab[0])}")
@@ -488,7 +488,7 @@ class TestVocabCoverage:
         """Non-decomposed scripts: every char in words is in vocab.
         Allow small number of foreign chars (e.g. Latin in Gurmukhi word lists)."""
         from src.model.lid import SCRIPT_TO_GROUP
-        from src.data.decompose import DECOMPOSE_GROUPS
+        from src.encoding.decompose import DECOMPOSE_GROUPS
 
         for script, words in script_word_lists.items():
             if script == "emoji":
@@ -511,7 +511,7 @@ class TestVocabCoverage:
         """Decomposed scripts: every decomposed char is in vocab.
         Allow small number of missing chars (e.g. rare Arabic chars)."""
         from src.model.lid import SCRIPT_TO_GROUP
-        from src.data.decompose import decompose_text, DECOMPOSE_GROUPS
+        from src.encoding.decompose import decompose_text, DECOMPOSE_GROUPS
 
         for script, words in script_word_lists.items():
             group = SCRIPT_TO_GROUP[script]
@@ -532,7 +532,7 @@ class TestVocabCoverage:
     def test_extra_file_coverage(self, all_vocabs, script_extra_files):
         """Extra word list files (e.g., french.txt for latin) are also covered."""
         from src.model.lid import SCRIPT_TO_GROUP
-        from src.data.decompose import decompose_text, DECOMPOSE_GROUPS
+        from src.encoding.decompose import decompose_text, DECOMPOSE_GROUPS
 
         for script, extra_files in script_extra_files.items():
             if script not in all_vocabs:
@@ -580,7 +580,7 @@ class TestTokenizers:
 
     def test_encode_never_empty_for_nonempty_word(self, all_tokenizers, script_word_lists):
         """A non-empty word should produce at least 1 token."""
-        from src.data.decompose import decompose_text, DECOMPOSE_GROUPS
+        from src.encoding.decompose import decompose_text, DECOMPOSE_GROUPS
         from src.model.lid import SCRIPT_TO_GROUP
 
         for script, tok in all_tokenizers.items():
@@ -593,8 +593,8 @@ class TestTokenizers:
                     f"{script}: empty encode for {repr(w)}")
 
     def test_encode_decode_roundtrip(self, all_tokenizers, script_word_lists):
-        from src.data.decompose import decompose_text, reconstruct_text, DECOMPOSE_GROUPS
-        from src.data.decompose import _load_arbitrary_encoding
+        from src.encoding.decompose import decompose_text, reconstruct_text, DECOMPOSE_GROUPS
+        from src.encoding.decompose import _load_arbitrary_encoding
         from src.model.lid import SCRIPT_TO_GROUP
 
         def _all_chars_in_vocab(word, vocab_set):
@@ -630,8 +630,8 @@ class TestTokenizers:
         """Test ALL words (not just 100) for decomposed scripts.
         han_kana and korean have special decomposition that must roundtrip.
         Only tests words whose chars are all in the encoding's character set."""
-        from src.data.decompose import decompose_text, reconstruct_text, DECOMPOSE_GROUPS
-        from src.data.decompose import _load_arbitrary_encoding
+        from src.encoding.decompose import decompose_text, reconstruct_text, DECOMPOSE_GROUPS
+        from src.encoding.decompose import _load_arbitrary_encoding
         from src.model.lid import SCRIPT_TO_GROUP
 
         def _all_chars_encodable(word, script_name):
@@ -671,7 +671,7 @@ class TestTokenizers:
 
     def test_encode_ids_in_range(self, all_tokenizers, script_word_lists):
         """All encoded IDs are within [1, vocab_size-1] (no blank, no overflow)."""
-        from src.data.decompose import decompose_text, DECOMPOSE_GROUPS
+        from src.encoding.decompose import decompose_text, DECOMPOSE_GROUPS
         from src.model.lid import SCRIPT_TO_GROUP
 
         for script, tok in all_tokenizers.items():
@@ -692,7 +692,7 @@ class TestTokenizers:
 
     def test_decode_ignores_blank(self, all_tokenizers):
         """Decode skips blank tokens (index 0)."""
-        from src.data.decompose import decompose_text, DECOMPOSE_GROUPS
+        from src.encoding.decompose import decompose_text, DECOMPOSE_GROUPS
         from src.model.lid import SCRIPT_TO_GROUP
         for script, tok in all_tokenizers.items():
             # For encoded scripts, "12" encodes via PUA tokens; use
@@ -790,7 +790,7 @@ class TestDecomposition:
         assert len(enc["bpe_merges"]) > 0
 
     def test_korean_all_syllables_have_unique_decompositions(self):
-        from src.data.decompose import decompose_korean
+        from src.encoding.decompose import decompose_korean
         seen: dict[str, str] = {}
         for cp in range(0xAC00, 0xD7A4):
             ch = chr(cp)
@@ -800,7 +800,7 @@ class TestDecomposition:
             seen[dec] = ch
 
     def test_korean_roundtrip(self):
-        from src.data.decompose import decompose_korean, reconstruct_korean
+        from src.encoding.decompose import decompose_korean, reconstruct_korean
         words = ["안녕하세요", "대한민국", "서울", "감사합니다", "학교",
                  "컴퓨터", "프로그램", "인터넷"]
         for w in words:
@@ -809,7 +809,7 @@ class TestDecomposition:
             assert reconstructed == w
 
     def test_korean_all_syllables_roundtrip(self):
-        from src.data.decompose import decompose_korean, reconstruct_korean
+        from src.encoding.decompose import decompose_korean, reconstruct_korean
         for cp in range(0xAC00, 0xD7A4):
             ch = chr(cp)
             decomposed = decompose_korean(ch)
@@ -818,7 +818,7 @@ class TestDecomposition:
                 f"Round-trip failed for U+{cp:04X}: {ch} -> {decomposed} -> {reconstructed}")
 
     def test_korean_standalone_jamo_roundtrip(self):
-        from src.data.decompose import decompose_korean, reconstruct_korean
+        from src.encoding.decompose import decompose_korean, reconstruct_korean
         # Standalone jamo should round-trip correctly
         for jamo in ["ㄱ", "ㅏ", "ㄱㅏ", "ㅋㅋㅋ", "ㄱㅏㄴㅏ"]:
             decomposed = decompose_korean(jamo)
@@ -827,7 +827,7 @@ class TestDecomposition:
                 f"Jamo round-trip failed: {jamo} -> {decomposed!r} -> {reconstructed}")
 
     def test_korean_decompose_produces_tokens(self):
-        from src.data.decompose import decompose_korean
+        from src.encoding.decompose import decompose_korean
         # Every Hangul syllable must decompose (not pass through as-is)
         for cp in range(0xAC00, 0xD7A4):
             ch = chr(cp)
@@ -835,7 +835,7 @@ class TestDecomposition:
             assert len(result) >= 1, f"U+{cp:04X} produced empty decomposition"
 
     def test_han_kana_roundtrip(self):
-        from src.data.decompose import decompose_han_kana, reconstruct_han_kana
+        from src.encoding.decompose import decompose_han_kana, reconstruct_han_kana
         words = ["学校", "日本語", "東京"]
         for w in words:
             decomposed = decompose_han_kana(w)
@@ -844,7 +844,7 @@ class TestDecomposition:
 
     def test_kana_roundtrips(self):
         """Kana are encoded (not pass-through) but must roundtrip correctly."""
-        from src.data.decompose import decompose_han_kana, reconstruct_han_kana
+        from src.encoding.decompose import decompose_han_kana, reconstruct_han_kana
         for kana in ["あいうえお", "カキクケコ"]:
             decomposed = decompose_han_kana(kana)
             reconstructed = reconstruct_han_kana(list(decomposed))
@@ -852,12 +852,12 @@ class TestDecomposition:
                 f"Kana roundtrip failed: {repr(kana)} -> {repr(reconstructed)}")
 
     def test_decompose_text_passthrough(self):
-        from src.data.decompose import decompose_text
+        from src.encoding.decompose import decompose_text
         assert decompose_text("Hello", "latin") == "Hello"
         assert decompose_text("Привет", "cyrillic_greek") == "Привет"
 
     def test_decompose_groups_constant(self):
-        from src.data.decompose import DECOMPOSE_GROUPS
+        from src.encoding.decompose import DECOMPOSE_GROUPS
         assert DECOMPOSE_GROUPS == frozenset({"sino_japanese", "korean", "arabic"})
 
 
@@ -1001,7 +1001,7 @@ class TestLossComputation:
 
     def test_ctc_loss_per_script_slicing(self):
         """CTC loss slices logits to exact script vocab — no padding dilution."""
-        from src.training.moe_losses import compute_ctc_loss
+        from src.training.losses import compute_ctc_loss
 
         B, T = 4, 48
         max_vocab = 500
@@ -1026,7 +1026,7 @@ class TestLossComputation:
         assert logits.grad[:, :, 200:].abs().sum() == 0
 
     def test_ctc_loss_zero_when_no_valid(self):
-        from src.training.moe_losses import compute_ctc_loss
+        from src.training.losses import compute_ctc_loss
 
         logits = torch.randn(4, 48, 200, requires_grad=True)
         targets = torch.ones(4, 5, dtype=torch.long)
@@ -1043,7 +1043,7 @@ class TestLossComputation:
 
     def test_ctc_loss_multi_group(self):
         """CTC loss with multiple groups and scripts."""
-        from src.training.moe_losses import compute_ctc_loss
+        from src.training.losses import compute_ctc_loss
 
         B, T = 8, 48
         logits = torch.randn(B, T, 500, requires_grad=True)
@@ -1066,7 +1066,7 @@ class TestLossComputation:
         assert logits.grad is not None
 
     def test_lid1_loss_runs(self):
-        from src.training.moe_losses import compute_lid1_loss
+        from src.training.losses import compute_lid1_loss
         import torch.nn as nn
 
         logits = torch.randn(8, 10, requires_grad=True)
@@ -1078,7 +1078,7 @@ class TestLossComputation:
 
     def test_lid2_loss_averaged(self):
         """LID-2 loss is averaged across groups, not summed."""
-        from src.training.moe_losses import compute_lid2_loss
+        from src.training.losses import compute_lid2_loss
         import torch.nn as nn
 
         ce = nn.CrossEntropyLoss()
@@ -1188,7 +1188,7 @@ class TestCharGeneration:
 
     def test_no_blank_in_chars(self):
         from scripts.generate_data import get_renderable_chars as _get_script_chars
-        from src.data.tokenizer import BLANK_TOKEN
+        from src.encoding.tokenizer import BLANK_TOKEN
         from src.model.lid import SCRIPTS
         for script in SCRIPTS:
             if script == "emoji":
@@ -1207,9 +1207,9 @@ class TestCharGeneration:
 
     def test_chars_subset_of_vocab(self):
         from scripts.generate_data import get_renderable_chars as _get_script_chars
-        from src.data.vocab import build_script_vocab
-        from src.data.decompose import decompose_text, DECOMPOSE_GROUPS
-        from src.data.decompose import _load_arbitrary_encoding
+        from src.encoding.vocab import build_script_vocab
+        from src.encoding.decompose import decompose_text, DECOMPOSE_GROUPS
+        from src.encoding.decompose import _load_arbitrary_encoding
         from src.model.lid import SCRIPTS, SCRIPT_TO_GROUP
         for script in SCRIPTS:
             if script == "emoji":
@@ -1260,7 +1260,7 @@ class TestCrossConsistency:
 
     def test_vocab_ordering_matches_remap_ids(self):
         """Tokenizer ordering must match remap_ids ordering."""
-        from src.training.moe_data import build_script_tokenizers, remap_ids
+        from src.training.dataloader import build_script_tokenizers, remap_ids
         from src.model.lid import SCRIPTS, SCRIPT_TO_GROUP
 
         active_scripts = list(SCRIPTS)
@@ -1286,15 +1286,15 @@ class TestCrossConsistency:
 
     def test_target_lengths_within_encoder_output(self):
         """No word encodes to more tokens than the encoder can output (T=48)."""
-        from src.data.decompose import decompose_text, DECOMPOSE_GROUPS
+        from src.encoding.decompose import decompose_text, DECOMPOSE_GROUPS
         from src.model.lid import SCRIPTS, SCRIPT_TO_GROUP
 
         max_T = 48  # 192 / 4
         for script in SCRIPTS:
             if script == "emoji":
                 continue
-            from src.data.vocab import build_script_vocab
-            from src.data.tokenizer import LipiTokenizer
+            from src.encoding.vocab import build_script_vocab
+            from src.encoding.tokenizer import LipiTokenizer
             group = SCRIPT_TO_GROUP[script]
             vocab = build_script_vocab(script, group)
             tok = LipiTokenizer(vocab=vocab, bigrams=set())

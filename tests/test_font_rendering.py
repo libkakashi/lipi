@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.model.lid import SCRIPTS, SCRIPT_TO_GROUP
 from src.data.fonts import find_fonts_for_script, build_weighted_font_list
 from src.data.rendering import render_word, image_has_ink, resize_or_pad, filter_fonts_by_cmap
-from src.data.renderer import font_has_codepoint
+from src.data.text_renderer import font_has_codepoint
 from src.data.word_lists import load_word_list
 
 FONT_DIR = Path(__file__).parent.parent / "training_data" / "fonts"
@@ -47,8 +47,8 @@ def _get_sample_words(script, n=5):
 
 def _get_sample_chars(script, n=10):
     """Get sample characters from a script's vocab."""
-    from src.data.vocab import build_script_vocab
-    from src.data.tokenizer import BLANK_TOKEN
+    from src.encoding.vocab import build_script_vocab
+    from src.encoding.tokenizer import BLANK_TOKEN
     group = SCRIPT_TO_GROUP[script]
     vocab = build_script_vocab(script, group)
     chars = [ch for ch in vocab if ch.strip() and ord(ch) > 127 and ch != BLANK_TOKEN]
@@ -776,9 +776,9 @@ class TestDataQuality:
         Silent OOV dropping corrupts CTC labels — the image shows the
         full word but the target has missing characters.
         """
-        from src.data.vocab import build_script_vocab
-        from src.data.tokenizer import LipiTokenizer
-        from src.data.decompose import decompose_text, DECOMPOSE_GROUPS
+        from src.encoding.vocab import build_script_vocab
+        from src.encoding.tokenizer import LipiTokenizer
+        from src.encoding.decompose import decompose_text, DECOMPOSE_GROUPS
 
         failures = []
         for script in SCRIPTS:

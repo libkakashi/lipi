@@ -24,7 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.data.encoding import (
+from src.encoding.encoding import (
     SCRIPT_CONFIG, SEP_CODEPOINT, SEP_CHAR,
     find_min_n, all_chars_in_ranges, is_in_ranges, gen_vary_first, fast_bpe,
 )

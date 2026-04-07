@@ -23,7 +23,7 @@ def main():
     print("1. LOADING DATA")
     print("=" * 60)
 
-    from src.training.moe_data import (
+    from src.training.dataloader import (
         load_shards, build_script_tokenizers, encode_labels, remap_ids,
     )
     from src.model.lid import SCRIPT_TO_GROUP
@@ -75,7 +75,7 @@ def main():
     print("3. DECOMPOSITION CHECK")
     print("=" * 60)
 
-    from src.data.decompose import (
+    from src.encoding.decompose import (
         decompose_han_kana, reconstruct_han_kana,
         _load_arbitrary_encoding,
     )
@@ -131,7 +131,7 @@ def main():
     print("6. MINI TRAINING (100 steps, batch=32, fresh model)")
     print("=" * 60)
 
-    from src.model.moe_encoder import LipiMoEEncoder
+    from src.model.encoder import LipiMoEEncoder
 
     model = LipiMoEEncoder(
         shared_dim=256, shared_blocks_4x4=4, shared_blocks_4x16=2,

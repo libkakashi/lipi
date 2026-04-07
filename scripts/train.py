@@ -21,18 +21,18 @@ from torch.utils.data import DataLoader
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.model.moe_encoder import LipiMoEEncoder
+from src.model.encoder import LipiMoEEncoder
 from src.model.lid import SCRIPT_TO_GROUP, NUM_GROUPS, GROUPS
-from src.training.moe_data import (
+from src.training.dataloader import (
     load_shards, build_script_tokenizers, encode_labels,
     remap_ids, MoEDataset, collate_moe,
 )
-from src.training.moe_losses import (
+from src.training.losses import (
     compute_lid1_loss, compute_lid2_loss, compute_ctc_loss,
     compute_regional_token_loss,
 )
 from src.training.routing import get_predicted_script_ids, build_routing_masks
-from src.training.moe_eval import evaluate
+from src.training.eval import evaluate
 
 
 # ---------------------------------------------------------------------------

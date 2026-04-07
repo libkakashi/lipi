@@ -14,7 +14,7 @@ import random
 import numpy as np
 from PIL import Image
 
-from src.data.renderer import render_text, font_has_codepoint
+from src.data.text_renderer import render_text, font_has_codepoint
 
 
 # ---------------------------------------------------------------------------

@@ -10,7 +10,7 @@ can't display the correct glyphs.
 import os
 from pathlib import Path
 
-from src.data.renderer import font_can_render, font_has_codepoint
+from src.data.text_renderer import font_can_render, font_has_codepoint
 
 
 # Common font directories by platform
