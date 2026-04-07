@@ -89,8 +89,9 @@ def _load_arbitrary_encoding(script_name: str) -> dict:
                 (_HANGUL_BASE, _HANGUL_END),  # Hangul Syllables
                 (0x3131, 0x318E),              # Hangul Compat Jamo
                 (0x3000, 0x303F),              # CJK Symbols and Punctuation
+                (0x2018, 0x201F),              # Smart quotes
             ],
-            "extra_chars": "0123456789(),.!?:;-/'\"% ",
+            "extra_chars": "0123456789(),.!?:;-/'\"% _~",
         },
         "arabic": {
             "char_codes": "arabic_char_codes.tsv",
@@ -303,17 +304,15 @@ def _decompose_arbitrary(text: str, script_name: str) -> str:
     if text in cache:
         return cache[text]
 
-    # Step 1: per-char lookup — every char must be in the encoding
+    # Step 1: per-char lookup
+    # Unknown chars are skipped (they'll be dropped by the tokenizer as OOV).
+    # This happens legitimately for mixed-script text (Latin in Japanese, etc.)
     parts: list[str] = []
     for ch in text:
         tokens = char_to_tokens.get(ch)
         if tokens:
             parts.extend(tokens)
-        else:
-            raise ValueError(
-                f"Character {ch!r} (U+{ord(ch):04X}) not in {script_name} encoding. "
-                f"Add it to the char_ranges in SCRIPT_CONFIG."
-            )
+        # else: foreign char, not in this script's encoding — skip
 
     # Step 2: always apply word-level BPE merges across character boundaries
     bpe_merges = enc["bpe_merges"]

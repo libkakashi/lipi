@@ -50,8 +50,9 @@ SCRIPT_CONFIG = {
             (0xAC00, 0xD7A3),   # Hangul Syllables
             (0x3131, 0x318E),   # Hangul Compatibility Jamo (standalone ㄱㄴㄷ)
             (0x3000, 0x303F),   # CJK Symbols and Punctuation (《》「」)
+            (0x2018, 0x201F),   # Smart quotes (''""‟)
         ],
-        "extra_chars": list("0123456789(),.!?:;-/'\"% "),
+        "extra_chars": list("0123456789(),.!?:;-/'\"% _~"),
         "num_bpe_merges": 2500,
         "pua_base": 0xEA00,
         "bpe_merges_filename": "korean_bpe_merges.tsv",
