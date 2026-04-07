@@ -46,8 +46,12 @@ SCRIPT_CONFIG = {
         "char_codes_filename": "cjk_char_codes.tsv",
     },
     "korean": {
-        "char_ranges": [(0xAC00, 0xD7A3)],
-        "extra_chars": [],
+        "char_ranges": [
+            (0xAC00, 0xD7A3),   # Hangul Syllables
+            (0x3131, 0x318E),   # Hangul Compatibility Jamo (standalone ㄱㄴㄷ)
+            (0x3000, 0x303F),   # CJK Symbols and Punctuation (《》「」)
+        ],
+        "extra_chars": list("0123456789(),.!?:;-/'\"% "),
         "num_bpe_merges": 2500,
         "pua_base": 0xEA00,
         "bpe_merges_filename": "korean_bpe_merges.tsv",
@@ -481,73 +485,80 @@ def build_encoding(
     total_tokens_pre = sum(f * len(s) for f, s in zip(w_freqs, w_seqs))
     log(f"  Pre-BPE tokens/char: {total_tokens_pre / total_chars_w:.4f}")
 
-    # Step 5: BPE + prune/refill loop
+    # Step 5: BPE with iterative sizing
+    #
+    # Strategy: estimate the dead token ratio from a first pass, then compute
+    # how many total merges we need so that (total_merges - dead) lands in
+    # [TARGET_VOCAB_MIN, TARGET_VOCAB_MAX]. One calibration round is enough.
     num_merges = initial_bpe_merges
-    iteration = 0
-    max_iterations = 5
 
-    while iteration < max_iterations:
-        iteration += 1
-        log(f"\n  [Iteration {iteration}] Running {num_merges} BPE merges...")
+    log(f"\n  [Pass 1] Running {num_merges} BPE merges (calibration)...")
+    merges, final_seqs = fast_bpe(
+        w_seqs, w_freqs, num_merges, bpe_pua_start,
+        w_nchars if verbose else None)
 
+    total_tokens_post = sum(f * len(s) for f, s in zip(w_freqs, final_seqs))
+    log(f"  Post-BPE tokens/char: {total_tokens_post / total_chars_w:.4f}")
+
+    char_codes_post_bpe = _apply_merges_to_char_codes(
+        all_chars, char_to_code, merges)
+
+    # Count dead tokens to estimate the dead ratio
+    vocab_cps: set[int] = set()
+    for i in range(n_symbols):
+        vocab_cps.add(pua_base + i)
+    vocab_cps.add(SEP_CODEPOINT)
+    for _, _, m in merges:
+        vocab_cps.add(ord(m))
+
+    used_tokens = _collect_used_tokens(word_freq, char_codes_post_bpe, merges)
+    used_cps = {ord(t) for t in used_tokens if 0x2E00 <= ord(t) <= 0xFFFF}
+    dead_cps = vocab_cps - used_cps
+    n_dead = len(dead_cps)
+    n_live = len(vocab_cps) - n_dead
+
+    log(f"  Calibration: {len(vocab_cps)} total, {n_dead} dead, {n_live} live")
+
+    # If we already have enough live tokens, we're done — just prune
+    # Otherwise, estimate needed merges: if dead_ratio = dead/total,
+    # we need total_merges such that total * (1 - dead_ratio) ≈ target
+    if n_live < TARGET_VOCAB_MIN:
+        dead_ratio = n_dead / len(vocab_cps) if vocab_cps else 0.2
+        # Solve: (n_symbols + 1 + needed_merges) * (1 - dead_ratio) = target
+        fixed_tokens = n_symbols + 1  # base symbols + SEP
+        target_mid = (TARGET_VOCAB_MIN + TARGET_VOCAB_MAX) // 2
+        needed_total = int(target_mid / max(1 - dead_ratio, 0.5))
+        needed_merges = needed_total - fixed_tokens
+
+        log(f"  Dead ratio: {dead_ratio:.2%}. "
+            f"Need ~{needed_merges} merges for ~{target_mid} live tokens")
+
+        # Re-run BPE with adjusted merge count
+        w_seqs, w_freqs, w_nchars = _build_word_seqs(word_freq, char_to_code)
+        log(f"\n  [Pass 2] Running {needed_merges} BPE merges...")
         merges, final_seqs = fast_bpe(
-            w_seqs, w_freqs, num_merges, bpe_pua_start,
+            w_seqs, w_freqs, needed_merges, bpe_pua_start,
             w_nchars if verbose else None)
-        log(f"  {len(merges)} merges applied")
 
         total_tokens_post = sum(f * len(s) for f, s in zip(w_freqs, final_seqs))
         log(f"  Post-BPE tokens/char: {total_tokens_post / total_chars_w:.4f}")
 
-        # Apply merges to per-char codes
         char_codes_post_bpe = _apply_merges_to_char_codes(
             all_chars, char_to_code, merges)
 
-        # Build vocab: base symbols + SEP + BPE merge tokens
-        vocab_cps: set[int] = set()
+        vocab_cps = set()
         for i in range(n_symbols):
             vocab_cps.add(pua_base + i)
         vocab_cps.add(SEP_CODEPOINT)
         for _, _, m in merges:
             vocab_cps.add(ord(m))
 
-        # Collect used tokens from full corpus decomposition
         used_tokens = _collect_used_tokens(word_freq, char_codes_post_bpe, merges)
         used_cps = {ord(t) for t in used_tokens if 0x2E00 <= ord(t) <= 0xFFFF}
-
-        # Find dead tokens
         dead_cps = vocab_cps - used_cps
         n_dead = len(dead_cps)
-        vocab_size = len(vocab_cps)
-
-        log(f"  Vocab: {vocab_size} tokens, {n_dead} dead")
-
-        if n_dead == 0:
-            live_vocab_size = vocab_size
-            if TARGET_VOCAB_MIN <= live_vocab_size <= TARGET_VOCAB_MAX:
-                log(f"  Vocab clean and in range [{TARGET_VOCAB_MIN}, {TARGET_VOCAB_MAX}]")
-                break
-            elif live_vocab_size < TARGET_VOCAB_MIN:
-                # Need more merges
-                deficit = TARGET_VOCAB_MIN - live_vocab_size
-                num_merges = len(merges) + deficit + 50  # overshoot slightly
-                log(f"  Vocab too small ({live_vocab_size}), adding {deficit+50} more merges")
-                # Re-run from fresh word seqs
-                w_seqs, w_freqs, w_nchars = _build_word_seqs(word_freq, char_to_code)
-                continue
-            else:
-                log(f"  Vocab at {live_vocab_size}, acceptable")
-                break
-        else:
-            # Dead tokens found — add more merges to compensate
-            live_vocab_size = vocab_size - n_dead
-            deficit = TARGET_VOCAB_MIN - live_vocab_size
-            extra = max(deficit, n_dead) + 50
-            num_merges = len(merges) + extra
-            log(f"  {n_dead} dead tokens, live={live_vocab_size}. "
-                f"Re-running with {num_merges} merges (+{extra})")
-            # Re-run from fresh word seqs
-            w_seqs, w_freqs, w_nchars = _build_word_seqs(word_freq, char_to_code)
-            continue
+        n_live = len(vocab_cps) - n_dead
+        log(f"  Result: {len(vocab_cps)} total, {n_dead} dead, {n_live} live")
 
     # Prune dead tokens from final vocab
     final_vocab_cps = sorted(cp for cp in vocab_cps if cp in used_cps)
@@ -587,12 +598,11 @@ def build_encoding(
         "char_count": char_count,
         "n_merges": len(merges),
         "vocab_size": len(final_vocab_cps),
-        "dead_tokens": 0,
+        "pruned": len(dead_cps),
         "tokens_per_char": total_tokens_post / total_chars_w,
-        "iterations": iteration,
     }
     log(f"\n  Final: {stats['vocab_size']} vocab, "
         f"{stats['tokens_per_char']:.4f} tok/char, "
-        f"{stats['iterations']} iteration(s)")
+        f"{stats['pruned']} pruned")
 
     return stats

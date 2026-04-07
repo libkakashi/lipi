@@ -85,7 +85,12 @@ def _load_arbitrary_encoding(script_name: str) -> dict:
             "char_codes": "korean_char_codes.tsv",
             "bpe_merges": "korean_bpe_merges.tsv",
             "pua_base": 0xEA00,
-            "char_ranges": [(_HANGUL_BASE, _HANGUL_END)],
+            "char_ranges": [
+                (_HANGUL_BASE, _HANGUL_END),  # Hangul Syllables
+                (0x3131, 0x318E),              # Hangul Compat Jamo
+                (0x3000, 0x303F),              # CJK Symbols and Punctuation
+            ],
+            "extra_chars": "0123456789(),.!?:;-/'\"% ",
         },
         "arabic": {
             "char_codes": "arabic_char_codes.tsv",
@@ -298,14 +303,17 @@ def _decompose_arbitrary(text: str, script_name: str) -> str:
     if text in cache:
         return cache[text]
 
-    # Step 1: per-char lookup
+    # Step 1: per-char lookup — every char must be in the encoding
     parts: list[str] = []
     for ch in text:
         tokens = char_to_tokens.get(ch)
         if tokens:
             parts.extend(tokens)
         else:
-            parts.append(ch)
+            raise ValueError(
+                f"Character {ch!r} (U+{ord(ch):04X}) not in {script_name} encoding. "
+                f"Add it to the char_ranges in SCRIPT_CONFIG."
+            )
 
     # Step 2: always apply word-level BPE merges across character boundaries
     bpe_merges = enc["bpe_merges"]

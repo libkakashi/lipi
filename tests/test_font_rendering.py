@@ -500,18 +500,20 @@ class TestCharRenderingCoverage:
             tested = 0
 
             for ch in chars:
-                # Find a font that claims to support this char
-                font = None
+                # Try all fonts that claim to support this char
+                rendered = False
                 for f in fonts[:20]:
-                    if font_has_codepoint(f, ch):
-                        font = f
+                    if not font_has_codepoint(f, ch):
+                        continue
+                    img = render_word(ch, f, height=32)
+                    if img is not None and image_has_ink(img):
+                        rendered = True
                         break
-                if font is None:
-                    continue
-
-                img = render_word(ch, font, height=32)
-                tested += 1
-                if img is None or not image_has_ink(img):
+                if rendered:
+                    tested += 1
+                elif any(font_has_codepoint(f, ch) for f in fonts[:20]):
+                    # At least one font claims support but none rendered ink
+                    tested += 1
                     blank_chars.append(f"U+{ord(ch):04X}")
 
             if blank_chars:
@@ -520,14 +522,11 @@ class TestCharRenderingCoverage:
                     f"{script}: {len(blank_chars)}/{tested} chars ({pct:.1f}%) "
                     f"render blank: {blank_chars[:5]}")
 
-        # han_kana has ~20K CJK Extension-A chars that most fonts don't support.
-        # Other scripts: allow up to 5% blank.
+        # Allow up to 5% blank — some combining chars have no visible ink alone
         real_failures = []
         for f in failures:
-            script_name = f.split(":")[0]
             pct = float(f.split("(")[1].split("%")[0])
-            threshold = 80.0 if script_name == "han_kana" else 5.0
-            if pct > threshold:
+            if pct > 5.0:
                 real_failures.append(f)
 
         assert not real_failures, (
