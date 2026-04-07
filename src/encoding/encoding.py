@@ -27,6 +27,9 @@ SEP_CHAR = chr(SEP_CODEPOINT)
 TARGET_VOCAB_MIN = 2500
 TARGET_VOCAB_MAX = 2600
 
+# Common characters included in every script's encoding
+COMMON_EXTRA_CHARS = list("0123456789(),.!?:;-/'\"% _~")
+
 # Script configurations
 SCRIPT_CONFIG = {
     "han_kana": {
@@ -39,7 +42,7 @@ SCRIPT_CONFIG = {
             (0xFF01, 0xFF5E),   # Fullwidth ASCII variants
             (0xFF61, 0xFF9F),   # Halfwidth Katakana
         ],
-        "extra_chars": list("0123456789(),.!?:;-/'\"% "),
+        "extra_chars": COMMON_EXTRA_CHARS,
         "num_bpe_merges": 2500,
         "pua_base": 0xE000,
         "bpe_merges_filename": "bpe_merges.tsv",
@@ -52,7 +55,7 @@ SCRIPT_CONFIG = {
             (0x3000, 0x303F),   # CJK Symbols and Punctuation (《》「」)
             (0x2018, 0x201F),   # Smart quotes (''""‟)
         ],
-        "extra_chars": list("0123456789(),.!?:;-/'\"% _~"),
+        "extra_chars": COMMON_EXTRA_CHARS,
         "num_bpe_merges": 2500,
         "pua_base": 0xEA00,
         "bpe_merges_filename": "korean_bpe_merges.tsv",
@@ -66,7 +69,7 @@ SCRIPT_CONFIG = {
             (0x08A0, 0x08FF),   # Arabic Extended-A
             (0xFB50, 0xFDFF),   # Arabic Presentation Forms-A
         ],
-        "extra_chars": [],
+        "extra_chars": COMMON_EXTRA_CHARS,
         "num_bpe_merges": 2500,
         "pua_base": 0xEB00,
         "bpe_merges_filename": "arabic_arb_bpe_merges.tsv",
