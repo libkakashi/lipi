@@ -192,12 +192,19 @@ class LipiTokenizer:
         return 0
 
     def encode(self, text: str) -> list[int]:
-        """Encode text to token IDs using greedy bigram matching."""
+        """Encode text to token IDs using greedy bigram matching.
+
+        Raises ValueError if any token is not in the vocabulary.
+        """
         tokens = tokenize(text, self._bigrams)
         ids = []
         for t in tokens:
-            if t in self._token_to_id:
-                ids.append(self._token_to_id[t])
+            tid = self._token_to_id.get(t)
+            if tid is None:
+                raise ValueError(
+                    f"Token {t!r} (U+{ord(t):04X}) not in vocabulary "
+                    f"(vocab size: {len(self._vocab)})")
+            ids.append(tid)
         return ids
 
     def decode(self, ids: list[int]) -> str:

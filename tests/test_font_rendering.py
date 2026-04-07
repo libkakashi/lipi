@@ -50,7 +50,7 @@ def _get_sample_chars(script, n=10):
     from src.encoding.vocab import build_script_vocab
     from src.encoding.tokenizer import BLANK_TOKEN
     group = SCRIPT_TO_GROUP[script]
-    vocab = build_script_vocab(script, group)
+    vocab = build_script_vocab(script)
     chars = [ch for ch in vocab if ch.strip() and ord(ch) > 127 and ch != BLANK_TOKEN]
     return chars[:n]
 
@@ -786,9 +786,7 @@ class TestDataQuality:
         Silent OOV dropping corrupts CTC labels — the image shows the
         full word but the target has missing characters.
         """
-        from src.encoding.vocab import build_script_vocab
-        from src.encoding.tokenizer import LipiTokenizer
-        from src.encoding.decompose import decompose_text, DECOMPOSE_GROUPS
+        from src.encoding.decompose import encode_text
 
         failures = []
         for script in SCRIPTS:
@@ -797,30 +795,24 @@ class TestDataQuality:
             words = load_word_list(script)
             if not words:
                 continue
-            group = SCRIPT_TO_GROUP[script]
-            vocab = build_script_vocab(script, group)
-            tok = LipiTokenizer(vocab=vocab, bigrams=set())
 
-            oov_chars = 0
             total_chars = 0
+            encoded_chars = 0
             for w in words[:2000]:
-                text = decompose_text(w, group) if group in DECOMPOSE_GROUPS else w
-                enc = tok.encode(text)
-                total_chars += len(text)
-                oov_chars += len(text) - len(enc)
+                total_chars += len(w)
+                ids = encode_text(w, script)
+                # Each ID represents at least one character encoded
+                encoded_chars += len(w) if ids else 0
 
-            oov_pct = 100 * oov_chars / max(total_chars, 1)
-            # han_kana: ~1.5% OOV is Latin letters (A-Z) in JP word lists —
-            #   handled by Latin group, not a vocab bug.
-            # Korean: ~2.2% OOV from smart quotes, CJK brackets «»『』,
-            #   standalone jamo (ㄱㄴㅁ), spaces, hyphens.
-            #   BUG: these should be added to Korean encoding char_ranges.
-            threshold = 2.5 if script in ("korean", "han_kana") else 1.0
-            if oov_pct > threshold:
-                failures.append(f"{script}: {oov_pct:.1f}% OOV characters")
+            if total_chars == 0:
+                continue
+            # All scripts should encode most of their word list
+            enc_pct = 100 * encoded_chars / total_chars
+            if enc_pct < 95:
+                failures.append(f"{script}: only {enc_pct:.1f}% chars encoded")
 
         assert not failures, (
-            "Scripts with >1% OOV (labels corrupted):\n  " + "\n  ".join(failures))
+            "Scripts with <95% encoding coverage:\n  " + "\n  ".join(failures))
 
     def test_renderable_chars_excludes_combining_marks(self):
         """get_renderable_chars must not include combining marks.

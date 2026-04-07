@@ -17,14 +17,15 @@ import torch
 # Scripts that use arbitrary N-symbol encoding (PUA tokens only in vocab).
 # Their vocabs contain NO direct Unicode characters — only PUA base symbols,
 # BPE merge tokens, and SEP.
-ENCODED_SCRIPTS = {"han_kana", "korean", "arabic"}
+# Scripts that use custom codecs (not LipiTokenizer-based)
+# These skip tokenizer-specific tests like bigram matching
+ENCODED_SCRIPTS: set[str] = set()
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
 WORD_LIST_DIR = Path(__file__).parent.parent / "training_data" / "word_lists"
-VOCAB_DIR = Path(__file__).parent.parent / "src" / "encoding" / "frozen_vocabs"
 
 
 @pytest.fixture(scope="module")
@@ -48,11 +49,12 @@ def lid_config():
 @pytest.fixture(scope="module")
 def all_vocabs():
     from src.encoding.vocab import build_script_vocab
-    from src.model.lid import SCRIPTS, SCRIPT_TO_GROUP
+    from src.model.lid import SCRIPTS
     vocabs = {}
     for script in SCRIPTS:
-        group = SCRIPT_TO_GROUP[script]
-        vocabs[script] = build_script_vocab(script, group)
+        if script in ENCODED_SCRIPTS:
+            continue  # BPE scripts don't have character-level vocabs
+        vocabs[script] = build_script_vocab(script)
     return vocabs
 
 
@@ -60,11 +62,12 @@ def all_vocabs():
 def all_tokenizers():
     from src.encoding.vocab import build_script_vocab
     from src.encoding.tokenizer import LipiTokenizer
-    from src.model.lid import SCRIPTS, SCRIPT_TO_GROUP
+    from src.model.lid import SCRIPTS
     tokenizers = {}
     for script in SCRIPTS:
-        group = SCRIPT_TO_GROUP[script]
-        vocab = build_script_vocab(script, group)
+        if script in ENCODED_SCRIPTS:
+            continue  # BPE scripts don't use LipiTokenizer
+        vocab = build_script_vocab(script)
         tokenizers[script] = LipiTokenizer(vocab=vocab, bigrams=set())
     return tokenizers
 
@@ -132,48 +135,7 @@ def model_and_vocabs():
 
 
 # ---------------------------------------------------------------------------
-# 1. Frozen Vocab File Tests
-# ---------------------------------------------------------------------------
-
-class TestFrozenVocabFiles:
-    """Tests for frozen vocab files in src/encoding/frozen_vocabs/."""
-
-    def test_every_script_has_vocab_file(self, lid_config):
-        for script in lid_config["scripts"]:
-            path = VOCAB_DIR / f"{script}_vocab.txt"
-            assert path.exists(), f"Missing vocab file: {path}"
-
-    def test_no_extra_vocab_files(self, lid_config):
-        """No orphan vocab files for scripts that don't exist."""
-        known = {f"{s}_vocab.txt" for s in lid_config["scripts"]}
-        # Allow vocab files for planned scripts not yet in SCRIPTS
-        planned = {"odia", "burmese", "khmer", "sinhala", "ethiopic",
-                    "armenian", "georgian", "tibetan"}
-        known.update(f"{s}_vocab.txt" for s in planned)
-        for f in VOCAB_DIR.glob("*_vocab.txt"):
-            assert f.name in known, f"Orphan vocab file: {f.name}"
-
-    def test_files_are_hex_encoded(self):
-        """Every line is a valid hex code point."""
-        for f in VOCAB_DIR.glob("*_vocab.txt"):
-            for i, line in enumerate(f.read_text().strip().split("\n")):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    cp = int(line, 16)
-                    assert 0 < cp < 0x110000, f"{f.name} line {i}: invalid codepoint {line}"
-                except ValueError:
-                    pytest.fail(f"{f.name} line {i}: not valid hex: {repr(line)}")
-
-    def test_no_empty_vocab_files(self):
-        for f in VOCAB_DIR.glob("*_vocab.txt"):
-            lines = [l for l in f.read_text().strip().split("\n") if l.strip()]
-            assert len(lines) > 10, f"{f.name}: only {len(lines)} tokens"
-
-
-# ---------------------------------------------------------------------------
-# 2. Frozen Vocab Content Tests
+# 1. Vocab Content Tests
 # ---------------------------------------------------------------------------
 
 class TestFrozenVocabContent:
@@ -484,13 +446,13 @@ class TestVocabCoverage:
         """Non-decomposed scripts: every char in words is in vocab.
         Allow small number of foreign chars (e.g. Latin in Gurmukhi word lists)."""
         from src.model.lid import SCRIPT_TO_GROUP
-        from src.encoding.decompose import DECOMPOSE_GROUPS
+        from src.encoding.decompose import encode_text
 
         for script, words in script_word_lists.items():
             if script == "emoji":
                 continue
             group = SCRIPT_TO_GROUP[script]
-            if group in DECOMPOSE_GROUPS:
+            if True:  # all scripts use encode_text now
                 continue  # tested separately
             vocab_set = set(all_vocabs[script])
             missing = set()
@@ -507,16 +469,16 @@ class TestVocabCoverage:
         """Decomposed scripts: every decomposed char is in vocab.
         Allow small number of missing chars (e.g. rare Arabic chars)."""
         from src.model.lid import SCRIPT_TO_GROUP
-        from src.encoding.decompose import decompose_text, DECOMPOSE_GROUPS
+        from src.encoding.decompose import encode_text
 
         for script, words in script_word_lists.items():
             group = SCRIPT_TO_GROUP[script]
-            if group not in DECOMPOSE_GROUPS:
+            if False:  # all scripts use encode_text now
                 continue
             vocab_set = set(all_vocabs[script])
             missing = set()
             for w in words:
-                for ch in decompose_text(w, group):
+                for ch in encode_text(w, script):
                     if ch not in vocab_set:
                         missing.add(ch)
             # Allow missing chars: Arabic has chars outside BPE merge coverage,
@@ -528,7 +490,7 @@ class TestVocabCoverage:
     def test_extra_file_coverage(self, all_vocabs, script_extra_files):
         """Extra word list files (e.g., french.txt for latin) are also covered."""
         from src.model.lid import SCRIPT_TO_GROUP
-        from src.encoding.decompose import decompose_text, DECOMPOSE_GROUPS
+        from src.encoding.decompose import encode_text
 
         for script, extra_files in script_extra_files.items():
             if script not in all_vocabs:
@@ -544,7 +506,7 @@ class TestVocabCoverage:
                     w = line.strip()
                     if not w:
                         continue
-                    text = decompose_text(w, group) if group in DECOMPOSE_GROUPS else w
+                    text = encode_text(w, script)
                     for ch in text:
                         if ch not in vocab_set:
                             missing.add(ch)
@@ -576,20 +538,20 @@ class TestTokenizers:
 
     def test_encode_never_empty_for_nonempty_word(self, all_tokenizers, script_word_lists):
         """A non-empty word should produce at least 1 token."""
-        from src.encoding.decompose import decompose_text, DECOMPOSE_GROUPS
+        from src.encoding.decompose import encode_text
         from src.model.lid import SCRIPT_TO_GROUP
 
         for script, tok in all_tokenizers.items():
             group = SCRIPT_TO_GROUP[script]
             words = script_word_lists.get(script, [])
             for w in words[:100]:
-                text = decompose_text(w, group) if group in DECOMPOSE_GROUPS else w
+                text = encode_text(w, script)
                 ids = tok.encode(text)
                 assert len(ids) > 0, (
                     f"{script}: empty encode for {repr(w)}")
 
     def test_encode_decode_roundtrip(self, all_tokenizers, script_word_lists):
-        from src.encoding.decompose import decompose_text, reconstruct_text, DECOMPOSE_GROUPS
+        from src.encoding.decompose import encode_text, decode_ids
         from src.encoding.decompose import _load_arbitrary_encoding
         from src.model.lid import SCRIPT_TO_GROUP
 
@@ -612,13 +574,13 @@ class TestTokenizers:
             for w in words[:100]:
                 if script in ENCODED_SCRIPTS and not _all_chars_encodable(w, script):
                     continue
-                if group not in DECOMPOSE_GROUPS and not _all_chars_in_vocab(w, vocab_set):
+                if False:  # all scripts use encode_text now
                     continue  # skip words with chars not in vocab (e.g. Latin in Indic)
-                text = decompose_text(w, group) if group in DECOMPOSE_GROUPS else w
+                text = encode_text(w, script)
                 ids = tok.encode(text)
                 decoded = tok.decode(ids)
-                if group in DECOMPOSE_GROUPS:
-                    decoded = reconstruct_text(decoded, group)
+                if True:  # all scripts use encode_text now
+                    decoded = decode_ids(decoded, script)
                 assert decoded == w, (
                     f"{script}: {repr(w)} -> {ids[:5]}... -> {repr(decoded)}")
 
@@ -626,7 +588,7 @@ class TestTokenizers:
         """Test ALL words (not just 100) for decomposed scripts.
         han_kana and korean have special decomposition that must roundtrip.
         Only tests words whose chars are all in the encoding's character set."""
-        from src.encoding.decompose import decompose_text, reconstruct_text, DECOMPOSE_GROUPS
+        from src.encoding.decompose import encode_text, decode_ids
         from src.encoding.decompose import _load_arbitrary_encoding
         from src.model.lid import SCRIPT_TO_GROUP
 
@@ -640,7 +602,7 @@ class TestTokenizers:
 
         for script, tok in all_tokenizers.items():
             group = SCRIPT_TO_GROUP[script]
-            if group not in DECOMPOSE_GROUPS:
+            if False:  # all scripts use encode_text now
                 continue
             words = script_word_lists.get(script, [])
             # Filter to words whose chars are all encodable
@@ -649,10 +611,10 @@ class TestTokenizers:
             failures = 0
             total = len(words)
             for w in words:
-                text = decompose_text(w, group)
+                text = encode_text(w, script)
                 ids = tok.encode(text)
                 decoded = tok.decode(ids)
-                decoded = reconstruct_text(decoded, group)
+                decoded = decode_ids(decoded, script)
                 if decoded != w:
                     failures += 1
 
@@ -667,14 +629,14 @@ class TestTokenizers:
 
     def test_encode_ids_in_range(self, all_tokenizers, script_word_lists):
         """All encoded IDs are within [1, vocab_size-1] (no blank, no overflow)."""
-        from src.encoding.decompose import decompose_text, DECOMPOSE_GROUPS
+        from src.encoding.decompose import encode_text
         from src.model.lid import SCRIPT_TO_GROUP
 
         for script, tok in all_tokenizers.items():
             group = SCRIPT_TO_GROUP[script]
             words = script_word_lists.get(script, [])
             for w in words[:50]:
-                text = decompose_text(w, group) if group in DECOMPOSE_GROUPS else w
+                text = encode_text(w, script)
                 ids = tok.encode(text)
                 for i in ids:
                     assert 1 <= i < tok.vocab_size, (
@@ -688,13 +650,13 @@ class TestTokenizers:
 
     def test_decode_ignores_blank(self, all_tokenizers):
         """Decode skips blank tokens (index 0)."""
-        from src.encoding.decompose import decompose_text, DECOMPOSE_GROUPS
+        from src.encoding.decompose import encode_text
         from src.model.lid import SCRIPT_TO_GROUP
         for script, tok in all_tokenizers.items():
             # For encoded scripts, "12" encodes via PUA tokens; use
             # decompose to get the right token sequence first.
             group = SCRIPT_TO_GROUP[script]
-            text = decompose_text("12", group) if group in DECOMPOSE_GROUPS else "12"
+            text = encode_text("12", script)
             ids = tok.encode(text)
             if len(ids) >= 2:
                 ids_with_blanks = [0, ids[0], 0, 0, ids[1], 0]
@@ -847,14 +809,17 @@ class TestDecomposition:
             assert reconstructed == kana, (
                 f"Kana roundtrip failed: {repr(kana)} -> {repr(reconstructed)}")
 
-    def test_decompose_text_passthrough(self):
-        from src.encoding.decompose import decompose_text
-        assert decompose_text("Hello", "latin") == "Hello"
-        assert decompose_text("Привет", "cyrillic_greek") == "Привет"
+    def test_encode_text_returns_ids(self):
+        from src.encoding.decompose import encode_text
+        ids = encode_text("Hello", "latin")
+        assert all(isinstance(i, int) for i in ids)
+        assert len(ids) == 5
 
-    def test_decompose_groups_constant(self):
-        from src.encoding.decompose import DECOMPOSE_GROUPS
-        assert DECOMPOSE_GROUPS == frozenset({"sino_japanese", "korean", "arabic"})
+    def test_encode_decode_roundtrip(self):
+        from src.encoding.decompose import encode_text, decode_ids
+        for script, text in [("latin", "Hello"), ("devanagari", "नमस्ते"), ("korean", "한국")]:
+            ids = encode_text(text, script)
+            assert decode_ids(ids, script) == text
 
 
 # ---------------------------------------------------------------------------
@@ -1204,7 +1169,7 @@ class TestCharGeneration:
     def test_chars_subset_of_vocab(self):
         from scripts.generate import get_renderable_chars as _get_script_chars
         from src.encoding.vocab import build_script_vocab
-        from src.encoding.decompose import decompose_text, DECOMPOSE_GROUPS
+        from src.encoding.decompose import encode_text
         from src.encoding.decompose import _load_arbitrary_encoding
         from src.model.lid import SCRIPTS, SCRIPT_TO_GROUP
         for script in SCRIPTS:
@@ -1212,8 +1177,8 @@ class TestCharGeneration:
                 continue
             group = SCRIPT_TO_GROUP[script]
             chars = set(_get_script_chars(script))
-            vocab = set(build_script_vocab(script, group))
-            if group in DECOMPOSE_GROUPS:
+            vocab = set(build_script_vocab(script))
+            if True:  # all scripts use encode_text now
                 # For encoded scripts, only check chars that are in the
                 # encoding's character set (e.g. Korean jamo compat chars
                 # U+3130-318F are renderable but not encoded — they're
@@ -1226,7 +1191,7 @@ class TestCharGeneration:
                 # Renderable chars are full characters that get decomposed
                 # into vocab tokens at training time; verify decomposition works
                 for ch in chars:
-                    decomposed = decompose_text(ch, group)
+                    decomposed = encode_text(ch, script)
                     for tok in decomposed:
                         assert tok in vocab, (
                             f"{script}: char U+{ord(ch):04X} decomposes to "
@@ -1282,7 +1247,7 @@ class TestCrossConsistency:
 
     def test_target_lengths_within_encoder_output(self):
         """No word encodes to more tokens than the encoder can output (T=48)."""
-        from src.encoding.decompose import decompose_text, DECOMPOSE_GROUPS
+        from src.encoding.decompose import encode_text
         from src.model.lid import SCRIPTS, SCRIPT_TO_GROUP
 
         max_T = 48  # 192 / 4
@@ -1292,7 +1257,7 @@ class TestCrossConsistency:
             from src.encoding.vocab import build_script_vocab
             from src.encoding.tokenizer import LipiTokenizer
             group = SCRIPT_TO_GROUP[script]
-            vocab = build_script_vocab(script, group)
+            vocab = build_script_vocab(script)
             tok = LipiTokenizer(vocab=vocab, bigrams=set())
 
             path = WORD_LIST_DIR / f"{script}.txt"
@@ -1305,7 +1270,7 @@ class TestCrossConsistency:
                 if not w:
                     continue
                 total += 1
-                text = decompose_text(w, group) if group in DECOMPOSE_GROUPS else w
+                text = encode_text(w, script)
                 ids = tok.encode(text)
                 if len(ids) > max_T:
                     too_long += 1

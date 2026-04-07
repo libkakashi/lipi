@@ -9,9 +9,7 @@ import torch
 from torch.utils.data import Dataset
 
 from src.model.lid import SCRIPT_TO_GROUP, SCRIPT_TO_ID, GROUP_TO_ID
-from src.encoding.tokenizer import LipiTokenizer
-from src.encoding.decompose import decompose_text, DECOMPOSE_GROUPS
-from src.encoding.vocab import get_all_script_vocabs
+from src.encoding.decompose import encode_text, script_vocab_size
 
 
 # ---------------------------------------------------------------------------
@@ -35,9 +33,6 @@ def load_shards(shard_dir: Path) -> tuple[
 
     Returns:
         images, labels, script_ids, group_ids, meta, target_ids, target_lens
-
-    target_ids and target_lens are None if shards don't contain pre-encoded
-    targets (backward compat with old shards).
     """
     if not shard_dir.exists():
         raise FileNotFoundError(f"Shard directory does not exist: {shard_dir}")
@@ -59,7 +54,7 @@ def load_shards(shard_dir: Path) -> tuple[
 
     all_imgs, all_labels, all_sids, all_gids = [], [], [], []
     all_tids, all_tlens = [], []
-    has_targets = None  # tri-state: None=unknown, True/False after first shard
+    has_targets = None
     with ThreadPoolExecutor(max_workers=16) as pool:
         for shard in pool.map(lambda p: torch.load(p, weights_only=False), shard_files):
             missing = expected_keys - shard.keys()
@@ -70,12 +65,10 @@ def load_shards(shard_dir: Path) -> tuple[
             all_sids.append(shard["script_ids"])
             all_gids.append(shard["group_ids"])
 
-            # Pre-encoded targets (optional, for backward compat)
             shard_has = "target_ids" in shard and "target_lens" in shard
             if has_targets is None:
                 has_targets = shard_has
             elif has_targets != shard_has:
-                # Mixed shards: some have targets, some don't — fall back
                 has_targets = False
             if shard_has:
                 all_tids.append(shard["target_ids"])
@@ -87,7 +80,6 @@ def load_shards(shard_dir: Path) -> tuple[
     del all_imgs, all_sids, all_gids
 
     if has_targets and all_tids:
-        # Pad target_ids to uniform max_len across all shards
         max_len = max(t.shape[1] for t in all_tids)
         padded = []
         for t in all_tids:
@@ -112,50 +104,45 @@ def load_shards(shard_dir: Path) -> tuple[
 def build_script_tokenizers(
     active_scripts: list[str],
     active_groups: list[str],
-) -> tuple[list[list[LipiTokenizer]], list[list[int]], list[list[str]]]:
-    """Build per-script tokenizers with fixed vocabs (not data-dependent).
+) -> tuple[list[list[None]], list[list[int]], list[list[str]]]:
+    """Build per-script vocab sizes organized by group.
 
-    Vocabs are defined by Unicode ranges and decomposition rules.
-    This prevents dirty word lists from inflating vocab sizes.
+    All encoding now goes through the unified encode_text()/decode_ids()
+    interface — no LipiTokenizer needed.
 
     Returns:
-        group_tokenizers[g][s]: tokenizer for script s in group g
+        group_tokenizers[g][s]: always None (kept for API compat)
         group_script_vocab_sizes[g][s]: vocab size
         group_script_names[g][s]: script name
     """
     assert active_scripts, "active_scripts must be non-empty"
     assert active_groups, "active_groups must be non-empty"
 
-    print("  Building fixed vocabs from Unicode ranges + decomposition rules...")
-    group_vocabs, group_vocab_sizes = get_all_script_vocabs(active_scripts, active_groups)
-
-    group_tokenizers: list[list[LipiTokenizer]] = []
+    print("  Building vocabs...")
+    group_tokenizers: list[list[None]] = []
+    group_vocab_sizes: list[list[int]] = []
     group_script_names: list[list[str]] = []
 
     for g, group_name in enumerate(active_groups):
-        members = scripts_in_group(active_scripts, group_name)
-        tokenizers = []
-        for s, script in enumerate(members):
-            vocab = group_vocabs[g][s]
-            tok = LipiTokenizer(vocab=vocab, bigrams=set())
-            tokenizers.append(tok)
+        scripts_in_group = [s for s in active_scripts
+                            if SCRIPT_TO_GROUP.get(s) == group_name]
+        sizes: list[int] = []
+        for script in scripts_in_group:
+            vs = script_vocab_size(script)
+            sizes.append(vs)
+            print(f"    Group {g} ({group_name}) / {script}: {vs} tokens")
 
-        group_tokenizers.append(tokenizers)
-        group_script_names.append(members)
+        group_tokenizers.append([None] * len(scripts_in_group))
+        group_vocab_sizes.append(sizes)
+        group_script_names.append(scripts_in_group)
 
     return group_tokenizers, group_vocab_sizes, group_script_names
 
 
-def _encode_one(args: tuple) -> tuple[list[int], int]:
-    """Encode a single label. Used by encode_labels for parallel processing."""
-    label, gid, lsid, group_name, tok = args
-    if group_name in DECOMPOSE_GROUPS:
-        label_tokens = decompose_text(label, group_name)
-    else:
-        label_tokens = label
-    ids = tok.encode(label_tokens)
-    n_dropped = len(label_tokens) - len(ids)
-    return ids, n_dropped
+def _encode_one(args: tuple) -> list[int]:
+    """Encode a single label using the unified encode_text interface."""
+    label, script_name = args
+    return encode_text(label, script_name)
 
 
 def encode_labels(
@@ -163,11 +150,10 @@ def encode_labels(
     group_ids: torch.Tensor,
     local_script_ids: torch.Tensor,
     active_groups: list[str],
-    group_tokenizers: list[list[LipiTokenizer]],
+    group_tokenizers: list[list[None]],
+    group_script_names: list[list[str]],
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Pre-encode all labels using each sample's script tokenizer.
-
-    Uses multiprocessing for large datasets (>10K samples).
+    """Pre-encode all labels via unified encode_text() interface.
 
     Returns:
         target_tensor: (N, max_len) padded token IDs
@@ -177,47 +163,31 @@ def encode_labels(
     gid_list = group_ids.tolist()
     lsid_list = local_script_ids.tolist()
 
-    # Build task args
     tasks = []
     for label, gid, lsid in zip(labels, gid_list, lsid_list):
         if gid < 0 or gid >= n_groups:
             raise IndexError(f"group_id {gid} out of range [0, {n_groups})")
-        if lsid < 0 or lsid >= len(group_tokenizers[gid]):
+        if lsid < 0 or lsid >= len(group_script_names[gid]):
             raise IndexError(
                 f"local_script_id {lsid} out of range for group {gid} "
-                f"(has {len(group_tokenizers[gid])} scripts)"
-            )
-        group_name = active_groups[gid]
-        tok = group_tokenizers[gid][lsid]
-        tasks.append((label, gid, lsid, group_name, tok))
+                f"(has {len(group_script_names[gid])} scripts)")
 
-    # Process — use thread pool for I/O-bound decompose (cache + dict lookups)
+        script_name = group_script_names[gid][lsid]
+        tasks.append((label, script_name))
+
     max_len = 0
     encoded = []
-    oov_chars = 0
-    oov_samples = 0
 
     if len(tasks) > 10000:
-        from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=8) as pool:
-            for ids, n_dropped in pool.map(_encode_one, tasks, chunksize=1000):
-                if n_dropped > 0:
-                    oov_chars += n_dropped
-                    oov_samples += 1
+            for ids in pool.map(_encode_one, tasks, chunksize=1000):
                 encoded.append(ids)
                 max_len = max(max_len, len(ids))
     else:
         for task in tasks:
-            ids, n_dropped = _encode_one(task)
-            if n_dropped > 0:
-                oov_chars += n_dropped
-                oov_samples += 1
+            ids = _encode_one(task)
             encoded.append(ids)
             max_len = max(max_len, len(ids))
-
-    if oov_chars > 0:
-        print(f"  WARNING: {oov_chars} OOV chars dropped across {oov_samples} samples "
-              f"({100*oov_samples/len(labels):.1f}% of data has corrupted labels)")
 
     if max_len == 0:
         max_len = 1
@@ -237,14 +207,7 @@ def remap_ids(
     script_ids_global: torch.Tensor,
     group_ids_global: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[int, int]]:
-    """Remap global script/group IDs to local contiguous 0..N-1.
-
-    Returns:
-        group_ids: (N,) local group IDs
-        local_script_ids: (N,) local script IDs within each group
-        global_to_local_group: mapping dict
-    """
-    # Group ID remapping
+    """Remap global script/group IDs to local contiguous 0..N-1."""
     global_to_local_group: dict[int, int] = {}
     for local_id, gname in enumerate(active_groups):
         global_to_local_group[GROUP_TO_ID[gname]] = local_id
@@ -253,7 +216,6 @@ def remap_ids(
     for gid, lid in global_to_local_group.items():
         group_ids[group_ids_global == gid] = lid
 
-    # Local script IDs within each group
     local_script_ids = torch.zeros_like(group_ids)
     for g, group_name in enumerate(active_groups):
         members = scripts_in_group(active_scripts, group_name)
@@ -262,11 +224,8 @@ def remap_ids(
             mask = (script_ids_global == global_sid)
             local_script_ids[mask] = local_s
 
-    # Sanity check: all remapped group IDs must be in valid range
     assert group_ids.min() >= 0 and group_ids.max() < len(active_groups), (
-        f"Remapped group_ids out of range [0, {len(active_groups)}): "
-        f"min={group_ids.min().item()}, max={group_ids.max().item()}"
-    )
+        f"Remapped group_ids out of range [0, {len(active_groups)})")
 
     return group_ids, local_script_ids, global_to_local_group
 

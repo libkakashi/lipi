@@ -8,12 +8,13 @@ per-group and per-script.
 import torch
 from torch import Tensor
 
-from src.encoding.decompose import reconstruct_text, DECOMPOSE_GROUPS
+from src.encoding.decompose import decode_ids
 
 
 @torch.no_grad()
 def evaluate(model, val_loader, group_tokenizers, group_script_names,
-             active_groups, device, device_type, use_amp, amp_dtype, max_batches=50):
+             active_groups, device, device_type, use_amp, amp_dtype,
+             group_script_vocab_sizes=None, max_batches=50):
     model.eval()
     n_groups = len(group_tokenizers)
 
@@ -109,24 +110,19 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
                 s_char_total[key] = s_char_total.get(key, 0) + len(ref_s)
                 continue
 
-            # Use predicted script's tokenizer (logits came from that CTC head)
-            pred_sid_safe = min(pred_sid, len(group_tokenizers[pred_g]) - 1)
-            tok = group_tokenizers[pred_g][pred_sid_safe]
-            # Slice logits to this script's exact vocab size before argmax
-            # (positions beyond vocab_size are zero-padded and would win
-            # argmax once real logits go negative during training)
-            vs = tok.vocab_size
+            # CTC greedy decode: argmax → collapse repeats → remove blanks
+            pred_sid_safe = min(pred_sid, len(group_script_names[pred_g]) - 1)
+            vs = group_script_vocab_sizes[pred_g][pred_sid_safe] if group_script_vocab_sizes else 2500
             seq = all_logits[i, :, :vs].argmax(dim=-1).tolist()
-            chars = []
+            ids = []
             prev = -1
             for t in seq:
                 if t != prev and t != 0:
-                    chars.append(t)
+                    ids.append(t)
                 prev = t
-            raw_decoded = tok.decode(chars)
-            group_name = active_groups[pred_g] if pred_g < len(active_groups) else ""
-            if group_name in DECOMPOSE_GROUPS:
-                raw_decoded = reconstruct_text(raw_decoded, group_name)
+
+            script_name = group_script_names[pred_g][pred_sid_safe] if pred_g < len(group_script_names) else ""
+            raw_decoded = decode_ids(ids, script_name) if script_name else ""
             dec_s = raw_decoded.strip().lower()
 
             ctc_total += 1

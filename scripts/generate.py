@@ -96,21 +96,12 @@ def encode_labels_for_shard(labels: list[str], script: str) -> tuple[torch.Tenso
         target_ids: (N, max_len) zero-padded token IDs, dtype long
         target_lens: (N,) actual lengths, dtype long
     """
-    from src.encoding.decompose import decompose_text, DECOMPOSE_GROUPS
-
-    _ensure_tokenizers()
-    local_gid, local_sid = _get_local_group_and_script(script)
-    group_name = _worker_active_groups[local_gid]
-    tok = _worker_group_tokenizers[local_gid][local_sid]
+    from src.encoding.decompose import encode_text
 
     encoded = []
     max_len = 0
     for label in labels:
-        if group_name in DECOMPOSE_GROUPS:
-            label_tokens = decompose_text(label, group_name)
-        else:
-            label_tokens = label
-        ids = tok.encode(label_tokens)
+        ids = encode_text(label, script)
         encoded.append(ids)
         if len(ids) > max_len:
             max_len = len(ids)
@@ -251,7 +242,7 @@ def get_renderable_chars(script: str) -> list[str]:
         return chars
 
     group = SCRIPT_TO_GROUP[script]
-    vocab = build_script_vocab(script, group)
+    vocab = build_script_vocab(script)
     return [ch for ch in vocab
             if ch.strip()
             and ord(ch) > 32
@@ -637,7 +628,7 @@ def main():
                 script_vocabs[script] = 10  # minimal vocab, fixed budget
             else:
                 group = SCRIPT_TO_GROUP[script]
-                vocab = build_script_vocab(script, group)
+                vocab = build_script_vocab(script)
                 script_vocabs[script] = len(vocab)
         min_vocab = min(script_vocabs.values())
         print(f"\nVocab-proportional scaling (base={args.samples_per_script}):")
