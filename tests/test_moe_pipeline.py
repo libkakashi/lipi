@@ -73,10 +73,7 @@ def all_tokenizers():
 def script_word_lists():
     """Load words for each script from primary + extra files."""
     from src.model.lid import SCRIPTS
-    try:
-        from scripts.train_lid import _SCRIPT_EXTRA_FILES
-    except Exception:
-        _SCRIPT_EXTRA_FILES = {}
+    from src.data.word_lists import _SCRIPT_EXTRA_FILES
 
     mapping = {}
     for script in SCRIPTS:
@@ -1189,7 +1186,7 @@ class TestRoutingMasks:
 class TestCharGeneration:
 
     def test_no_blank_in_chars(self):
-        from scripts.generate_data import get_renderable_chars as _get_script_chars
+        from scripts.generate import get_renderable_chars as _get_script_chars
         from src.encoding.tokenizer import BLANK_TOKEN
         from src.model.lid import SCRIPTS
         for script in SCRIPTS:
@@ -1199,7 +1196,7 @@ class TestCharGeneration:
             assert BLANK_TOKEN not in chars
 
     def test_no_space_in_chars(self):
-        from scripts.generate_data import get_renderable_chars as _get_script_chars
+        from scripts.generate import get_renderable_chars as _get_script_chars
         from src.model.lid import SCRIPTS
         for script in SCRIPTS:
             if script == "emoji":
@@ -1208,7 +1205,7 @@ class TestCharGeneration:
             assert " " not in chars
 
     def test_chars_subset_of_vocab(self):
-        from scripts.generate_data import get_renderable_chars as _get_script_chars
+        from scripts.generate import get_renderable_chars as _get_script_chars
         from src.encoding.vocab import build_script_vocab
         from src.encoding.decompose import decompose_text, DECOMPOSE_GROUPS
         from src.encoding.decompose import _load_arbitrary_encoding
@@ -1242,7 +1239,7 @@ class TestCharGeneration:
                 assert not outside
 
     def test_chars_are_printable(self):
-        from scripts.generate_data import get_renderable_chars as _get_script_chars
+        from scripts.generate import get_renderable_chars as _get_script_chars
         from src.model.lid import SCRIPTS
         for script in SCRIPTS:
             if script == "emoji":
