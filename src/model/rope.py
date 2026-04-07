@@ -13,16 +13,6 @@ import torch.nn as nn
 from torch import Tensor
 
 
-def build_freqs_1d(seq_len: int, dim: int, theta: float = 10000.0) -> Tensor:
-    """Compute RoPE frequency table for a 1D sequence.
-
-    Returns: (seq_len, dim//2, 2) — cos and sin components.
-    """
-    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
-    positions = torch.arange(seq_len, dtype=torch.float32)
-    angles = torch.outer(positions, freqs)  # (seq_len, dim//2)
-    return torch.stack([angles.cos(), angles.sin()], dim=-1)  # (seq_len, dim//2, 2)
-
 
 def build_freqs_2d(h: int, w: int, dim: int, theta: float = 10000.0) -> Tensor:
     """Compute RoPE frequency table for a 2D grid.

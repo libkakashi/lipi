@@ -77,13 +77,12 @@ def main():
 
     from src.data.decompose import (
         decompose_han_kana, reconstruct_han_kana,
-        _load_cjk_decomposition,
+        _load_arbitrary_encoding,
     )
-    from src.data import decompose as d
-    _load_cjk_decomposition()
+    enc = _load_arbitrary_encoding("han_kana")
 
-    if d._cjk_char_to_tokens:
-        print(f"  Decomposition table loaded: {len(d._cjk_char_to_tokens)} chars")
+    if enc["char_to_tokens"]:
+        print(f"  Decomposition table loaded: {len(enc['char_to_tokens'])} chars")
     else:
         print("  *** DECOMPOSITION TABLE EMPTY — THIS IS THE BUG ***")
         print("  Check that training_data/word_lists/cjk_char_codes.tsv exists")

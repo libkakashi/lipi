@@ -11,32 +11,6 @@ from torch import Tensor
 from src.data.color import INPUT_CHANNELS
 
 
-class ConvNeXtStem(nn.Module):
-    """Lightweight stem — 4 convs, ~70K params.
-
-    Good for 12.5M backbone where stem should be small.
-    """
-
-    def __init__(self, in_channels: int = INPUT_CHANNELS, out_channels: int = 64):
-        super().__init__()
-        self.layers = nn.Sequential(
-            nn.Conv2d(in_channels, 32, kernel_size=3, stride=(2, 1), padding=1, bias=False),
-            nn.GroupNorm(1, 32),
-            nn.GELU(),
-            nn.Conv2d(32, 32, kernel_size=3, stride=1, padding=1, bias=False),
-            nn.GroupNorm(1, 32),
-            nn.GELU(),
-            nn.Conv2d(32, 64, kernel_size=3, stride=(1, 2), padding=1, bias=False),
-            nn.GroupNorm(1, 64),
-            nn.GELU(),
-            nn.Conv2d(64, out_channels, kernel_size=3, stride=1, padding=1, bias=False),
-            nn.GroupNorm(1, out_channels),
-            nn.GELU(),
-        )
-
-    def forward(self, x: Tensor) -> Tensor:
-        return self.layers(x)
-
 
 class _ResBlock(nn.Module):
     """Residual block with two 3×3 convs + skip connection."""

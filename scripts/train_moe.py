@@ -32,7 +32,6 @@ from src.training.moe_losses import (
     compute_regional_token_loss,
 )
 from src.training.routing import get_predicted_script_ids, build_routing_masks
-from src.training.cpu_offload import CPUOffloadOptimizer
 from src.training.moe_eval import evaluate
 
 
@@ -93,9 +92,7 @@ def parse_args():
                              "'experts+ctc' (stage1+stage2+ctc heads+lid2), "
                              "'ctc' (ctc heads only), "
                              "or 'shared' (shared SWA + LID-1 only)")
-    parser.add_argument("--cpu-offload", action="store_true",
-                        help="Offload optimizer states to CPU (frees ~5-7GB VRAM)")
-    args = parser.parse_args()
+args = parser.parse_args()
 
     # Validation
     assert args.epochs > 0, f"--epochs must be > 0, got {args.epochs}"
@@ -276,11 +273,7 @@ def build_optimizer_and_scheduler(args, model, device_type, steps_per_epoch):
     else:
         base_optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
     vram("after optimizer init", device_type)
-    if args.cpu_offload and device_type == "cuda":
-        optimizer = CPUOffloadOptimizer(base_optimizer)
-        print("Optimizer states offloaded to CPU (~5-7GB VRAM freed)")
-    else:
-        optimizer = base_optimizer
+    optimizer = base_optimizer
 
     use_amp = device_type in ("cuda", "mps")
     if device_type == "cuda":
@@ -391,10 +384,6 @@ def resume_from_checkpoint(args, model, optimizer, base_optimizer, scaler, sched
         optimizer.load_state_dict(ckpt["optimizer"])
     if "scaler" in ckpt:
         scaler.load_state_dict(ckpt["scaler"])
-    # Sync GPU->CPU mirrors after model load (cpu_offload only)
-    if hasattr(optimizer, "sync_from_gpu"):
-        optimizer.sync_from_gpu()
-
     start_epoch = ckpt.get("epoch", 0) + 1
 
     # Always rebuild scheduler on resume — checkpoint might have a different

@@ -785,9 +785,9 @@ class TestDecomposition:
 
     def test_korean_bpe_merges_loaded(self):
         from src.data import decompose as decompose_mod
-        decompose_mod._load_korean_merges()
-        assert decompose_mod._korean_merges is not None
-        assert len(decompose_mod._korean_merges) > 0
+        enc = decompose_mod._load_arbitrary_encoding("korean")
+        assert enc["bpe_merges"] is not None
+        assert len(enc["bpe_merges"]) > 0
 
     def test_korean_all_syllables_have_unique_decompositions(self):
         from src.data.decompose import decompose_korean

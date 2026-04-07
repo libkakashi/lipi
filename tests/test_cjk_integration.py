@@ -175,11 +175,12 @@ class TestDecomposeReconstruct:
         """CJK Extension A chars (U+3400..U+4DBF)."""
         from src.data.decompose import (
             decompose_han_kana, reconstruct_han_kana,
-            _load_cjk_decomposition, _cjk_char_to_tokens,
+            _load_arbitrary_encoding,
         )
-        _load_cjk_decomposition()
+        enc = _load_arbitrary_encoding("han_kana")
+        cjk_ct = enc["char_to_tokens"]
         ext_a_chars = [
-            ch for ch in _cjk_char_to_tokens
+            ch for ch in cjk_ct
             if 0x3400 <= ord(ch) <= 0x4DBF
         ][:5]
         for ch in ext_a_chars:
@@ -268,13 +269,12 @@ class TestNoDuplicateSequences:
 
     def test_unique_token_sequences(self):
         """All 27,584 chars must have unique token sequences."""
-        from src.data.decompose import (
-            _load_cjk_decomposition, _cjk_char_to_tokens,
-        )
-        _load_cjk_decomposition()
+        from src.data.decompose import _load_arbitrary_encoding
+        enc = _load_arbitrary_encoding("han_kana")
+        cjk_ct = enc["char_to_tokens"]
 
         seq_to_chars: dict[tuple[str, ...], list[str]] = {}
-        for char, tokens in _cjk_char_to_tokens.items():
+        for char, tokens in cjk_ct.items():
             key = tuple(tokens)
             if key not in seq_to_chars:
                 seq_to_chars[key] = []
@@ -389,12 +389,11 @@ class TestEncoding:
 
     def test_all_codes_use_base_symbols_and_sep(self):
         """All char codes should only contain base symbols + SEP + BPE tokens."""
-        from src.data.decompose import (
-            _load_cjk_decomposition, _cjk_char_to_tokens,
-        )
-        _load_cjk_decomposition()
+        from src.data.decompose import _load_arbitrary_encoding
+        enc = _load_arbitrary_encoding("han_kana")
+        cjk_ct = enc["char_to_tokens"]
 
-        for char, tokens in _cjk_char_to_tokens.items():
+        for char, tokens in cjk_ct.items():
             for t in tokens:
                 cp = ord(t)
                 assert (0xE000 <= cp <= 0xF8FF) or cp == 0x2E3B, (
@@ -426,13 +425,12 @@ class TestBPETokens:
 
     def test_bpe_tokens_are_pua_chars(self):
         """BPE merged tokens should be PUA characters (U+E00D+)."""
-        from src.data.decompose import (
-            _load_cjk_decomposition, _cjk_char_to_tokens,
-        )
-        _load_cjk_decomposition()
+        from src.data.decompose import _load_arbitrary_encoding
+        enc = _load_arbitrary_encoding("han_kana")
+        cjk_ct = enc["char_to_tokens"]
 
         pua_tokens = set()
-        for tokens in _cjk_char_to_tokens.values():
+        for tokens in cjk_ct.values():
             for t in tokens:
                 if len(t) == 1 and ord(t) >= 0xE00D:
                     pua_tokens.add(t)
@@ -442,14 +440,13 @@ class TestBPETokens:
 
     def test_bpe_tokens_in_vocab(self):
         """All BPE tokens from char codes table are in vocab."""
-        from src.data.decompose import (
-            _load_cjk_decomposition, _cjk_char_to_tokens,
-        )
-        _load_cjk_decomposition()
+        from src.data.decompose import _load_arbitrary_encoding
+        enc = _load_arbitrary_encoding("han_kana")
+        cjk_ct = enc["char_to_tokens"]
 
         vocab_set = set(_load_vocab())
         pua_missing = []
-        for tokens in _cjk_char_to_tokens.values():
+        for tokens in cjk_ct.values():
             for t in tokens:
                 if len(t) == 1 and ord(t) >= 0xE000 and t not in vocab_set:
                     pua_missing.append(f"U+{ord(t):04X}")
