@@ -57,7 +57,7 @@ def find_font(lang: str) -> str | None:
 
 
 sys.path.insert(0, str(Path(__file__).parent))
-from train_lid import random_ink_color, random_bg_color
+import random\ndef random_ink_color(): return tuple(random.randint(0,80) for _ in range(3))\ndef random_bg_color(): return tuple(random.randint(180,255) for _ in range(3))
 
 
 def render_word(text: str, font_path: str, height: int = 32) -> Image.Image | None:

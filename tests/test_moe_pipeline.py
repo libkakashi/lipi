@@ -97,11 +97,8 @@ def script_word_lists():
 @pytest.fixture(scope="module")
 def script_extra_files():
     """Map scripts to their extra word list files (for Latin group etc)."""
-    try:
-        from scripts.train_lid import _SCRIPT_EXTRA_FILES
-        return _SCRIPT_EXTRA_FILES
-    except Exception:
-        return {}
+    from src.data.word_lists import _SCRIPT_EXTRA_FILES
+    return _SCRIPT_EXTRA_FILES
 
 
 @pytest.fixture(scope="module")
