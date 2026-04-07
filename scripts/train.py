@@ -640,7 +640,7 @@ def main():
     print(f"  Batch: {args.batch_size} x {args.grad_accum} = {eff_batch} effective")
     ace_str = f" + ACE x{args.align_ce_weight}" if args.align_ce_weight > 0 else ""
     print(f"  Losses: CTC x1.0 + LID1 x{args.lid1_weight}{ace_str}")
-    print(f"  Routing: predicted (skip CTC on LID-1/LID-2 misroutes)")
+    print(f"  Routing: ground truth (CTC on all samples)")
     print(f"  Per-script vocabs: {data['group_script_vocab_sizes']}")
     print(f"{'=' * 60}")
 
