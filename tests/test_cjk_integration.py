@@ -51,11 +51,13 @@ class TestCJKVocabLoading:
             sym = chr(0xE000 + i)
             assert sym in vocab_set, f"Base symbol U+{0xE000+i:04X} not in vocab"
 
-    def test_sep_in_vocab(self):
-        """SEP token must be in the frozen vocab."""
+    def test_sep_absorbed_by_bpe(self):
+        """SEP token is fully absorbed by BPE — should NOT be in final vocab."""
         from src.encoding.decompose import SEP_CHAR
         vocab = _load_vocab()
-        assert SEP_CHAR in vocab, f"SEP token U+{ord(SEP_CHAR):04X} not in vocab"
+        # SEP is used during encoding but always merged into BPE tokens.
+        # Dead-token pruning correctly removes it from the vocab.
+        assert SEP_CHAR not in vocab, "SEP should be pruned (fully absorbed by BPE)"
 
 
 # ---------------------------------------------------------------------------
