@@ -4,8 +4,11 @@ Arbitrary N-symbol encoding for large character sets.
 Core algorithm:
   1. Find minimum N base symbols needed: N + N² + N³ + N⁴ >= char_count
   2. Rank chars by frequency, assign vary-first codes + SEP
-  3. Run word-level BPE on word corpus
-  4. Result: each char → short PUA token sequence
+  3. Run word-level BPE on a word frequency corpus
+  4. Prune dead tokens (tokens that never appear after decomposing the corpus)
+  5. If pruned tokens exist, run more BPE merges to fill back to target vocab size
+  6. Repeat prune+refill until vocab is stable with zero dead tokens
+  7. Result: each char → short PUA token sequence, vocab size 2500-2600
 
 Used by CJK (N=13), Korean (N=11), Arabic (N=9).
 """
@@ -14,10 +17,15 @@ from __future__ import annotations
 
 import time
 from collections import Counter, defaultdict
+from pathlib import Path
 
 # SEP token: U+2E3B THREE-EM DASH
 SEP_CODEPOINT = 0x2E3B
 SEP_CHAR = chr(SEP_CODEPOINT)
+
+# Target vocab range after pruning+refilling
+TARGET_VOCAB_MIN = 2500
+TARGET_VOCAB_MAX = 2600
 
 # Script configurations
 SCRIPT_CONFIG = {
@@ -212,3 +220,379 @@ def fast_bpe(
                 print(f"  Merge {m}: tok/char={tpc:.4f} ({time.time()-t0:.1f}s){sep_tag}")
 
     return merges, seqs
+
+
+# ---------------------------------------------------------------------------
+# Build configuration per script
+# ---------------------------------------------------------------------------
+
+# Corpus and word list sources for each script
+BUILD_SOURCES = {
+    "han_kana": {
+        "corpus": "han_kana_word_freq.tsv",
+        "word_lists": ["chinese.txt", "japanese.txt"],
+        "group": "sino_japanese",
+    },
+    "korean": {
+        "corpus": "korean_word_freq.tsv",
+        "word_lists": ["korean.txt"],
+        "group": "korean",
+    },
+    "arabic": {
+        "corpus": "arabic_word_freq.tsv",
+        "word_lists": ["arabic.txt", "persian.txt", "urdu.txt"],
+        "group": "arabic",
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# Build pipeline helpers
+# ---------------------------------------------------------------------------
+
+def _load_word_freq(script_name: str, char_ranges: list[tuple[int, int]],
+                    all_chars: list[str], project_root: Path,
+                    ) -> tuple[dict[str, int], Counter[str]]:
+    """Load word frequency corpus and derive char frequencies."""
+    sources = BUILD_SOURCES[script_name]
+    corpus_path = project_root / "training_data" / "corpora" / sources["corpus"]
+    wl_dir = project_root / "training_data" / "word_lists"
+
+    word_freq: dict[str, int] = {}
+
+    # Primary: corpus with frequencies
+    if corpus_path.exists():
+        for line in corpus_path.read_text(encoding="utf-8").splitlines():
+            if line.startswith("word"):
+                continue
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                w, f = parts[0], int(parts[1])
+                if f > 0 and all(is_in_ranges(ord(c), char_ranges) for c in w):
+                    word_freq[w] = f
+
+    # Supplement: word lists (freq=1 for words not in corpus)
+    for wl_name in sources["word_lists"]:
+        wl_path = wl_dir / wl_name
+        if wl_path.exists():
+            for line in wl_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                w = line.strip()
+                if w and w not in word_freq:
+                    if all(is_in_ranges(ord(c), char_ranges) for c in w):
+                        word_freq[w] = 1
+
+    # Ensure all single chars are in corpus
+    for c in all_chars:
+        if c not in word_freq:
+            word_freq[c] = 1
+
+    # Derive char frequencies
+    char_freq: Counter[str] = Counter()
+    for w, f in word_freq.items():
+        for c in w:
+            if is_in_ranges(ord(c), char_ranges):
+                char_freq[c] += f
+
+    return word_freq, char_freq
+
+
+def _assign_codes(chars_ranked: list[str], n_symbols: int,
+                  base_symbols: list[str]) -> dict[str, list[str]]:
+    """Assign vary-first codes + SEP to ranked chars."""
+    gen = gen_vary_first(n_symbols)
+    char_to_code: dict[str, list[str]] = {}
+    for c in chars_ranked:
+        code_tuple = next(gen)
+        code = [base_symbols[d] for d in code_tuple] + [SEP_CHAR]
+        char_to_code[c] = code
+    return char_to_code
+
+
+def _build_word_seqs(word_freq: dict[str, int],
+                     char_to_code: dict[str, list[str]],
+                     ) -> tuple[list[list[str]], list[int], list[int]]:
+    """Build BPE input sequences from word corpus."""
+    w_seqs: list[list[str]] = []
+    w_freqs: list[int] = []
+    w_nchars: list[int] = []
+    for w, f in word_freq.items():
+        seq: list[str] = []
+        ok = True
+        for ch in w:
+            if ch in char_to_code:
+                seq.extend(char_to_code[ch])
+            else:
+                ok = False
+                break
+        if ok and seq:
+            w_seqs.append(seq)
+            w_freqs.append(f)
+            w_nchars.append(len(w))
+    return w_seqs, w_freqs, w_nchars
+
+
+def _apply_merges_to_char_codes(
+    chars: list[str],
+    char_to_code: dict[str, list[str]],
+    merges: list[tuple[str, str, str]],
+) -> dict[str, list[str]]:
+    """Apply BPE merges to per-char codes."""
+    result: dict[str, list[str]] = {}
+    for c in chars:
+        seq = list(char_to_code[c])
+        for a, b, mg in merges:
+            ns: list[str] = []
+            i = 0
+            while i < len(seq):
+                if i + 1 < len(seq) and seq[i] == a and seq[i + 1] == b:
+                    ns.append(mg)
+                    i += 2
+                else:
+                    ns.append(seq[i])
+                    i += 1
+            seq = ns
+        result[c] = seq
+    return result
+
+
+def _collect_used_tokens(word_freq: dict[str, int],
+                         char_codes_post_bpe: dict[str, list[str]],
+                         merges: list[tuple[str, str, str]],
+                         ) -> set[str]:
+    """Decompose all words and collect tokens that actually appear.
+
+    Simulates the full decompose+BPE pipeline without needing the
+    decompose module (avoids circular imports).
+    """
+    # Build merge lookup for priority-based BPE
+    lookup: dict[tuple[str, str], tuple[str, int]] = {}
+    for priority, (a, b, merged) in enumerate(merges):
+        pair = (a, b)
+        if pair not in lookup:
+            lookup[pair] = (merged, priority)
+
+    def apply_bpe(parts: list[str]) -> list[str]:
+        if len(parts) <= 1:
+            return parts
+        while True:
+            best_priority = len(merges)
+            best_pos = -1
+            best_merged = ""
+            for i in range(len(parts) - 1):
+                entry = lookup.get((parts[i], parts[i + 1]))
+                if entry and entry[1] < best_priority:
+                    best_merged, best_priority = entry
+                    best_pos = i
+            if best_pos < 0:
+                break
+            a, b = parts[best_pos], parts[best_pos + 1]
+            new_parts: list[str] = []
+            i = 0
+            while i < len(parts):
+                if i + 1 < len(parts) and parts[i] == a and parts[i + 1] == b:
+                    new_parts.append(best_merged)
+                    i += 2
+                else:
+                    new_parts.append(parts[i])
+                    i += 1
+            parts = new_parts
+        return parts
+
+    used: set[str] = set()
+    for w in word_freq:
+        # Per-char lookup
+        parts: list[str] = []
+        for ch in w:
+            tokens = char_codes_post_bpe.get(ch)
+            if tokens:
+                parts.extend(tokens)
+            else:
+                parts.append(ch)
+        # Apply cross-char BPE
+        parts = apply_bpe(parts)
+        used.update(parts)
+
+    return used
+
+
+# ---------------------------------------------------------------------------
+# Main build pipeline
+# ---------------------------------------------------------------------------
+
+def build_encoding(
+    script_name: str,
+    project_root: Path | None = None,
+    verbose: bool = True,
+) -> dict:
+    """Build complete encoding for a script: codes + BPE + prune + refill.
+
+    The prune+refill loop ensures no dead tokens in the final vocab:
+      1. Run N BPE merges
+      2. Decompose entire corpus, find which tokens actually appear
+      3. Count dead tokens (in vocab but never used)
+      4. If dead > 0: run more BPE merges to compensate, repeat from step 2
+      5. Stop when vocab is in [TARGET_VOCAB_MIN, TARGET_VOCAB_MAX] with 0 dead
+
+    Returns dict with all build artifacts and stats.
+    """
+    if script_name not in SCRIPT_CONFIG:
+        raise ValueError(f"Unknown script: {script_name}. "
+                         f"Available: {', '.join(SCRIPT_CONFIG.keys())}")
+
+    if project_root is None:
+        project_root = Path(__file__).resolve().parent.parent.parent
+
+    cfg = SCRIPT_CONFIG[script_name]
+    char_ranges = cfg["char_ranges"]
+    pua_base = cfg["pua_base"]
+    initial_bpe_merges = cfg["num_bpe_merges"]
+
+    char_codes_path = project_root / "training_data" / "word_lists" / cfg["char_codes_filename"]
+    bpe_path = project_root / "training_data" / "word_lists" / cfg["bpe_merges_filename"]
+    vocab_path = project_root / "src" / "encoding" / "frozen_vocabs" / f"{script_name}_vocab.txt"
+
+    def log(msg: str):
+        if verbose:
+            print(msg)
+
+    log(f"=== Building {script_name} encoding ===")
+
+    # Step 1: Enumerate chars
+    all_chars = all_chars_in_ranges(char_ranges, cfg.get("extra_chars"))
+    char_count = len(all_chars)
+    n_symbols = find_min_n(char_count)
+    base_symbols = [chr(pua_base + i) for i in range(n_symbols)]
+    bpe_pua_start = pua_base + n_symbols
+
+    log(f"  {char_count} chars, N={n_symbols} symbols")
+
+    # Step 2: Load corpus
+    word_freq, char_freq = _load_word_freq(
+        script_name, char_ranges, all_chars, project_root)
+    log(f"  {len(word_freq)} words loaded")
+
+    # Step 3: Rank chars and assign codes
+    chars_ranked = sorted(all_chars, key=lambda c: (-char_freq.get(c, 0), ord(c)))
+    char_to_code = _assign_codes(chars_ranked, n_symbols, base_symbols)
+
+    # Step 4: Build word sequences
+    w_seqs, w_freqs, w_nchars = _build_word_seqs(word_freq, char_to_code)
+    total_chars_w = sum(f * nc for f, nc in zip(w_freqs, w_nchars))
+    total_tokens_pre = sum(f * len(s) for f, s in zip(w_freqs, w_seqs))
+    log(f"  Pre-BPE tokens/char: {total_tokens_pre / total_chars_w:.4f}")
+
+    # Step 5: BPE + prune/refill loop
+    num_merges = initial_bpe_merges
+    iteration = 0
+    max_iterations = 5
+
+    while iteration < max_iterations:
+        iteration += 1
+        log(f"\n  [Iteration {iteration}] Running {num_merges} BPE merges...")
+
+        merges, final_seqs = fast_bpe(
+            w_seqs, w_freqs, num_merges, bpe_pua_start,
+            w_nchars if verbose else None)
+        log(f"  {len(merges)} merges applied")
+
+        total_tokens_post = sum(f * len(s) for f, s in zip(w_freqs, final_seqs))
+        log(f"  Post-BPE tokens/char: {total_tokens_post / total_chars_w:.4f}")
+
+        # Apply merges to per-char codes
+        char_codes_post_bpe = _apply_merges_to_char_codes(
+            all_chars, char_to_code, merges)
+
+        # Build vocab: base symbols + SEP + BPE merge tokens
+        vocab_cps: set[int] = set()
+        for i in range(n_symbols):
+            vocab_cps.add(pua_base + i)
+        vocab_cps.add(SEP_CODEPOINT)
+        for _, _, m in merges:
+            vocab_cps.add(ord(m))
+
+        # Collect used tokens from full corpus decomposition
+        used_tokens = _collect_used_tokens(word_freq, char_codes_post_bpe, merges)
+        used_cps = {ord(t) for t in used_tokens if 0x2E00 <= ord(t) <= 0xFFFF}
+
+        # Find dead tokens
+        dead_cps = vocab_cps - used_cps
+        n_dead = len(dead_cps)
+        vocab_size = len(vocab_cps)
+
+        log(f"  Vocab: {vocab_size} tokens, {n_dead} dead")
+
+        if n_dead == 0:
+            live_vocab_size = vocab_size
+            if TARGET_VOCAB_MIN <= live_vocab_size <= TARGET_VOCAB_MAX:
+                log(f"  Vocab clean and in range [{TARGET_VOCAB_MIN}, {TARGET_VOCAB_MAX}]")
+                break
+            elif live_vocab_size < TARGET_VOCAB_MIN:
+                # Need more merges
+                deficit = TARGET_VOCAB_MIN - live_vocab_size
+                num_merges = len(merges) + deficit + 50  # overshoot slightly
+                log(f"  Vocab too small ({live_vocab_size}), adding {deficit+50} more merges")
+                # Re-run from fresh word seqs
+                w_seqs, w_freqs, w_nchars = _build_word_seqs(word_freq, char_to_code)
+                continue
+            else:
+                log(f"  Vocab at {live_vocab_size}, acceptable")
+                break
+        else:
+            # Dead tokens found — add more merges to compensate
+            live_vocab_size = vocab_size - n_dead
+            deficit = TARGET_VOCAB_MIN - live_vocab_size
+            extra = max(deficit, n_dead) + 50
+            num_merges = len(merges) + extra
+            log(f"  {n_dead} dead tokens, live={live_vocab_size}. "
+                f"Re-running with {num_merges} merges (+{extra})")
+            # Re-run from fresh word seqs
+            w_seqs, w_freqs, w_nchars = _build_word_seqs(word_freq, char_to_code)
+            continue
+
+    # Prune dead tokens from final vocab
+    final_vocab_cps = sorted(cp for cp in vocab_cps if cp in used_cps)
+
+    # Write outputs
+    log(f"\n  Writing outputs...")
+
+    # char_codes.tsv
+    char_codes_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(char_codes_path, "w", encoding="utf-8") as f:
+        f.write("character\tcode_hex\trank\tfreq\n")
+        for rank, c in enumerate(chars_ranked):
+            code = char_codes_post_bpe[c]
+            hex_str = " ".join(f"{ord(t):04X}" for t in code)
+            freq = char_freq.get(c, 0)
+            f.write(f"{c}\t{hex_str}\t{rank}\t{freq}\n")
+
+    # bpe_merges.tsv
+    with open(bpe_path, "w", encoding="utf-8") as f:
+        f.write("index\ttoken_a\ttoken_b\tmerged\n")
+        for idx, (a, b, m) in enumerate(merges):
+            f.write(f"{idx}\t{ord(a):04X}\t{ord(b):04X}\t{ord(m):04X}\n")
+
+    # vocab.txt (pruned — only live tokens)
+    vocab_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(vocab_path, "w", encoding="utf-8") as f:
+        for cp in final_vocab_cps:
+            f.write(f"{cp:04X}\n")
+
+    log(f"  {char_codes_path.name}: {len(all_chars)} entries")
+    log(f"  {bpe_path.name}: {len(merges)} merges")
+    log(f"  {vocab_path.name}: {len(final_vocab_cps)} tokens (0 dead)")
+
+    stats = {
+        "script": script_name,
+        "n_symbols": n_symbols,
+        "char_count": char_count,
+        "n_merges": len(merges),
+        "vocab_size": len(final_vocab_cps),
+        "dead_tokens": 0,
+        "tokens_per_char": total_tokens_post / total_chars_w,
+        "iterations": iteration,
+    }
+    log(f"\n  Final: {stats['vocab_size']} vocab, "
+        f"{stats['tokens_per_char']:.4f} tok/char, "
+        f"{stats['iterations']} iteration(s)")
+
+    return stats
