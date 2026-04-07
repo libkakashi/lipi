@@ -9,7 +9,7 @@ import torch
 from torch.utils.data import Dataset
 
 from src.model.lid import SCRIPT_TO_GROUP, SCRIPT_TO_ID, GROUP_TO_ID
-from src.data.bigrams import LipiTokenizer
+from src.data.tokenizer import LipiTokenizer
 from src.data.decompose import decompose_text, DECOMPOSE_GROUPS
 from src.data.vocab import get_all_script_vocabs
 

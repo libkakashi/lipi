@@ -59,7 +59,7 @@ def all_vocabs():
 @pytest.fixture(scope="module")
 def all_tokenizers():
     from src.data.vocab import build_script_vocab
-    from src.data.bigrams import LipiTokenizer
+    from src.data.tokenizer import LipiTokenizer
     from src.model.lid import SCRIPTS, SCRIPT_TO_GROUP
     tokenizers = {}
     for script in SCRIPTS:
@@ -186,7 +186,7 @@ class TestFrozenVocabContent:
     """Tests for the actual vocab content loaded by build_script_vocab."""
 
     def test_blank_token_at_index_zero(self, all_vocabs):
-        from src.data.bigrams import BLANK_TOKEN
+        from src.data.tokenizer import BLANK_TOKEN
         for script, vocab in all_vocabs.items():
             assert vocab[0] == BLANK_TOKEN, (
                 f"{script}: vocab[0] is {repr(vocab[0])}")
@@ -1188,7 +1188,7 @@ class TestCharGeneration:
 
     def test_no_blank_in_chars(self):
         from scripts.generate_data import get_renderable_chars as _get_script_chars
-        from src.data.bigrams import BLANK_TOKEN
+        from src.data.tokenizer import BLANK_TOKEN
         from src.model.lid import SCRIPTS
         for script in SCRIPTS:
             if script == "emoji":
@@ -1294,7 +1294,7 @@ class TestCrossConsistency:
             if script == "emoji":
                 continue
             from src.data.vocab import build_script_vocab
-            from src.data.bigrams import LipiTokenizer
+            from src.data.tokenizer import LipiTokenizer
             group = SCRIPT_TO_GROUP[script]
             vocab = build_script_vocab(script, group)
             tok = LipiTokenizer(vocab=vocab, bigrams=set())

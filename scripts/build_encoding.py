@@ -19,219 +19,34 @@ from __future__ import annotations
 
 import argparse
 import sys
-import time
-from collections import Counter, defaultdict
+from collections import Counter
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from src.data.encoding import (
+    SCRIPT_CONFIG, SEP_CODEPOINT, SEP_CHAR,
+    find_min_n, all_chars_in_ranges, is_in_ranges, gen_vary_first, fast_bpe,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# SEP token: U+2E3B THREE-EM DASH
-SEP_CODEPOINT = 0x2E3B
-SEP_CHAR = chr(SEP_CODEPOINT)
-
-# ---------------------------------------------------------------------------
-# Script configurations
-# ---------------------------------------------------------------------------
-
-SCRIPT_CONFIG = {
+# Add word_freq_path and vocab_name to configs (build-script-only fields)
+_BUILD_CONFIG = {
     "han_kana": {
-        "char_ranges": [
-            (0x3400, 0x4DBF),   # CJK Extension A
-            (0x4E00, 0x9FFF),   # CJK Unified Ideographs
-            (0x3040, 0x309F),   # Hiragana
-            (0x30A0, 0x30FF),   # Katakana
-            (0x3000, 0x303F),   # CJK Symbols and Punctuation
-            (0xFF01, 0xFF5E),   # Fullwidth ASCII variants
-            (0xFF61, 0xFF9F),   # Halfwidth Katakana
-        ],
-        "extra_chars": list("0123456789(),.!?:;-/'\"% "),
         "word_freq_path": "training_data/corpora/han_kana_word_freq.tsv",
-        "num_bpe_merges": 2500,
-        "pua_base": 0xE000,
-        "bpe_pua_base": None,  # auto = pua_base + N
         "vocab_name": "han_kana",
-        "extra_vocab_codepoints": [],
-        "bpe_merges_filename": "bpe_merges.tsv",
-        "char_codes_filename": "cjk_char_codes.tsv",
     },
     "korean": {
-        "char_ranges": [(0xAC00, 0xD7A3)],
         "word_freq_path": "training_data/corpora/korean_word_freq.tsv",
-        "extra_chars": [],
-        "num_bpe_merges": 2500,
-        "pua_base": 0xEA00,
-        "bpe_pua_base": None,
         "vocab_name": "korean",
-        "extra_vocab_codepoints": [],
-        "bpe_merges_filename": "korean_bpe_merges.tsv",
-        "char_codes_filename": "korean_char_codes.tsv",
+    },
+    "arabic": {
+        "word_freq_path": "training_data/corpora/arabic_word_freq.tsv",
+        "vocab_name": "arabic",
     },
 }
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def find_min_n(char_count: int) -> int:
-    """Find minimum N such that N + N^2 + N^3 + N^4 >= char_count."""
-    for n in range(2, 200):
-        total = n + n**2 + n**3 + n**4
-        if total >= char_count:
-            return n
-    raise ValueError(f"Cannot find N for {char_count} chars")
-
-
-def all_chars_in_ranges(ranges: list[tuple[int, int]]) -> list[str]:
-    """All chars in the given codepoint ranges."""
-    chars: list[str] = []
-    for start, end in ranges:
-        for cp in range(start, end + 1):
-            chars.append(chr(cp))
-    return chars
-
-
-def is_in_ranges(cp: int, ranges: list[tuple[int, int]]) -> bool:
-    """Check if a codepoint is in any of the given ranges."""
-    for start, end in ranges:
-        if start <= cp <= end:
-            return True
-    return False
-
-
-def gen_vary_first(n: int):
-    """Generate vary-first code tuples: leftmost position varies fastest.
-
-    Yields:
-        (0,), (1,), ..., (N-1,),
-        (0,0), (1,0), ..., (N-1,0), (0,1), (1,1), ..., (N-1,N-1),
-        (0,0,0), (1,0,0), ..., (N-1,N-1,N-1),
-        (0,0,0,0), ...
-    """
-    for d0 in range(n):
-        yield (d0,)
-    for d1 in range(n):
-        for d0 in range(n):
-            yield (d0, d1)
-    for d2 in range(n):
-        for d1 in range(n):
-            for d0 in range(n):
-                yield (d0, d1, d2)
-    for d3 in range(n):
-        for d2 in range(n):
-            for d1 in range(n):
-                for d0 in range(n):
-                    yield (d0, d1, d2, d3)
-
-
-# ---------------------------------------------------------------------------
-# Fast BPE
-# ---------------------------------------------------------------------------
-
-def fast_bpe(
-    seqs: list[list[str]],
-    freqs: list[int],
-    num_merges: int,
-    pua_start: int,
-    nchars: list[int] | None = None,
-) -> tuple[list[tuple[str, str, str]], list[list[str]]]:
-    """Run frequency-weighted word-level BPE.
-
-    Args:
-        seqs: list of token sequences (one per word)
-        freqs: frequency of each word
-        num_merges: number of BPE merges to perform
-        pua_start: PUA codepoint for first BPE merge token
-        nchars: number of script chars per word (for stats)
-
-    Returns:
-        (merges, final_sequences)
-    """
-    seqs = [list(s) for s in seqs]
-    n = len(seqs)
-    pua_next = pua_start
-
-    # Build pair counts and pair->sequence index
-    pc: Counter[tuple[str, str]] = Counter()
-    p2s: dict[tuple[str, str], set[int]] = defaultdict(set)
-    for sid in range(n):
-        f = freqs[sid]
-        s = seqs[sid]
-        for i in range(len(s) - 1):
-            p = (s[i], s[i + 1])
-            pc[p] += f
-            p2s[p].add(sid)
-
-    merges: list[tuple[str, str, str]] = []
-    t0 = time.time()
-
-    for step in range(num_merges):
-        if not pc:
-            print(f"  No more pairs at step {step}")
-            break
-
-        bp = pc.most_common(1)[0][0]
-        if pc[bp] <= 0:
-            break
-
-        a, b = bp
-        mg = chr(pua_next)
-        pua_next += 1
-        merges.append((a, b, mg))
-
-        affected = list(p2s.pop(bp, set()))
-        del pc[bp]
-
-        for sid in affected:
-            s = seqs[sid]
-            f = freqs[sid]
-            ns: list[str] = []
-            i = 0
-            while i < len(s):
-                if i + 1 < len(s) and s[i] == a and s[i + 1] == b:
-                    if ns:
-                        lp = (ns[-1], a)
-                        pc[lp] -= f
-                        if pc[lp] <= 0:
-                            del pc[lp]
-                        p2s[lp].discard(sid)
-                    if i + 2 < len(s):
-                        rp = (b, s[i + 2])
-                        pc[rp] -= f
-                        if pc[rp] <= 0:
-                            del pc[rp]
-                        p2s[rp].discard(sid)
-                    ns.append(mg)
-                    if len(ns) >= 2:
-                        lp = (ns[-2], mg)
-                        pc[lp] += f
-                        p2s[lp].add(sid)
-                    if i + 2 < len(s):
-                        rp = (mg, s[i + 2])
-                        pc[rp] += f
-                        p2s[rp].add(sid)
-                    i += 2
-                else:
-                    ns.append(s[i])
-                    i += 1
-            seqs[sid] = ns
-
-        m = step + 1
-        if m <= 5 or m % 500 == 0:
-            if nchars:
-                tf = tt = tc = 0
-                for sid in range(n):
-                    f = freqs[sid]
-                    tf += f
-                    tt += f * len(seqs[sid])
-                    tc += f * nchars[sid]
-                tpc = tt / tc if tc else 0
-                has_sep = SEP_CHAR in bp
-                sep_tag = " [SEP-merge]" if has_sep else ""
-                print(f"  Merge {m}: tok/char={tpc:.4f} ({time.time()-t0:.1f}s){sep_tag}")
-
-    return merges, seqs
 
 
 # ---------------------------------------------------------------------------
@@ -245,22 +60,21 @@ def build(script_name: str):
         sys.exit(1)
 
     cfg = SCRIPT_CONFIG[script_name]
+    bcfg = _BUILD_CONFIG.get(script_name, {})
     char_ranges = cfg["char_ranges"]
-    word_freq_path = PROJECT_ROOT / cfg["word_freq_path"]
+    word_freq_path = PROJECT_ROOT / bcfg.get("word_freq_path", f"training_data/corpora/{script_name}_word_freq.tsv")
     num_bpe_merges = cfg["num_bpe_merges"]
     pua_base = cfg["pua_base"]
+    vocab_name = bcfg.get("vocab_name", script_name)
 
     char_codes_out = PROJECT_ROOT / "training_data" / "word_lists" / cfg["char_codes_filename"]
     bpe_out = PROJECT_ROOT / "training_data" / "word_lists" / cfg["bpe_merges_filename"]
-    vocab_out = PROJECT_ROOT / "src" / "data" / "frozen_vocabs" / f"{cfg['vocab_name']}_vocab.txt"
+    vocab_out = PROJECT_ROOT / "src" / "data" / "frozen_vocabs" / f"{vocab_name}_vocab.txt"
 
     print(f"=== Building {script_name} vocab: arbitrary encoding + word-level BPE ===")
 
     # --- Step 1: Enumerate all chars ---
-    chars = all_chars_in_ranges(char_ranges)
-    for ec in cfg.get("extra_chars", []):
-        if ec not in chars:
-            chars.append(ec)
+    chars = all_chars_in_ranges(char_ranges, cfg.get("extra_chars", []))
     char_count = len(chars)
     print(f"\n[1/7] {char_count} characters in ranges")
 
@@ -270,7 +84,7 @@ def build(script_name: str):
     print(f"\n[2/7] N = {n_symbols} (capacity {capacity} >= {char_count})")
 
     base_symbols = [chr(pua_base + i) for i in range(n_symbols)]
-    bpe_pua_start = cfg["bpe_pua_base"] if cfg["bpe_pua_base"] else pua_base + n_symbols
+    bpe_pua_start = pua_base + n_symbols
 
     # --- Step 3: Load word frequency corpus ---
     print(f"\n[3/7] Loading word frequency from {word_freq_path}...")

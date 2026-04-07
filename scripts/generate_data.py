@@ -227,7 +227,7 @@ def get_renderable_chars(script: str) -> list[str]:
     blank, non-printable, and combining marks.
     """
     import unicodedata
-    from src.data.bigrams import BLANK_TOKEN
+    from src.data.tokenizer import BLANK_TOKEN
 
     if script == "han_kana":
         chars = []

@@ -35,7 +35,7 @@ class TestCJKVocabLoading:
         assert len(vocab) > 200, f"Vocab suspiciously small: {len(vocab)}"
 
     def test_blank_token_at_index_zero(self):
-        from src.data.bigrams import BLANK_TOKEN
+        from src.data.tokenizer import BLANK_TOKEN
         vocab = _load_vocab()
         assert vocab[0] == BLANK_TOKEN
 
@@ -66,7 +66,7 @@ class TestCJKTokenizerRoundtrip:
 
     @pytest.fixture
     def tok(self):
-        from src.data.bigrams import LipiTokenizer
+        from src.data.tokenizer import LipiTokenizer
         return LipiTokenizer(vocab=_load_vocab())
 
     def test_cjk_roundtrip(self, tok):
@@ -231,7 +231,7 @@ class TestNoIDOverflow:
 
     def test_all_chars_encode_within_range(self):
         """Encode all 27,584 CJK chars, verify all IDs < vocab_size."""
-        from src.data.bigrams import LipiTokenizer
+        from src.data.tokenizer import LipiTokenizer
         from src.data.decompose import decompose_han_kana
 
         vocab = _load_vocab()
@@ -334,7 +334,7 @@ class TestEvalDecodePath:
 
     def test_ctc_greedy_decode_simulation(self):
         """Simulate CTC greedy decode -> tok.decode() -> reconstruct."""
-        from src.data.bigrams import LipiTokenizer
+        from src.data.tokenizer import LipiTokenizer
         from src.data.decompose import decompose_han_kana, reconstruct_han_kana
 
         tok = LipiTokenizer(vocab=_load_vocab())
@@ -365,13 +365,13 @@ class TestEvalDecodePath:
 
     def test_decode_with_only_blanks(self):
         """All-blank CTC output should produce empty string."""
-        from src.data.bigrams import LipiTokenizer
+        from src.data.tokenizer import LipiTokenizer
         tok = LipiTokenizer(vocab=_load_vocab())
         assert tok.decode([0, 0, 0]) == ""
 
     def test_decode_skips_blank_correctly(self):
         """Blank tokens (ID 0) are filtered out during decode."""
-        from src.data.bigrams import LipiTokenizer
+        from src.data.tokenizer import LipiTokenizer
         from src.data.decompose import decompose_han_kana
         tok = LipiTokenizer(vocab=_load_vocab())
 

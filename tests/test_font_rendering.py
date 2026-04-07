@@ -48,7 +48,7 @@ def _get_sample_words(script, n=5):
 def _get_sample_chars(script, n=10):
     """Get sample characters from a script's vocab."""
     from src.data.vocab import build_script_vocab
-    from src.data.bigrams import BLANK_TOKEN
+    from src.data.tokenizer import BLANK_TOKEN
     group = SCRIPT_TO_GROUP[script]
     vocab = build_script_vocab(script, group)
     chars = [ch for ch in vocab if ch.strip() and ord(ch) > 127 and ch != BLANK_TOKEN]
@@ -777,7 +777,7 @@ class TestDataQuality:
         full word but the target has missing characters.
         """
         from src.data.vocab import build_script_vocab
-        from src.data.bigrams import LipiTokenizer
+        from src.data.tokenizer import LipiTokenizer
         from src.data.decompose import decompose_text, DECOMPOSE_GROUPS
 
         failures = []
