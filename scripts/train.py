@@ -92,7 +92,7 @@ def parse_args():
                              "'experts+ctc' (stage1+stage2+ctc heads+lid2), "
                              "'ctc' (ctc heads only), "
                              "or 'shared' (shared SWA + LID-1 only)")
-args = parser.parse_args()
+    args = parser.parse_args()
 
     # Validation
     assert args.epochs > 0, f"--epochs must be > 0, got {args.epochs}"

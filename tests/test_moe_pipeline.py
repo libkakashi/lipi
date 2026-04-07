@@ -24,7 +24,7 @@ ENCODED_SCRIPTS = {"han_kana", "korean", "arabic"}
 # ---------------------------------------------------------------------------
 
 WORD_LIST_DIR = Path(__file__).parent.parent / "training_data" / "word_lists"
-VOCAB_DIR = Path(__file__).parent.parent / "src" / "data" / "frozen_vocabs"
+VOCAB_DIR = Path(__file__).parent.parent / "src" / "encoding" / "frozen_vocabs"
 
 
 @pytest.fixture(scope="module")
@@ -142,7 +142,7 @@ def model_and_vocabs():
 # ---------------------------------------------------------------------------
 
 class TestFrozenVocabFiles:
-    """Tests for frozen vocab files in src/data/frozen_vocabs/."""
+    """Tests for frozen vocab files in src/encoding/frozen_vocabs/."""
 
     def test_every_script_has_vocab_file(self, lid_config):
         for script in lid_config["scripts"]:
@@ -786,7 +786,7 @@ class TestScriptGroupDefinitions:
 class TestDecomposition:
 
     def test_korean_bpe_merges_loaded(self):
-        from src.data import decompose as decompose_mod
+        from src.encoding import decompose as decompose_mod
         enc = decompose_mod._load_arbitrary_encoding("korean")
         assert enc["bpe_merges"] is not None
         assert len(enc["bpe_merges"]) > 0
@@ -950,15 +950,15 @@ class TestModelConstruction:
         # the training script casts to bf16. Check the code, not the model.
         import inspect
         src = inspect.getsource(type(model))
-        # This test is a reminder — actual bf16 cast happens in train_moe.py
+        # This test is a reminder — actual bf16 cast happens in train.py
 
     def test_grad_clip_not_too_aggressive(self):
         """max_norm must be >= 25 for 759M param model.
         max_norm=5 crushed LID gradient on 574M model."""
-        src = open('scripts/train_moe.py').read()
+        src = open('scripts/train.py').read()
         import re
         match = re.search(r'max_norm=(\d+\.?\d*)', src)
-        assert match, "max_norm not found in train_moe.py"
+        assert match, "max_norm not found in train.py"
         max_norm = float(match.group(1))
         assert max_norm >= 25, (
             f"max_norm={max_norm} too aggressive for 759M model (need >=25)")
@@ -966,7 +966,7 @@ class TestModelConstruction:
     def test_ctc_uses_per_script_slicing(self):
         """CTC must use per-script vocab slicing, not global max_vocab.
         Global softmax dilutes probability for smaller vocabs."""
-        src = open('src/training/moe_losses.py').read()
+        src = open('src/training/losses.py').read()
         assert 'group_script_vocabs' in src, (
             "CTC loss missing per-script vocab slicing")
         assert '[:vs]' in src or '[:, :, :vs]' in src, (
@@ -975,7 +975,7 @@ class TestModelConstruction:
     def test_lid2_loss_averaged_not_summed(self):
         """LID-2 loss must be averaged across groups, not summed.
         Summed LID-2 (~3.7) drowns CTC (~3.5) in expert blocks."""
-        src = open('src/training/moe_losses.py').read()
+        src = open('src/training/losses.py').read()
         assert 'lid2_count' in src, (
             "LID-2 loss not counting groups for averaging")
         assert '/ lid2_count' in src, (
