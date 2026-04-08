@@ -271,11 +271,10 @@ class LipiMoEEncoder(nn.Module):
         x = self.proj_shared(x)
 
         # Shared SWA (with gradient checkpointing to save activation memory)
+        # Shared SWA — no gradient checkpointing (only 6 blocks, keep activations
+        # in VRAM for faster backward; expert blocks still checkpoint)
         for block in self.shared_swa:
-            if self.training and torch.is_grad_enabled():
-                x = ckpt_util.checkpoint(block, x, h, w, use_reentrant=False)
-            else:
-                x = block(x, h=h, w=w)
+            x = block(x, h=h, w=w)
 
         # LID-1 (with learned attention pooling)
         group_logits = self.lid_coarse.forward_seq(x)
