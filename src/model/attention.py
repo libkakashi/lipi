@@ -188,20 +188,19 @@ class ShiftedWindowAttention(nn.Module):
         q = self.rope(q, h=self.window_h, w=self.window_w)
         k = self.rope(k, h=self.window_h, w=self.window_w)
 
-        # Attention: flash SDPA for non-shifted blocks (no mask needed),
-        # manual attention for shifted blocks (need mask, but small windows so O(N²) is fine)
-        if self.shift:
-            attn = (q @ k.transpose(-2, -1)) * self.scale
-            mask = self._build_shift_mask(h, w, x.device)
-            num_windows = nH * nW
-            attn = attn.reshape(B, num_windows, self.num_heads, -1, attn.shape[-1])
-            attn = attn + mask.unsqueeze(0).unsqueeze(2)
-            attn = attn.reshape(-1, self.num_heads, attn.shape[-2], attn.shape[-1])
-            attn = F.softmax(attn, dim=-1)
-            out = attn @ v
-        else:
-            out = F.scaled_dot_product_attention(q, k, v)
-        # out: (B*nwin, heads, ws, head_dim)
+        # Scaled dot-product attention (manual — windows are only 64 tokens,
+        # so O(N²) attention matrix is 64×64 = trivial per window)
+        attn = (q @ k.transpose(-2, -1)) * self.scale  # (B*nwin, heads, ws, ws)
+
+        # Apply shift mask (all-zeros when shift=0 → adding zeros is no-op)
+        mask = self._build_shift_mask(h, w, x.device)
+        num_windows = nH * nW
+        attn = attn.reshape(B, num_windows, self.num_heads, -1, attn.shape[-1])
+        attn = attn + mask.unsqueeze(0).unsqueeze(2)
+        attn = attn.reshape(-1, self.num_heads, attn.shape[-2], attn.shape[-1])
+
+        attn = F.softmax(attn, dim=-1)
+        out = attn @ v  # (B*nwin, heads, ws, head_dim)
 
         # Merge heads
         out = out.transpose(1, 2).reshape(-1, self.window_h * self.window_w, C)
