@@ -265,16 +265,18 @@ def collate_moe(batch) -> tuple[
 ]:
     """Stack pre-encoded batch, padding images to max width in batch."""
     imgs, targets, tgt_lens, gids, sids, labels = zip(*batch)
-    # Pad images to max width in this batch
-    max_w = max(img.shape[2] for img in imgs)
+    # Pad/crop images to max width in this batch, capped at 384px
+    max_w = min(max(img.shape[2] for img in imgs), 384)
     padded = []
     for img in imgs:
-        if img.shape[2] < max_w:
-            pad = torch.zeros(img.shape[0], img.shape[1], max_w - img.shape[2],
+        w = img.shape[2]
+        if w > max_w:
+            img = img[:, :, :max_w]  # truncate wide images
+        elif w < max_w:
+            pad = torch.zeros(img.shape[0], img.shape[1], max_w - w,
                               dtype=img.dtype)
-            padded.append(torch.cat([img, pad], dim=2))
-        else:
-            padded.append(img)
+            img = torch.cat([img, pad], dim=2)
+        padded.append(img)
     # Pad targets to max length in this batch
     max_tgt = max(t.shape[0] for t in targets)
     padded_tgt = []
