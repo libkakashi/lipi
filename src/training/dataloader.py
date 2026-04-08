@@ -328,23 +328,31 @@ class ShardStreamDataset(Dataset):
                 self._index.append((si, i))
             del shard
 
-        # Cache
-        self._cached_shard_idx = -1
-        self._cached_shard = None
+        # LRU cache — keep recent shards in memory
+        self._cache: dict[int, dict] = {}
+        self._cache_order: list[int] = []
+        self._cache_max = max(1, min(len(shard_files), 32))  # up to 32 shards (~3GB)
 
     def __len__(self):
         return len(self._index)
 
     def _load_shard(self, shard_idx: int):
-        if shard_idx != self._cached_shard_idx:
-            self._cached_shard = torch.load(
+        if shard_idx not in self._cache:
+            if len(self._cache) >= self._cache_max:
+                evict = self._cache_order.pop(0)
+                del self._cache[evict]
+            self._cache[shard_idx] = torch.load(
                 self._shard_files[shard_idx], weights_only=False)
-            self._cached_shard_idx = shard_idx
+            self._cache_order.append(shard_idx)
+        else:
+            # Move to end (most recently used)
+            self._cache_order.remove(shard_idx)
+            self._cache_order.append(shard_idx)
 
     def __getitem__(self, idx):
         shard_idx, sample_idx = self._index[idx]
         self._load_shard(shard_idx)
-        s = self._cached_shard
+        s = self._cache[shard_idx]
         img = s["images"][sample_idx]
         label = s["labels"][sample_idx]
         global_sid = s["script_ids"][sample_idx].item()
