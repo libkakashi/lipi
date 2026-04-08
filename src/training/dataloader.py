@@ -2,11 +2,12 @@
 Data loading and tokenization for MoE training.
 """
 
+import random
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 
 from src.model.lid import SCRIPT_TO_GROUP, SCRIPT_TO_ID, GROUP_TO_ID
 from src.encoding.decompose import encode_text, script_vocab_size
@@ -259,20 +260,47 @@ class MoEDataset(Dataset):
                 self.group_ids[idx], self.local_script_ids[idx], self.labels[idx])
 
 
+class WidthGroupedSampler(Sampler):
+    """Sampler that groups images by width to minimize padding waste.
+
+    Sorts indices by image width, chunks into groups of batch_size,
+    then shuffles the group order each epoch. Within each group,
+    images have similar widths so padding overhead is minimal.
+    """
+
+    def __init__(self, widths: list[int], batch_size: int):
+        self.batch_size = batch_size
+        # Sort indices by width
+        self.sorted_indices = sorted(range(len(widths)), key=lambda i: widths[i])
+
+    def __iter__(self):
+        # Chunk into groups of batch_size
+        chunks = []
+        for i in range(0, len(self.sorted_indices), self.batch_size):
+            chunks.append(self.sorted_indices[i:i + self.batch_size])
+        # Shuffle chunk order (not within chunks — keep width-similar together)
+        random.shuffle(chunks)
+        for chunk in chunks:
+            yield from chunk
+
+    def __len__(self):
+        return len(self.sorted_indices)
+
+
 def collate_moe(batch) -> tuple[
     torch.Tensor, torch.Tensor, torch.Tensor,
     torch.Tensor, torch.Tensor, list[str]
 ]:
     """Stack pre-encoded batch, padding images to max width in batch."""
     imgs, targets, tgt_lens, gids, sids, labels = zip(*batch)
-    # Pad/crop images to max width in this batch, capped at 384px
-    max_w = min(max(img.shape[2] for img in imgs), 384)
+    # Pad images to max width in this batch (no truncation)
+    max_w = max(img.shape[2] for img in imgs)
+    # Round up to multiple of 4 for clean downsampling
+    max_w = (max_w + 3) // 4 * 4
     padded = []
     for img in imgs:
         w = img.shape[2]
-        if w > max_w:
-            img = img[:, :, :max_w]  # truncate wide images
-        elif w < max_w:
+        if w < max_w:
             pad = torch.zeros(img.shape[0], img.shape[1], max_w - w,
                               dtype=img.dtype)
             img = torch.cat([img, pad], dim=2)
@@ -322,33 +350,41 @@ class ShardStreamDataset(Dataset):
             for local_s, script in enumerate(members):
                 self._global_sid_to_local[SCRIPT_TO_ID[script]] = local_s
 
-        # Build index from cached shard sizes or scan
-        index_path = shard_files[0].parent / ".shard_index.pt"
+        # Build index from cached shard info or scan
+        self.widths: list[int] = []  # per-sample image widths for batching
+        index_path = shard_files[0].parent / ".shard_index_v2.pt"
+        loaded = False
         if index_path.exists():
-            shard_sizes = torch.load(index_path, weights_only=True)
-            if len(shard_sizes) == len(shard_files):
-                for si, n in enumerate(shard_sizes.tolist()):
+            cached = torch.load(index_path, weights_only=True)
+            if (isinstance(cached, dict) and "sizes" in cached and "widths" in cached
+                    and len(cached["sizes"]) == len(shard_files)):
+                for si, n in enumerate(cached["sizes"].tolist()):
                     for i in range(n):
                         self._index.append((si, i))
-            else:
-                index_path = None  # mismatch, rescan
+                self.widths = cached["widths"].tolist()
+                loaded = True
 
-        if not self._index:
-            # Scan shard sizes in parallel
-            def _get_size(path):
+        if not loaded:
+            # Scan shard sizes + widths in parallel
+            def _get_info(path):
                 s = torch.load(path, weights_only=False)
                 n = s["script_ids"].shape[0]
+                w = s["images"].shape[3]  # all images in a shard share width
                 del s
-                return n
+                return n, w
 
             with ThreadPoolExecutor(max_workers=16) as pool:
-                sizes = list(pool.map(_get_size, shard_files))
+                infos = list(pool.map(_get_info, shard_files))
 
-            for si, n in enumerate(sizes):
+            sizes = []
+            for si, (n, w) in enumerate(infos):
+                sizes.append(n)
                 for i in range(n):
                     self._index.append((si, i))
+                    self.widths.append(w)
             # Cache for next time
-            torch.save(torch.tensor(sizes), index_path)
+            torch.save({"sizes": torch.tensor(sizes),
+                         "widths": torch.tensor(self.widths)}, index_path)
 
         # LRU cache — keep recent shards in memory
         self._cache: dict[int, dict] = {}

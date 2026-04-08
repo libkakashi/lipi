@@ -25,7 +25,7 @@ from src.model.encoder import LipiMoEEncoder
 from src.model.lid import SCRIPT_TO_GROUP, NUM_GROUPS, GROUPS
 from src.training.dataloader import (
     load_shards, build_script_tokenizers, encode_labels,
-    remap_ids, MoEDataset, collate_moe,
+    remap_ids, MoEDataset, collate_moe, WidthGroupedSampler,
     ShardStreamDataset, load_shard_metadata,
 )
 from src.training.losses import (
@@ -178,7 +178,12 @@ def load_and_prepare_data(args, device):
         dataset, [n_train, n_val], generator=torch.Generator().manual_seed(42))
     print(f"Train: {n_train}, Val: {n_val}")
 
-    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True,
+    # Width-grouped sampler: batches similar-width images together to minimize
+    # padding waste and prevent OOM from one wide outlier forcing 768px padding
+    train_widths = [dataset.widths[i] for i in train_set.indices]
+    train_sampler = WidthGroupedSampler(train_widths, args.batch_size)
+    train_loader = DataLoader(train_set, batch_size=args.batch_size,
+                              sampler=train_sampler,
                               collate_fn=collate_moe, pin_memory=(device_type == "cuda"))
     val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False,
                             collate_fn=collate_moe, pin_memory=(device_type == "cuda"))
