@@ -657,7 +657,7 @@ def get_korean_codec() -> KoreanCodec:
 
 # ── CJK codec ───────────────────────────────────────────────────────
 
-_CJK_VOCAB_SIZE = 4003
+_CJK_VOCAB_SIZE = 4000
 _CJK_N_ALT = 24
 
 
