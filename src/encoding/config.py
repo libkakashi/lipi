@@ -170,20 +170,20 @@ NO_FUSION_SCRIPTS: dict[str, NoFusionCodec] = {
 FUSION_VOCAB: dict[str, int] = {
     "arabic": 500,
     "bengali": 750,
-    "burmese": 1000,
+    "burmese": 500,
     "devanagari": 750,
     "gujarati": 750,
     "gurmukhi": 500,
     "kannada": 500,
-    "khmer": 1500,
-    "lao": 1000,
+    "khmer": 750,
+    "lao": 500,
     "malayalam": 750,
     "odia": 750,
     "sinhala": 500,
     "tamil": 500,
     "telugu": 750,
-    "thai": 1000,
-    "tibetan": 1000,
+    "thai": 500,
+    "tibetan": 500,
 }
 
 
