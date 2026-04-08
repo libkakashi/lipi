@@ -259,8 +259,6 @@ class LipiMoEEncoder(nn.Module):
         detach_for_experts: bool = False,
     ) -> dict:
         B = images.shape[0]
-        W = images.shape[3]
-        T = W // 4  # stem 2× + width_pool 2×
 
         # Color projection
         x = self.color_proj(images)
@@ -324,6 +322,7 @@ class LipiMoEEncoder(nn.Module):
         C2 = x.shape[-1]
         x = x.reshape(B, h, w, C2)                         # (B, 8, w, C2)
         x = x.permute(0, 2, 1, 3).reshape(B, w, C2 * h)   # (B, T, C2*8)
+        T = w  # actual sequence length from encoder (not assumed W//4)
 
         # Final norm
         x = self.norm(x)
