@@ -332,15 +332,19 @@ class ShardStreamDataset(Dataset):
                 index_path = None  # mismatch, rescan
 
         if not self._index:
-            # Scan shard sizes using only script_ids (small tensor, fast to load)
-            sizes = []
-            for si, path in enumerate(shard_files):
-                shard = torch.load(path, weights_only=False)
-                n = shard["script_ids"].shape[0]
-                sizes.append(n)
+            # Scan shard sizes in parallel
+            def _get_size(path):
+                s = torch.load(path, weights_only=False)
+                n = s["script_ids"].shape[0]
+                del s
+                return n
+
+            with ThreadPoolExecutor(max_workers=16) as pool:
+                sizes = list(pool.map(_get_size, shard_files))
+
+            for si, n in enumerate(sizes):
                 for i in range(n):
                     self._index.append((si, i))
-                del shard
             # Cache for next time
             torch.save(torch.tensor(sizes), index_path)
 
