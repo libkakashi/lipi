@@ -26,6 +26,7 @@ from src.model.lid import SCRIPT_TO_GROUP, NUM_GROUPS, GROUPS
 from src.training.dataloader import (
     load_shards, build_script_tokenizers, encode_labels,
     remap_ids, MoEDataset, collate_moe,
+    ShardStreamDataset, load_shard_metadata,
 )
 from src.training.losses import (
     compute_lid1_loss, compute_lid2_loss, compute_ctc_loss,
@@ -133,8 +134,10 @@ def load_and_prepare_data(args, device):
     device_type = device.type
     data_path = Path(args.data)
     print(f"\nLoading data from {data_path}/...")
-    images, labels, script_ids_global, group_ids_global, meta, \
-        shard_target_ids, shard_target_lens = load_shards(data_path)
+
+    shard_files, meta = load_shard_metadata(data_path)
+    print(f"  {len(shard_files)} shards")
+
     active_scripts = meta["active_scripts"]
     if args.scripts != "all":
         selected = set(s.strip() for s in args.scripts.split(","))
@@ -151,16 +154,10 @@ def load_and_prepare_data(args, device):
     print(f"Data groups: {sorted(active_data_groups)}")
 
     # Always build model with ALL 13 groups for checkpoint compatibility.
-    # Inactive groups exist in the model but never see data — zero VRAM overhead
-    # beyond ~3.5M extra CTC head params (trivial vs 27M total).
     active_groups = list(GROUPS)
     all_scripts = list(SCRIPT_TO_GROUP.keys())
     n_groups = NUM_GROUPS
     print(f"Model groups: {n_groups} (full architecture, data for {len(active_data_groups)})")
-
-    # Remap IDs using full group list (global IDs match model's group indices)
-    group_ids, local_script_ids, global_to_local_group = remap_ids(
-        all_scripts, active_groups, script_ids_global, group_ids_global)
 
     # Tokenizers for all groups
     print("\nBuilding per-script tokenizers...")
@@ -168,36 +165,12 @@ def load_and_prepare_data(args, device):
         all_scripts, active_groups)
     print(f"  Per-script vocab sizes: {group_script_vocab_sizes}")
 
-    # Encode labels (use pre-encoded from shards if available)
-    if shard_target_ids is not None:
-        print("Using pre-encoded targets from shards...")
-        target_tensor = shard_target_ids
-        target_len_tensor = shard_target_lens
-    else:
-        print("Pre-encoding labels (old shards without target_ids)...")
-        target_tensor, target_len_tensor = encode_labels(
-            labels, group_ids, local_script_ids, list(GROUPS), group_tokenizers,
-            group_script_names)
-    print(f"  Max label length: {target_len_tensor.max().item()}")
-
-    # Pre-filter empty/too-long labels
-    max_enc_len = images.shape[3] // 4
-    valid = (target_len_tensor > 0) & (target_len_tensor <= max_enc_len)
-    n_filtered = (~valid).sum().item()
-    if n_filtered > 0:
-        keep = valid.nonzero(as_tuple=True)[0]
-        images = images[keep]
-        target_tensor = target_tensor[keep]
-        target_len_tensor = target_len_tensor[keep]
-        group_ids = group_ids[keep]
-        local_script_ids = local_script_ids[keep]
-        labels = [labels[i] for i in keep.tolist()]
-        print(f"  Filtered {n_filtered} samples (empty or too long for CTC)")
-
-    # Dataset + split
-    dataset = MoEDataset(images, target_tensor, target_len_tensor,
-                         group_ids, local_script_ids, labels)
+    # Build streaming dataset (constant memory — loads one shard at a time)
+    print("Building streaming dataset index...")
+    dataset = ShardStreamDataset(shard_files, all_scripts, active_groups)
     n_total = len(dataset)
+    print(f"  {n_total} total samples across {len(shard_files)} shards")
+
     n_val = max(1, int(n_total * args.val_split))
     n_train = n_total - n_val
     assert n_train > 0, f"No training samples after split (total={n_total}, val={n_val})"

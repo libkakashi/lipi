@@ -263,7 +263,119 @@ def collate_moe(batch) -> tuple[
     torch.Tensor, torch.Tensor, torch.Tensor,
     torch.Tensor, torch.Tensor, list[str]
 ]:
-    """Stack pre-encoded batch."""
+    """Stack pre-encoded batch, padding images to max width in batch."""
     imgs, targets, tgt_lens, gids, sids, labels = zip(*batch)
-    return (torch.stack(imgs), torch.stack(targets), torch.stack(tgt_lens),
+    # Pad images to max width in this batch
+    max_w = max(img.shape[2] for img in imgs)
+    padded = []
+    for img in imgs:
+        if img.shape[2] < max_w:
+            pad = torch.zeros(img.shape[0], img.shape[1], max_w - img.shape[2],
+                              dtype=img.dtype)
+            padded.append(torch.cat([img, pad], dim=2))
+        else:
+            padded.append(img)
+    # Pad targets to max length in this batch
+    max_tgt = max(t.shape[0] for t in targets)
+    padded_tgt = []
+    for t in targets:
+        if t.shape[0] < max_tgt:
+            padded_tgt.append(torch.cat([t, torch.zeros(max_tgt - t.shape[0], dtype=t.dtype)]))
+        else:
+            padded_tgt.append(t)
+    return (torch.stack(padded), torch.stack(padded_tgt), torch.stack(tgt_lens),
             torch.stack(gids), torch.stack(sids), list(labels))
+
+
+# ---------------------------------------------------------------------------
+# Streaming shard dataset (constant memory)
+# ---------------------------------------------------------------------------
+
+class ShardStreamDataset(Dataset):
+    """Loads one shard at a time instead of all data into memory.
+
+    Keeps an index of (shard_path, offset) per sample. Caches the
+    most recently loaded shard to avoid re-reading for sequential access.
+    Remaps global script/group IDs to local IDs on the fly.
+    """
+
+    def __init__(
+        self,
+        shard_files: list[Path],
+        active_scripts: list[str],
+        active_groups: list[str],
+    ):
+        self._shard_files = shard_files
+        self._index: list[tuple[int, int]] = []  # (shard_idx, sample_idx)
+
+        # Build ID remap tables
+        self._global_to_local_group: dict[int, int] = {}
+        for local_id, gname in enumerate(active_groups):
+            self._global_to_local_group[GROUP_TO_ID[gname]] = local_id
+
+        self._global_sid_to_local: dict[int, int] = {}
+        for g, group_name in enumerate(active_groups):
+            members = [s for s in active_scripts
+                       if SCRIPT_TO_GROUP.get(s) == group_name]
+            for local_s, script in enumerate(members):
+                self._global_sid_to_local[SCRIPT_TO_ID[script]] = local_s
+
+        # Build index by scanning shard sizes (loads metadata only briefly)
+        for si, path in enumerate(shard_files):
+            shard = torch.load(path, weights_only=False)
+            n = shard["images"].shape[0]
+            for i in range(n):
+                self._index.append((si, i))
+            del shard
+
+        # Cache
+        self._cached_shard_idx = -1
+        self._cached_shard = None
+
+    def __len__(self):
+        return len(self._index)
+
+    def _load_shard(self, shard_idx: int):
+        if shard_idx != self._cached_shard_idx:
+            self._cached_shard = torch.load(
+                self._shard_files[shard_idx], weights_only=False)
+            self._cached_shard_idx = shard_idx
+
+    def __getitem__(self, idx):
+        shard_idx, sample_idx = self._index[idx]
+        self._load_shard(shard_idx)
+        s = self._cached_shard
+        img = s["images"][sample_idx]
+        label = s["labels"][sample_idx]
+        global_sid = s["script_ids"][sample_idx].item()
+        global_gid = s["group_ids"][sample_idx].item()
+
+        # Remap to local IDs
+        local_gid = self._global_to_local_group.get(global_gid, 0)
+        local_sid = self._global_sid_to_local.get(global_sid, 0)
+
+        tid = s["target_ids"][sample_idx] if "target_ids" in s else torch.zeros(1, dtype=torch.long)
+        tlen = s["target_lens"][sample_idx] if "target_lens" in s else torch.tensor(0, dtype=torch.long)
+        return img, tid, tlen, torch.tensor(local_gid, dtype=torch.long), \
+               torch.tensor(local_sid, dtype=torch.long), label
+
+
+def load_shard_metadata(shard_dir: Path) -> tuple[list[Path], dict]:
+    """Scan shard directory, return shard file list and metadata."""
+    if not shard_dir.exists():
+        raise FileNotFoundError(f"Shard directory does not exist: {shard_dir}")
+
+    meta_path = shard_dir / "metadata.pt"
+    if not meta_path.exists():
+        raise FileNotFoundError(f"metadata.pt not found in {shard_dir}")
+
+    meta = torch.load(meta_path, weights_only=False)
+    shard_files = (sorted(shard_dir.glob("shard_*.pt"))
+                   + sorted(shard_dir.glob("char_shard_*.pt"))
+                   + sorted(shard_dir.glob("real_*.pt"))
+                   + sorted(shard_dir.glob("mlt50m_*.pt")))
+
+    if not shard_files:
+        raise RuntimeError(f"No shard files found in {shard_dir}")
+
+    return shard_files, meta
