@@ -95,10 +95,11 @@ def estimate_pixel_budget(model, vram_gb=32, margin=0.85):
     # CTC logits + fold output
     elems += max_vocab * 0.25 + enc_out_dim * 0.25
 
-    # bf16 activations = 2 bytes/element, with 3x safety for
-    # non-checkpointed intermediates, autograd overhead, CTC loss buffers,
-    # attention scores during checkpoint recompute, CUDA fragmentation
-    bytes_per_pixel_col = int(elems * 2 * 3)
+    # bf16 activations = 2 bytes/element, with 2x safety for
+    # non-checkpointed intermediates, attention scores during recompute,
+    # CUDA fragmentation. Per-sample overhead (CTC, autograd) is handled
+    # separately by --batch-size cap.
+    bytes_per_pixel_col = int(elems * 2 * 2)
 
     model_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
     fixed = model_bytes * 4  # params + grads + adam m + adam v
@@ -704,7 +705,10 @@ def main():
 
     pixel_budget = estimate_pixel_budget(model, vram_gb=args.vram)
     max_batch_at_widest = pixel_budget // max_width
-    max_batch_size = max(max_batch_at_widest, 1)
+    # Cap at --batch-size: pixel budget handles width scaling, but there's
+    # per-sample overhead (autograd nodes, CTC loss, routing) that doesn't
+    # scale with width. --batch-size caps the max samples in any batch.
+    max_batch_size = min(args.batch_size, max(max_batch_at_widest, 1))
 
     train_batch_sampler = WidthSortedBatchSampler(
         train_widths, max_batch_size, max_width=0,
