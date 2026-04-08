@@ -258,6 +258,104 @@ def get_renderable_chars(script: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Punctuation / number mixing
+# ---------------------------------------------------------------------------
+
+# Common punctuation and number patterns seen in real documents
+_PUNCT_CHARS = list(".,;:!?-()\"'/@#&*+=$%")
+_TYPO_PUNCT = ["\u2018", "\u2019", "\u201C", "\u201D", "\u201E",  # ' ' " " „
+               "\u2013", "\u2014", "\u2010",                       # – — ‐
+               "\u2026",                                            # …
+               "\u00AB", "\u00BB"]                                  # « »
+_DIGITS = list("0123456789")
+_CURRENCY = list("$")
+
+def _typo_quote(w: str) -> str:
+    """Wrap word in typographic quotes."""
+    style = random.choice(["single", "double", "guillemet", "german"])
+    if style == "single":
+        return "\u2018" + w + "\u2019"       # 'word'
+    elif style == "double":
+        return "\u201C" + w + "\u201D"       # "word"
+    elif style == "guillemet":
+        return "\u00AB" + w + "\u00BB"       # «word»
+    else:
+        return "\u201E" + w + "\u201C"       # „word"
+
+
+# Patterns: (weight, builder) — builder takes word, returns augmented word
+_MIX_PATTERNS = [
+    # Trailing punctuation: word. word, word; word! word?
+    (25, lambda w: w + random.choice(".,;:!?")),
+    # Trailing typographic: word… word–
+    (5,  lambda w: w + random.choice(["\u2026", "\u2013", "\u2014"])),
+    # Leading/trailing quotes or parens: "word" (word) 'word'
+    (5,  lambda w: random.choice('"\'(') + w + random.choice('"\')')),
+    # Typographic quotes: "word" 'word' «word» „word"
+    (5,  lambda w: _typo_quote(w)),
+    # Number prefix: 1. word, 2) word, (3) word
+    (10, lambda w: random.choice(_DIGITS) + random.choice(".)") + " " + w),
+    # Number suffix: word-1, word/2
+    (5,  lambda w: w + random.choice("-/") + random.choice(_DIGITS)),
+    # Pure number sequences: 12345, 1,234, 12.34
+    (8,  lambda w: _random_number()),
+    # Date-like: 12/03/2024, 12-03-24
+    (5,  lambda w: _random_date()),
+    # Currency: ₹1,234 $56.78
+    (5,  lambda w: random.choice(_CURRENCY) + _random_number()),
+    # Phone/ID-like: 123-456-7890
+    (3,  lambda w: "-".join("".join(random.choices(_DIGITS, k=random.randint(2, 4)))
+                            for _ in range(random.randint(2, 3)))),
+    # Section/reference: §12, #34, *note
+    (3,  lambda w: random.choice("#*") + "".join(random.choices(_DIGITS, k=random.randint(1, 3)))),
+    # Mixed: word-word, word/word (keeps both halves from word list)
+    (3,  lambda w: w + random.choice("-/&") + w[:max(2, len(w) // 2)]),
+]
+
+_MIX_WEIGHTS = [p[0] for p in _MIX_PATTERNS]
+_MIX_BUILDERS = [p[1] for p in _MIX_PATTERNS]
+
+
+def _random_number() -> str:
+    """Generate a random number string."""
+    r = random.random()
+    if r < 0.4:
+        # Simple integer: 1-99999
+        return str(random.randint(1, 99999))
+    elif r < 0.7:
+        # Comma-separated: 1,234 or 12,345
+        n = random.randint(100, 999999)
+        return f"{n:,}"
+    else:
+        # Decimal: 12.34, 0.5
+        return f"{random.uniform(0.1, 9999):.{random.randint(1, 2)}f}"
+
+
+def _random_date() -> str:
+    """Generate a random date-like string."""
+    d, m, y = random.randint(1, 31), random.randint(1, 12), random.randint(1950, 2025)
+    sep = random.choice("-/.")
+    fmt = random.choice(["dmy4", "dmy2", "ymd"])
+    if fmt == "dmy4":
+        return f"{d:02d}{sep}{m:02d}{sep}{y}"
+    elif fmt == "dmy2":
+        return f"{d:02d}{sep}{m:02d}{sep}{y % 100:02d}"
+    else:
+        return f"{y}{sep}{m:02d}{sep}{d:02d}"
+
+
+def mix_punctuation(word: str, p: float = 0.15) -> str:
+    """With probability p, mix punctuation/numbers into the word.
+
+    Returns the original word unchanged (1-p) of the time.
+    """
+    if random.random() > p:
+        return word
+    builder = random.choices(_MIX_BUILDERS, weights=_MIX_WEIGHTS, k=1)[0]
+    return builder(word)
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -318,6 +416,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-augment", dest="augment", action="store_false")
     parser.add_argument("--height", type=int, default=32)
     parser.add_argument("--max-width", type=int, default=768)
+    parser.add_argument("--punct-prob", type=float, default=0.15,
+                        help="Probability of mixing punctuation/numbers into a word (default: 0.15)")
     parser.add_argument("--include-chars", action="store_true")
     parser.add_argument("--char-reps", type=int, default=3)
     parser.add_argument("--out", type=str, default="data/shards")
@@ -406,7 +506,7 @@ def build_word_chunks(tasks, script_fonts, word_lists, args, shard_dir, styles_t
                 else:
                     chunks.append((script, batch, fonts, words,
                                   args.height, args.max_width, args.augment,
-                                  shard_path, style))
+                                  shard_path, style, args.punct_prob))
                 shard_idx += 1
                 remaining -= batch
     return chunks, shard_idx, skipped
@@ -519,7 +619,7 @@ def save_metadata(valid_scripts, args, shard_dir):
 
 def _generate_word_batch(args_tuple):
     """Generate word images for one chunk."""
-    script, count, fonts, words, h, mw, do_augment, shard_path, style = args_tuple
+    script, count, fonts, words, h, mw, do_augment, shard_path, style, punct_prob = args_tuple
     style_cfg = STYLES.get(style, STYLES["printed"])
     # Style-specific augmentation
     if not do_augment or not style_cfg["ops"]:
@@ -541,6 +641,8 @@ def _generate_word_batch(args_tuple):
             label = "emoji"
         else:
             word = random.choice(words)
+            # Mix in punctuation/numbers
+            word = mix_punctuation(word, p=punct_prob)
             font = random.choice(fonts)
             # Verify font can render ALL chars in the word (prevents partial renders)
             if not font_covers_text(font, word):
