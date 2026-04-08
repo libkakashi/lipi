@@ -86,11 +86,11 @@ def estimate_pixel_budget(model, vram_gb=32, margin=0.85):
     elems += n_shared * 1 * 8 * shared_dim
 
     # Expert blocks: only inner attn/MLP are checkpointed. The outer block
-    # keeps ~7 tensors in the autograd graph: input, normed1, attn_out,
-    # post-attn residual, normed2, mlp_out, post-mlp residual.
-    elems += n_stage1_pre * 7 * 8 * stage1_dim
-    elems += n_stage1_post * 7 * 2 * stage1_dim
-    elems += n_stage2 * 7 * 2 * stage2_dim
+    # keeps tensors in autograd: input, normed (×2 checkpoint inputs),
+    # post-attn residual, post-mlp output. ~5 tensors of (B, T, dim).
+    elems += n_stage1_pre * 5 * 8 * stage1_dim
+    elems += n_stage1_post * 5 * 2 * stage1_dim
+    elems += n_stage2 * 5 * 2 * stage2_dim
 
     # CTC logits + fold output
     elems += max_vocab * 0.25 + enc_out_dim * 0.25
@@ -592,8 +592,13 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                   f"skipping [{a:.1f}GB alloc, {r:.1f}GB reserved, "
                   f"{oom_skipped} skipped this epoch]", flush=True)
             del imgs, targets, tgt_lens, gids, sids
-            optimizer.zero_grad(set_to_none=True)
-            torch.cuda.empty_cache()
+            try:
+                optimizer.zero_grad(set_to_none=True)
+                torch.cuda.empty_cache()
+            except RuntimeError:
+                print("  ** CUDA context corrupted after OOM, exiting",
+                      flush=True)
+                sys.exit(1)
             _t_data = time.time()
             continue
 
