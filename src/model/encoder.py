@@ -260,12 +260,15 @@ class LipiMoEEncoder(nn.Module):
     ) -> dict:
         B = images.shape[0]
 
+        _dbg = not hasattr(self, '_dbg_done')
+
         # Color projection
         x = self.color_proj(images)
 
         # Stem
         x = self.stem(x)
         _, C, h, w = x.shape
+        if _dbg: print(f"    [enc] stem done: h={h} w={w} C={C}", flush=True)
 
         # Reshape + project
         x = x.permute(0, 2, 3, 1).reshape(B, h * w, C)
@@ -277,6 +280,8 @@ class LipiMoEEncoder(nn.Module):
                 x = ckpt_util.checkpoint(block, x, h, w, use_reentrant=False)
             else:
                 x = block(x, h=h, w=w)
+
+        if _dbg: print(f"    [enc] shared SWA done", flush=True)
 
         # LID-1 (with learned attention pooling)
         group_logits = self.lid_coarse.forward_seq(x)
@@ -291,6 +296,8 @@ class LipiMoEEncoder(nn.Module):
 
         # Project to stage1
         x = self.proj1(x)
+
+        if _dbg: print(f"    [enc] LID-1 done, starting experts", flush=True)
 
         # Expert SWA Stage 1 — high-res blocks before downsampling
         for block in self.stage1[:self.stage1_downsample_after]:
@@ -323,6 +330,9 @@ class LipiMoEEncoder(nn.Module):
         x = x.reshape(B, h, w, C2)                         # (B, 8, w, C2)
         x = x.permute(0, 2, 1, 3).reshape(B, w, C2 * h)   # (B, T, C2*8)
         T = w  # actual sequence length from encoder (not assumed W//4)
+        if _dbg:
+            print(f"    [enc] experts done, T={T}", flush=True)
+            self._dbg_done = True
 
         # Final norm
         x = self.norm(x)

@@ -446,6 +446,8 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         tgt_lens = tgt_lens.to(device, non_blocking=True)
         gids = gids.to(device, non_blocking=True)
         sids = sids.to(device, non_blocking=True)
+        if batch_idx == 0:
+            print(f"  Moved to device, starting forward...", flush=True)
 
         # Forward — ground truth routing for experts, predicted for LID losses.
         # LID-1/LID-2 still train from their own predictions (group_logits
@@ -454,6 +456,8 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         with torch.amp.autocast(device_type, enabled=use_amp, dtype=amp_dtype):
             out = model(imgs, group_ids=gids, script_ids=sids,
                         detach_for_experts=detach_for_experts)
+        if batch_idx == 0:
+            print(f"  Forward done, logits: {out['logits'].shape}", flush=True)
 
         # LID-1 loss (all samples — learns from its own predictions)
         lid1_loss = compute_lid1_loss(out["group_logits"], gids, ce_loss_fn)
