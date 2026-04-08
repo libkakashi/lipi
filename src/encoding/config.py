@@ -169,21 +169,21 @@ NO_FUSION_SCRIPTS: dict[str, NoFusionCodec] = {
 
 FUSION_VOCAB: dict[str, int] = {
     "arabic": 500,
-    "bengali": 750,
-    "burmese": 500,
-    "devanagari": 750,
-    "gujarati": 750,
-    "gurmukhi": 500,
-    "kannada": 500,
-    "khmer": 750,
+    "bengali": 900,
+    "burmese": 650,
+    "devanagari": 1000,
+    "gujarati": 900,
+    "gurmukhi": 600,
+    "kannada": 550,
+    "khmer": 950,
     "lao": 500,
-    "malayalam": 750,
-    "odia": 750,
+    "malayalam": 900,
+    "odia": 850,
     "sinhala": 500,
-    "tamil": 500,
-    "telugu": 750,
-    "thai": 500,
-    "tibetan": 500,
+    "tamil": 350,
+    "telugu": 950,
+    "thai": 450,
+    "tibetan": 550,
 }
 
 
@@ -308,7 +308,11 @@ def build_fusion_codec(
 _VIRAMA_PAIRS: dict[str, list[str]] = {}
 
 def _build_virama_pairs():
-    """Build virama+consonant token lists for all Indic scripts."""
+    """Build virama/coeng/stacker+consonant token lists.
+
+    Covers Indic virama, Khmer coeng (U+17D2), and Burmese stacker (U+1039).
+    These ensure consonant conjuncts encode as 2 tokens instead of 3.
+    """
     _scripts = {
         "devanagari": (0x094D, 0x0915, 0x093A),
         "bengali":    (0x09CD, 0x0995, 0x09B0),
@@ -320,6 +324,8 @@ def _build_virama_pairs():
         "malayalam":  (0x0D4D, 0x0D15, 0x0D39),
         "tamil":      (0x0BCD, 0x0B95, 0x0BB9),
         "sinhala":    (0x0DCA, 0x0D9A, 0x0DC6),
+        "khmer":      (0x17D2, 0x1780, 0x17A2),  # coeng + consonants
+        "burmese":    (0x1039, 0x1000, 0x1021),  # stacker + consonants
     }
     for script, (virama_cp, con_start, con_end) in _scripts.items():
         v = chr(virama_cp)
