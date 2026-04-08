@@ -304,18 +304,13 @@ class FullyExpertSWABlock(nn.Module):
     def _get_group_boundaries(self, group_ids: Tensor, B: int) -> list[tuple[int, int]]:
         """Sort by group and return (start, end) slices. Cached-friendly."""
         sorted_idx = group_ids.argsort()
-        gids_sorted = group_ids[sorted_idx]
 
+        # Compute group sizes entirely on GPU, transfer once
+        counts = torch.bincount(group_ids, minlength=self.num_groups).tolist()
         bounds = []
         start = 0
         for g in range(self.num_groups):
-            if start >= B:
-                bounds.append((B, B))
-                continue
-            # Find end of this group
-            end = start
-            while end < B and gids_sorted[end] == g:
-                end += 1
+            end = start + counts[g]
             bounds.append((start, end))
             start = end
 

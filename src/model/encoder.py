@@ -109,10 +109,10 @@ class GroupCTCModule(nn.Module):
         # Route to per-script CTC heads
         logits = torch.zeros(N, T, self.max_vocab,
                              device=features.device, dtype=features.dtype)
-        for s in range(self.n_scripts):
+        active_scripts = torch.bincount(
+            script_ids, minlength=self.n_scripts).nonzero(as_tuple=True)[0].tolist()
+        for s in active_scripts:
             mask = (script_ids == s)
-            if not mask.any():
-                continue
             head_out = self.heads[s](features[mask]).to(logits.dtype)
             logits[mask, :, :head_out.shape[-1]] = head_out
 
@@ -259,27 +259,17 @@ class LipiMoEEncoder(nn.Module):
         detach_for_experts: bool = False,
     ) -> dict:
         B = images.shape[0]
-        _dbg_count = getattr(self, '_dbg_count', 0)
-        _dbg = _dbg_count < 3
-        self._dbg_count = _dbg_count + 1
-        if _dbg:
-            import time as _time
-            _sync = torch.cuda.synchronize if images.is_cuda else lambda: None
-            _t0 = _time.time()
 
         # Color projection
         x = self.color_proj(images)
-        if _dbg: _sync(); print(f"    [fwd] color_proj: {(_time.time()-_t0)*1000:.0f}ms  x={list(x.shape)}", flush=True); _t0=_time.time()
 
         # Stem
         x = self.stem(x)
         _, C, h, w = x.shape
-        if _dbg: _sync(); print(f"    [fwd] stem: {(_time.time()-_t0)*1000:.0f}ms  x={list(x.shape)}", flush=True); _t0=_time.time()
 
         # Reshape + project
         x = x.permute(0, 2, 3, 1).reshape(B, h * w, C)
         x = self.proj_shared(x)
-        if _dbg: _sync(); print(f"    [fwd] proj_shared: {(_time.time()-_t0)*1000:.0f}ms", flush=True); _t0=_time.time()
 
         # Shared SWA
         for i, block in enumerate(self.shared_swa):
@@ -287,13 +277,11 @@ class LipiMoEEncoder(nn.Module):
                 x = ckpt_util.checkpoint(block, x, h, w, use_reentrant=True)
             else:
                 x = block(x, h=h, w=w)
-            if _dbg: _sync(); print(f"    [fwd] shared_swa[{i}]: {(_time.time()-_t0)*1000:.0f}ms", flush=True); _t0=_time.time()
 
         # LID-1
         group_logits = self.lid_coarse.forward_seq(x)
         if group_ids is None:
             group_ids = group_logits.argmax(dim=-1)
-        if _dbg: _sync(); print(f"    [fwd] lid1: {(_time.time()-_t0)*1000:.0f}ms", flush=True); _t0=_time.time()
 
         if detach_for_experts:
             x = x.detach()
@@ -303,7 +291,6 @@ class LipiMoEEncoder(nn.Module):
         # Expert SWA Stage 1 — before downsampling
         for i, block in enumerate(self.stage1[:self.stage1_downsample_after]):
             x = block(x, h=h, w=w, group_ids=group_ids)
-            if _dbg: _sync(); print(f"    [fwd] stage1_pre[{i}]: {(_time.time()-_t0)*1000:.0f}ms", flush=True); _t0=_time.time()
 
         # Height pool 16→8, width pool 2×
         C1 = x.shape[-1]
@@ -314,19 +301,16 @@ class LipiMoEEncoder(nn.Module):
         x = self.width_pool(x)
         w = x.shape[2]
         x = x.reshape(B, h, C1, w).permute(0, 1, 3, 2).reshape(B, h * w, C1)
-        if _dbg: _sync(); print(f"    [fwd] pool: {(_time.time()-_t0)*1000:.0f}ms  h={h} w={w}", flush=True); _t0=_time.time()
 
         # Expert SWA Stage 1 — after downsampling
         for i, block in enumerate(self.stage1[self.stage1_downsample_after:]):
             x = block(x, h=h, w=w, group_ids=group_ids)
-            if _dbg: _sync(); print(f"    [fwd] stage1_post[{i}]: {(_time.time()-_t0)*1000:.0f}ms", flush=True); _t0=_time.time()
 
         x = self.proj2(x)
 
         # Expert SWA Stage 2
         for i, block in enumerate(self.stage2):
             x = block(x, h=h, w=w, group_ids=group_ids)
-            if _dbg: _sync(); print(f"    [fwd] stage2[{i}]: {(_time.time()-_t0)*1000:.0f}ms", flush=True); _t0=_time.time()
 
         # Fold h=8 into channels
         C2 = x.shape[-1]
@@ -334,17 +318,18 @@ class LipiMoEEncoder(nn.Module):
         x = x.permute(0, 2, 1, 3).reshape(B, w, C2 * h)
         T = w
         x = self.norm(x)
-        if _dbg: _sync(); print(f"    [fwd] fold+norm: {(_time.time()-_t0)*1000:.0f}ms  T={T}", flush=True); _t0=_time.time()
 
         # Per-group CTC with LID-2
         max_vocab = max(m.max_vocab for m in self.ctc_modules)
         logits = torch.zeros(B, T, max_vocab, device=x.device, dtype=x.dtype)
         all_script_logits = []  # (group_idx, script_logits_tensor, mask)
 
-        for g in range(self.num_groups):
+        # Compute group counts on GPU, transfer once
+        group_counts = torch.bincount(group_ids, minlength=self.num_groups)
+        active_groups = group_counts.nonzero(as_tuple=True)[0].tolist()
+
+        for g in active_groups:
             mask = (group_ids == g)
-            if not mask.any():
-                continue
 
             # Get local script_ids for this group (if provided)
             local_script_ids = None
@@ -357,10 +342,6 @@ class LipiMoEEncoder(nn.Module):
 
             if g_script_logits is not None:
                 all_script_logits.append((g, g_script_logits, mask))
-
-        if _dbg:
-            _sync()
-            print(f"    [fwd] ctc_heads: {(_time.time()-_t0)*1000:.0f}ms", flush=True)
 
         lengths = torch.full((B,), T, dtype=torch.long, device=x.device)
 
