@@ -275,11 +275,21 @@ def save_shard(images, labels, script, shard_path):
     script_id = SCRIPT_TO_ID[script]
     group_id = GROUP_TO_ID[SCRIPT_TO_GROUP[script]]
 
+    # Pad images to max width in this shard for uniform stacking
+    max_w = max(img.shape[2] for img in images)
+    padded = []
+    for img in images:
+        if img.shape[2] < max_w:
+            pad = torch.full((img.shape[0], img.shape[1], max_w - img.shape[2]),
+                             img.max(), dtype=img.dtype)
+            img = torch.cat([img, pad], dim=2)
+        padded.append(img)
+
     # Pre-encode labels into token IDs
     target_ids, target_lens = encode_labels_for_shard(labels, script)
 
     torch.save({
-        "images": torch.stack(images),
+        "images": torch.stack(padded),
         "labels": labels,
         "script_ids": torch.full((n,), script_id, dtype=torch.long),
         "group_ids": torch.full((n,), group_id, dtype=torch.long),
@@ -307,7 +317,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--augment", dest="augment", action="store_true", default=True)
     parser.add_argument("--no-augment", dest="augment", action="store_false")
     parser.add_argument("--height", type=int, default=32)
-    parser.add_argument("--max-width", type=int, default=192)
+    parser.add_argument("--max-width", type=int, default=768)
     parser.add_argument("--include-chars", action="store_true")
     parser.add_argument("--char-reps", type=int, default=3)
     parser.add_argument("--out", type=str, default="data/shards")

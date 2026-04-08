@@ -80,13 +80,9 @@ def image_has_ink(img: Image.Image, min_ink_pixels: int = 10) -> bool:
 # ---------------------------------------------------------------------------
 
 def resize_or_pad(img: Image.Image, height: int, max_width: int) -> Image.Image:
-    """Resize if too wide, pad if too narrow, to target dimensions."""
+    """Cap width at max_width, preserve natural aspect ratio. No padding."""
     if img.width > max_width:
         img = img.resize((max_width, height), Image.BILINEAR)
-    elif img.width < max_width:
-        padded = Image.new("RGB", (max_width, height), (240, 240, 240))
-        padded.paste(img, (0, 0))
-        img = padded
     return img
 
 
