@@ -184,9 +184,11 @@ def load_and_prepare_data(args, device):
         active_groups=active_groups)
     print(f"  Train: {len(train_dataset)}, Val: {len(val_dataset)}")
 
-    # Dynamic batch sizing: pixel budget = batch_size × 192px reference width
+    # Dynamic batch sizing: pixel budget = batch_size × reference width.
+    # ref_width=384 matches the old fixed-width behavior where batch_size
+    # controlled how many images at typical document widths.
     import numpy as np
-    ref_width = 192
+    ref_width = 384
     max_pixels = args.batch_size * ref_width
     train_widths = np.load(str(Path(train_dir) / "widths.npy"))
     train_batch_sampler = WidthBudgetBatchSampler(train_widths, max_pixels)
