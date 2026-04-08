@@ -171,7 +171,7 @@ FUSION_VOCAB: dict[str, int] = {
     "arabic": 500,
     "bengali": 1000,
     "burmese": 1000,
-    "devanagari": 1500,
+    "devanagari": 750,
     "gujarati": 1000,
     "gurmukhi": 1000,
     "kannada": 1000,
