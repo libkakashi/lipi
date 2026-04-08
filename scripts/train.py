@@ -25,7 +25,7 @@ from src.model.encoder import LipiMoEEncoder
 from src.model.lid import SCRIPT_TO_GROUP, NUM_GROUPS, GROUPS
 from src.training.dataloader import (
     load_shards, build_script_tokenizers, encode_labels,
-    remap_ids, MoEDataset, collate_moe, WidthGroupedSampler,
+    remap_ids, MoEDataset, collate_moe, WidthBudgetBatchSampler,
     ShardStreamDataset, load_shard_metadata,
 )
 from src.training.losses import (
@@ -178,13 +178,16 @@ def load_and_prepare_data(args, device):
         dataset, [n_train, n_val], generator=torch.Generator().manual_seed(42))
     print(f"Train: {n_train}, Val: {n_val}")
 
-    # Width-grouped sampler: batches similar-width images together to minimize
-    # padding waste and prevent OOM from one wide outlier forcing 768px padding
+    # Dynamic batch sizing: pack batches by pixel budget (batch_size * 192px ref width).
+    # Narrow-image batches get more samples, wide ones get fewer. No OOM, max GPU usage.
+    ref_width = 192  # typical word width
+    max_pixels = args.batch_size * ref_width
     train_widths = [dataset.widths[i] for i in train_set.indices]
-    train_sampler = WidthGroupedSampler(train_widths, args.batch_size)
-    train_loader = DataLoader(train_set, batch_size=args.batch_size,
-                              sampler=train_sampler,
+    train_batch_sampler = WidthBudgetBatchSampler(train_widths, max_pixels)
+    train_loader = DataLoader(train_set, batch_sampler=train_batch_sampler,
                               collate_fn=collate_moe, pin_memory=(device_type == "cuda"))
+    print(f"  Dynamic batching: {len(train_batch_sampler)} batches, "
+          f"budget={max_pixels}px (batch_size={args.batch_size} × {ref_width}px ref)")
     val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False,
                             collate_fn=collate_moe, pin_memory=(device_type == "cuda"))
 

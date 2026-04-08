@@ -260,31 +260,52 @@ class MoEDataset(Dataset):
                 self.group_ids[idx], self.local_script_ids[idx], self.labels[idx])
 
 
-class WidthGroupedSampler(Sampler):
-    """Sampler that groups images by width to minimize padding waste.
+class WidthBudgetBatchSampler(Sampler):
+    """Batch sampler that packs batches by pixel budget, not fixed count.
 
-    Sorts indices by image width, chunks into groups of batch_size,
-    then shuffles the group order each epoch. Within each group,
-    images have similar widths so padding overhead is minimal.
+    Sorts by width, then greedily fills each batch until adding another
+    sample would exceed max_pixels (= batch_size * reference_width).
+    Wide-image batches get fewer samples, narrow ones get more.
+    Maximizes GPU utilization on every step.
+
+    Usage: pass as batch_sampler to DataLoader (NOT sampler), and set
+    batch_size=1 in the DataLoader.
     """
 
-    def __init__(self, widths: list[int], batch_size: int):
-        self.batch_size = batch_size
-        # Sort indices by width
+    def __init__(self, widths: list[int], max_pixels: int, min_batch: int = 8):
+        self.max_pixels = max_pixels
+        self.min_batch = min_batch
+        self.widths = widths
         self.sorted_indices = sorted(range(len(widths)), key=lambda i: widths[i])
+        # Pre-compute batches for __len__
+        self._batches = self._build_batches()
+
+    def _build_batches(self) -> list[list[int]]:
+        batches = []
+        current_batch = []
+        current_max_w = 0
+        for idx in self.sorted_indices:
+            w = self.widths[idx]
+            new_max_w = max(current_max_w, w)
+            # Would adding this sample exceed budget?
+            if current_batch and (len(current_batch) + 1) * new_max_w > self.max_pixels:
+                batches.append(current_batch)
+                current_batch = [idx]
+                current_max_w = w
+            else:
+                current_batch.append(idx)
+                current_max_w = new_max_w
+        if current_batch:
+            batches.append(current_batch)
+        return batches
 
     def __iter__(self):
-        # Chunk into groups of batch_size
-        chunks = []
-        for i in range(0, len(self.sorted_indices), self.batch_size):
-            chunks.append(self.sorted_indices[i:i + self.batch_size])
-        # Shuffle chunk order (not within chunks — keep width-similar together)
-        random.shuffle(chunks)
-        for chunk in chunks:
-            yield from chunk
+        batches = self._build_batches()
+        random.shuffle(batches)
+        yield from batches
 
     def __len__(self):
-        return len(self.sorted_indices)
+        return len(self._batches)
 
 
 def collate_moe(batch) -> tuple[
