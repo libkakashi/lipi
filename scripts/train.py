@@ -268,7 +268,7 @@ def build_optimizer_and_scheduler(args, model, device_type, steps_per_epoch):
 
     use_amp = device_type in ("cuda", "mps")
     if device_type == "cuda":
-        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.benchmark = False
         torch.set_float32_matmul_precision('high')
         amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
         scaler = torch.amp.GradScaler("cuda", enabled=(amp_dtype == torch.float16))
