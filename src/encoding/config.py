@@ -169,19 +169,19 @@ NO_FUSION_SCRIPTS: dict[str, NoFusionCodec] = {
 
 FUSION_VOCAB: dict[str, int] = {
     "arabic": 500,
-    "bengali": 1000,
+    "bengali": 750,
     "burmese": 1000,
     "devanagari": 750,
-    "gujarati": 1000,
-    "gurmukhi": 1000,
-    "kannada": 1000,
+    "gujarati": 750,
+    "gurmukhi": 500,
+    "kannada": 500,
     "khmer": 1500,
     "lao": 1000,
-    "malayalam": 1000,
-    "odia": 1000,
-    "sinhala": 1000,
-    "tamil": 1000,
-    "telugu": 1000,
+    "malayalam": 750,
+    "odia": 750,
+    "sinhala": 500,
+    "tamil": 500,
+    "telugu": 750,
     "thai": 1000,
     "tibetan": 1000,
 }
@@ -364,7 +364,7 @@ FUSION_BASE_RANGES: dict[str, list[list[tuple[int, int]]]] = {
     ],
     "bengali": [
         _ASCII_COMMON,
-        [(0x0980, 0x09FF)],     # Bengali
+        [(0x0981, 0x09FB)],     # Bengali (skip 0980 Anji, 09FC-09FE Vedic)
         [(0x0964, 0x0964)],     # Devanagari danda
         [(0x0970, 0x0970)],     # Devanagari abbreviation sign
         _TYPOGRAPHIC_COMMON,
@@ -372,7 +372,7 @@ FUSION_BASE_RANGES: dict[str, list[list[tuple[int, int]]]] = {
     ],
     "odia": [
         _ASCII_COMMON,
-        [(0x0B00, 0x0B7F)],     # Odia
+        [(0x0B00, 0x0B73)],     # Odia (skip 0B74-0B77 fractions)
         [(0x0964, 0x0964)],     # Devanagari danda
         [(0x0970, 0x0970)],     # Devanagari abbreviation sign
         _TYPOGRAPHIC_COMMON,
@@ -389,17 +389,18 @@ FUSION_BASE_RANGES: dict[str, list[list[tuple[int, int]]]] = {
     ],
     "malayalam": [
         _ASCII_COMMON,
-        [(0x0D00, 0x0D7F)],     # Malayalam
+        [(0x0D01, 0x0D57)],     # Malayalam (skip 0D00 Vedic, 0D58-0D5E fractions)
+        [(0x0D5F, 0x0D7F)],     # Malayalam letters + chillu + au length mark
         _TYPOGRAPHIC_COMMON,
     ],
     "tamil": [
         _ASCII_COMMON,
-        [(0x0B80, 0x0BFF)],     # Tamil
+        [(0x0B80, 0x0BF9)],     # Tamil (skip 0BFA number sign)
         _TYPOGRAPHIC_COMMON,
     ],
     "sinhala": [
         _ASCII_COMMON,
-        [(0x0D80, 0x0DFF)],     # Sinhala
+        [(0x0D82, 0x0DE5)],     # Sinhala (skip 0D81 candrabindu, 0DE6-0DEF Lith digits)
         [(0x00A0, 0x00A0)],     # no-break space
         _TYPOGRAPHIC_COMMON,
     ],
