@@ -625,13 +625,13 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             fwd_ms = _t_fwd_total / log_count * 1000
             bwd_ms = _t_bwd_total / log_count * 1000
             print(f"  [{epoch}/{total_epochs}] batch {batch_idx+1}/{steps}  "
-                  f"loss={avg_total:.4f} "
-                  f"(ctc={avg_ctc:.4f} lid1={avg_lid1:.4f} lid2={avg_lid2:.4f}{ace_str})  "
-                  f"lr={lr:.2e}\n"
-                  f"    lid1={lid1_acc:.2f}% lid2={lid2_acc:.2f}%  "
+                  f"lr={lr:.2e}  "
                   f"gnorm s={shared_norm:.1f} e={expert_norm:.1f}  "
                   f"{ms_per_step:.0f}ms/step {samples_per_sec:.0f}img/s  "
-                  f"[data={data_ms:.0f}ms fwd={fwd_ms:.0f}ms bwd={bwd_ms:.0f}ms]")
+                  f"[data={data_ms:.0f}ms fwd={fwd_ms:.0f}ms bwd={bwd_ms:.0f}ms]\n"
+                  f"    loss={avg_total:.4f} "
+                  f"(ctc={avg_ctc:.4f} lid1={avg_lid1:.4f} lid2={avg_lid2:.4f}{ace_str})  "
+                  f"lid1={lid1_acc:.2f}% lid2={lid2_acc:.2f}%")
             log_time = time.time()
             _t_data_total = 0.0
             _t_fwd_total = 0.0
