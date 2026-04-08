@@ -150,6 +150,157 @@ def ctc_decode(logits: torch.Tensor, vocab_size: int) -> list[int]:
     return ids
 
 
+def ctc_confidence(logits: torch.Tensor, vocab_size: int) -> float:
+    """Compute word-level confidence from CTC logits.
+
+    Takes the softmax probability of the argmax token at each non-blank,
+    non-repeat position, then returns the geometric mean (exp of mean log-prob).
+    """
+    probs = torch.softmax(logits[:, :vocab_size].float(), dim=-1)
+    max_probs, max_ids = probs.max(dim=-1)  # (T,)
+
+    # Only score non-blank, non-repeat positions (the actual decoded chars)
+    char_probs = []
+    prev = -1
+    for t in range(max_ids.shape[0]):
+        tok = max_ids[t].item()
+        if tok != 0 and tok != prev:
+            char_probs.append(max_probs[t].item())
+        prev = tok
+
+    if not char_probs:
+        return 0.0
+    # Geometric mean
+    log_mean = sum(np.log(p + 1e-10) for p in char_probs) / len(char_probs)
+    return float(np.exp(log_mean))
+
+
+# ---------------------------------------------------------------------------
+# Spell checker
+# ---------------------------------------------------------------------------
+
+DICT_DIR = Path(__file__).parent.parent / "training_data" / "dictionaries"
+
+# Map scripts to hunspell dictionary files
+_SCRIPT_DICT_FILES: dict[str, list[str]] = {
+    "latin": ["en_US.dic"],
+    "devanagari": ["hi_IN.dic"],
+}
+
+
+def _edit_distance(s1: str, s2: str) -> int:
+    m, n = len(s1), len(s2)
+    dp = list(range(n + 1))
+    for i in range(1, m + 1):
+        prev, dp[0] = dp[0], i
+        for j in range(1, n + 1):
+            temp = dp[j]
+            dp[j] = prev if s1[i-1] == s2[j-1] else 1 + min(dp[j], dp[j-1], prev)
+            prev = temp
+    return dp[n]
+
+
+class SpellChecker:
+    """Simple spell checker using word lists and edit distance.
+
+    Only corrects when:
+    1. Model confidence is below threshold
+    2. A close match exists (edit distance <= max_edit)
+    3. The correction is meaningfully better than the original
+    """
+
+    def __init__(self, conf_threshold: float = 0.5, max_edit: int = 2):
+        self.conf_threshold = conf_threshold
+        self.max_edit = max_edit
+        self._vocab: dict[str, set[str]] = {}
+        self._index: dict[str, dict[int, list[str]]] = {}  # script -> {length -> [words]}
+
+    def _load_vocab(self, script: str) -> set[str]:
+        if script in self._vocab:
+            return self._vocab[script]
+
+        words = set()
+        files = _SCRIPT_DICT_FILES.get(script, [])
+        for fname in files:
+            path = DICT_DIR / fname
+            if not path.exists():
+                continue
+            for line in path.read_text(encoding="utf-8-sig", errors="ignore").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                # Hunspell .dic format: word/flags — strip flags
+                word = line.split("/")[0]
+                if 2 <= len(word) <= 25:
+                    words.add(word)
+
+        self._vocab[script] = words
+        if words:
+            print(f"  Spell checker: {len(words)} words for {script}")
+        return words
+
+    def _build_index(self, script: str):
+        """Build length-bucketed index for fast lookup."""
+        vocab = self._load_vocab(script)
+        if script not in self._index:
+            buckets: dict[int, list[str]] = {}
+            for w in vocab:
+                buckets.setdefault(len(w), []).append(w)
+            self._index[script] = buckets
+
+    def maybe_correct(self, text: str, confidence: float, script: str) -> tuple[str, bool]:
+        """Possibly correct text if confidence is low.
+
+        Returns (corrected_text, was_corrected).
+        """
+        if confidence >= self.conf_threshold:
+            return text, False
+
+        # Don't try to correct very short or number-heavy strings
+        if len(text) < 3 or any(c.isdigit() for c in text):
+            return text, False
+
+        vocab = self._load_vocab(script)
+        if not vocab:
+            return text, False
+        self._build_index(script)
+        buckets = self._index[script]
+
+        # Strip trailing punctuation for lookup, reattach after
+        stripped = text.rstrip(".,;:!?\u0964\u0965")  # include danda/double-danda
+        trail = text[len(stripped):]
+        lookup = stripped.lower() if script == "latin" else stripped
+
+        if len(lookup) < 3:
+            return text, False
+
+        # Exact match — no correction needed
+        if lookup in vocab:
+            return text, False
+
+        # Max edit scales with word length: short words get max 1 edit
+        max_edit = 1 if len(lookup) <= 4 else self.max_edit
+
+        # Search only words within ±max_edit length (from bucketed index)
+        best_word, best_dist = None, max_edit + 1
+        for length in range(max(2, len(lookup) - max_edit),
+                            len(lookup) + max_edit + 1):
+            for w in buckets.get(length, []):
+                d = _edit_distance(lookup, w)
+                if d < best_dist:
+                    best_dist = d
+                    best_word = w
+                    if d == 1:
+                        break
+            if best_dist == 1:
+                break
+
+        if best_word is not None and best_dist <= max_edit:
+            return best_word + trail, True
+
+        return text, False
+
+
 def build_script_filter(allowed_scripts: list[str] | None):
     """Build lookup tables for restricting LID-1/LID-2 to specific scripts.
 
@@ -210,13 +361,14 @@ def _decode_one(logits_i, group_id, script_logits_list, batch_idx, mask_offset,
     vs = script_vocab_size(script_name)
     ids = ctc_decode(logits_i, vs)
     text = decode_ids(ids, script_name)
-    return script_name, text
+    conf = ctc_confidence(logits_i, vs)
+    return script_name, text, conf
 
 
 @torch.no_grad()
 def recognize_crops(model, crops: list[dict], script_names: list[list[str]],
                     device: torch.device, script_filter=None,
-                    batch_size: int = 32):
+                    batch_size: int = 32, spell_checker: SpellChecker | None = None):
     """Run Lipi recognition on crops in batches."""
     results = [None] * len(crops)
     total_model_time = 0.0
@@ -302,9 +454,14 @@ def recognize_crops(model, crops: list[dict], script_names: list[list[str]],
 
         for b, idx in enumerate(indices):
             group_id = all_group_ids[b].item()
-            script_name, text = _decode_one(
+            script_name, text, conf = _decode_one(
                 all_logits[b], group_id, output["script_logits_per_group"],
                 b, 0, script_names, script_filter)
+
+            corrected = False
+            if spell_checker is not None:
+                text, corrected = spell_checker.maybe_correct(
+                    text, conf, script_name)
 
             results[idx] = {
                 "page": crops[idx]["page"],
@@ -313,6 +470,8 @@ def recognize_crops(model, crops: list[dict], script_names: list[list[str]],
                 "group": GROUPS[group_id],
                 "script": script_name,
                 "text": text,
+                "confidence": conf,
+                "corrected": corrected,
             }
 
     n = len(crops)
@@ -430,6 +589,12 @@ def main():
                         help="Output directory for visualization (default: same as input)")
     parser.add_argument("--batch-size", type=int, default=32,
                         help="Batch size for recognition (default: 32)")
+    parser.add_argument("--spellcheck", action="store_true",
+                        help="Enable spell-check correction for low-confidence words")
+    parser.add_argument("--spell-threshold", type=float, default=0.5,
+                        help="Confidence threshold below which spell-check kicks in (default: 0.5)")
+    parser.add_argument("--spell-max-edit", type=int, default=2,
+                        help="Maximum edit distance for spell-check corrections (default: 2)")
     parser.add_argument("--scripts", type=str, default=None,
                         help="Comma-separated list of allowed scripts for LID routing "
                              "(e.g. 'devanagari,latin'). Overrides LID-1/LID-2 predictions.")
@@ -471,11 +636,20 @@ def main():
         script_filter = build_script_filter(allowed)
         print(f"Script filter: {allowed}")
 
+    # Spell checker
+    checker = None
+    if args.spellcheck:
+        checker = SpellChecker(conf_threshold=args.spell_threshold,
+                               max_edit=args.spell_max_edit)
+        print(f"Spell check enabled (threshold={args.spell_threshold}, "
+              f"max_edit={args.spell_max_edit})")
+
     # Recognize
     print("Running Lipi recognition...")
     results = recognize_crops(model, crops, script_names, device,
                               script_filter=script_filter,
-                              batch_size=args.batch_size)
+                              batch_size=args.batch_size,
+                              spell_checker=checker)
 
     # Print results
     print(f"\n{'='*70}")
@@ -487,8 +661,17 @@ def main():
             current_page = r["page"]
             print(f"\n--- Page {current_page + 1} ---")
         x1, y1, x2, y2 = r["bbox"]
+        conf = r.get("confidence", 0)
+        mark = " *" if r.get("corrected") else ""
         print(f"  [{r['script']:>12s}] ({x1:4d},{y1:4d})-({x2:4d},{y2:4d})  "
-              f"det={r['det_conf']:.2f}  {r['text']}")
+              f"det={r['det_conf']:.2f} conf={conf:.2f}  {r['text']}{mark}")
+
+    # Spell check summary
+    if args.spellcheck:
+        n_corrected = sum(1 for r in results if r.get("corrected"))
+        n_low_conf = sum(1 for r in results if r.get("confidence", 1) < args.spell_threshold)
+        print(f"\n  Spell check: {n_corrected} corrected / "
+              f"{n_low_conf} low-confidence / {len(results)} total")
 
     # Render visualization
     output_dir = Path(args.output) if args.output else input_path.parent
