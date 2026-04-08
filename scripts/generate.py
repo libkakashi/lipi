@@ -397,27 +397,33 @@ MDS_COLUMNS = {
 }
 
 
-def save_mds_samples(images, labels, script, out_dir):
-    """Write samples to MDS format. Each image keeps its original width."""
+def save_mds_samples(images, labels, script, train_dir, val_dir, chunk_id):
+    """Write samples directly to train/val MDS splits. No merge needed."""
     if not images:
-        return 0
+        return 0, [], []
 
+    import hashlib
     import numpy as np
     from streaming import MDSWriter
 
     script_id = SCRIPT_TO_ID[script]
     group_id = GROUP_TO_ID[SCRIPT_TO_GROUP[script]]
 
-    # Pre-encode labels
     from src.encoding.decompose import encode_text
     encoded = [encode_text(label, script) for label in labels]
 
-    Path(out_dir).mkdir(parents=True, exist_ok=True)
-    with MDSWriter(out=out_dir, columns=MDS_COLUMNS, size_limit=1 << 26) as writer:
-        for img_tensor, label, ids in zip(images, labels, encoded):
-            img_np = img_tensor.numpy()  # (2, 32, W) uint8, no padding
+    t_dir = str(Path(train_dir) / f"chunk_{chunk_id}")
+    v_dir = str(Path(val_dir) / f"chunk_{chunk_id}")
+    Path(t_dir).mkdir(parents=True, exist_ok=True)
+    Path(v_dir).mkdir(parents=True, exist_ok=True)
+
+    train_widths, val_widths = [], []
+    with MDSWriter(out=t_dir, columns=MDS_COLUMNS, size_limit=1 << 26) as tw, \
+         MDSWriter(out=v_dir, columns=MDS_COLUMNS, size_limit=1 << 26) as vw:
+        for idx, (img_tensor, label, ids) in enumerate(zip(images, labels, encoded)):
+            img_np = img_tensor.numpy()
             tids = np.array(ids, dtype=np.int64) if ids else np.zeros(1, dtype=np.int64)
-            writer.write({
+            sample = {
                 "image": img_np,
                 "label": label,
                 "script_id": script_id,
@@ -425,9 +431,16 @@ def save_mds_samples(images, labels, script, out_dir):
                 "target_ids": tids,
                 "target_len": len(ids),
                 "width": img_np.shape[2],
-            })
+            }
+            h = int(hashlib.md5(f"{chunk_id}_{idx}_{label}".encode()).hexdigest(), 16)
+            if h % 1000 < 100:  # 10% val
+                vw.write(sample)
+                val_widths.append(img_np.shape[2])
+            else:
+                tw.write(sample)
+                train_widths.append(img_np.shape[2])
 
-    return len(images)
+    return len(images), train_widths, val_widths
 
 
 # ---------------------------------------------------------------------------
@@ -519,7 +532,9 @@ def discover_fonts(active_scripts, word_lists):
 # ---------------------------------------------------------------------------
 
 def build_word_chunks(tasks, script_fonts, word_lists, args, shard_dir, styles_to_gen):
-    """Build word-image chunks with resume support. Returns (chunks, next_chunk_idx, skipped)."""
+    """Build word-image chunks. Returns (chunks, next_chunk_idx, skipped)."""
+    train_dir = str(shard_dir / "train")
+    val_dir = str(shard_dir / "val")
     chunks = []
     chunk_idx = 0
     skipped = 0
@@ -533,20 +548,23 @@ def build_word_chunks(tasks, script_fonts, word_lists, args, shard_dir, styles_t
             remaining = style_target
             while remaining > 0:
                 batch = min(chunk_size, remaining)
-                chunk_dir = str(shard_dir / f"chunk_{chunk_idx:04d}")
-                if chunk_dir_exists(chunk_dir):
+                # Check if this chunk's train subdir already exists
+                if chunk_dir_exists(str(Path(train_dir) / f"chunk_{chunk_idx:04d}")):
                     skipped += batch
                 else:
                     chunks.append((script, batch, fonts, words,
                                   args.height, args.max_width, args.augment,
-                                  chunk_dir, style, args.punct_prob))
+                                  chunk_idx, train_dir, val_dir,
+                                  style, args.punct_prob))
                 chunk_idx += 1
                 remaining -= batch
     return chunks, chunk_idx, skipped
 
 
 def build_char_chunks(valid_scripts, script_fonts, tasks, args, shard_dir, start_chunk_idx):
-    """Build single-character chunks with resume support. Returns char_chunks."""
+    """Build single-character chunks. Returns char_chunks."""
+    train_dir = str(shard_dir / "train")
+    val_dir = str(shard_dir / "val")
 
     print(f"\n{'='*60}")
     print(f"Generating single-character images")
@@ -569,12 +587,12 @@ def build_char_chunks(valid_scripts, script_fonts, tasks, args, shard_dir, start
         chunk_size = max(200, len(chars) // max(1, args.workers // len(valid_scripts)))
         for ci in range(0, len(chars), chunk_size):
             char_subset = chars[ci:ci + chunk_size]
-            chunk_dir = str(shard_dir / f"char_chunk_{chunk_idx:04d}")
-            if chunk_dir_exists(chunk_dir):
+            if chunk_dir_exists(str(Path(train_dir) / f"chunk_{chunk_idx:04d}")):
                 chunk_idx += 1
                 continue
             char_chunks.append((script, char_subset, reps, fonts,
-                                args.height, args.max_width, args.augment, chunk_dir))
+                                args.height, args.max_width, args.augment,
+                                chunk_idx, train_dir, val_dir))
             chunk_idx += 1
 
     return char_chunks
@@ -585,104 +603,33 @@ def build_char_chunks(valid_scripts, script_fonts, tasks, args, shard_dir, start
 # ---------------------------------------------------------------------------
 
 def run_generation_pool(chunks, worker_fn, n_workers, label):
-    """Run a generation function over chunks using a multiprocessing pool."""
+    """Run a generation function over chunks using a multiprocessing pool.
+
+    Returns (total_done, all_train_widths, all_val_widths).
+    """
     total_est = sum(c[1] if isinstance(c[1], int) else len(c[1]) * c[2] for c in chunks)
     print(f"\nGenerating {total_est} {label} images, {len(chunks)} chunks, "
           f"{min(n_workers, len(chunks))} workers\n")
 
     start = time.time()
     done = 0
+    all_train_widths = []
+    all_val_widths = []
     with Pool(processes=min(n_workers, len(chunks)), maxtasksperchild=1) as pool:
         for result in pool.imap_unordered(worker_fn, chunks):
-            _, script, n = result
+            _, script, n, tw, vw = result
             done += n
+            all_train_widths.extend(tw)
+            all_val_widths.extend(vw)
             elapsed = time.time() - start
             print(f"    total: {done}/{total_est} ({done/elapsed:.0f} img/s)", flush=True)
-    return done
+    return done, all_train_widths, all_val_widths
 
 
 # ---------------------------------------------------------------------------
 # Metadata
 # ---------------------------------------------------------------------------
 
-def merge_and_split(shard_dir: Path, valid_scripts: list[str], args,
-                    val_ratio: float = 0.1):
-    """Merge worker MDS chunks into train/val splits with widths.npy."""
-    import hashlib
-    import json
-    import numpy as np
-    from streaming import MDSWriter
-
-    # Find all chunk directories
-    chunk_dirs = sorted(shard_dir.glob("chunk_*")) + sorted(shard_dir.glob("char_chunk_*"))
-    if not chunk_dirs:
-        print("No chunks to merge.")
-        return
-
-    train_dir = shard_dir / "train"
-    val_dir = shard_dir / "val"
-    train_dir.mkdir(parents=True, exist_ok=True)
-    val_dir.mkdir(parents=True, exist_ok=True)
-
-    train_writer = MDSWriter(out=str(train_dir), columns=MDS_COLUMNS, size_limit=1 << 26)
-    val_writer = MDSWriter(out=str(val_dir), columns=MDS_COLUMNS, size_limit=1 << 26)
-    train_widths, val_widths = [], []
-    n_train, n_val, total = 0, 0, 0
-
-    from streaming import StreamingDataset
-
-    for ci, chunk_dir in enumerate(chunk_dirs):
-        try:
-            ds = StreamingDataset(local=str(chunk_dir), shuffle=False)
-        except Exception as e:
-            print(f"  Skipping {chunk_dir.name}: {e}")
-            continue
-
-        for i in range(len(ds)):
-            sample = ds[i]
-            # Copy numpy arrays to make them writable
-            sample = {k: (v.copy() if hasattr(v, 'copy') else v) for k, v in sample.items()}
-            h = hashlib.md5(f"{chunk_dir.name}_{i}_{sample['label']}".encode()).hexdigest()
-            if int(h, 16) % 1000 < int(val_ratio * 1000):
-                val_writer.write(sample)
-                val_widths.append(sample["width"])
-                n_val += 1
-            else:
-                train_writer.write(sample)
-                train_widths.append(sample["width"])
-                n_train += 1
-            total += 1
-
-        if (ci + 1) % 20 == 0 or ci == len(chunk_dirs) - 1:
-            print(f"  Merged {ci+1}/{len(chunk_dirs)} chunks, {total} samples", flush=True)
-
-    train_writer.finish()
-    val_writer.finish()
-
-    np.save(str(train_dir / "widths.npy"), np.array(train_widths, dtype=np.int32))
-    np.save(str(val_dir / "widths.npy"), np.array(val_widths, dtype=np.int32))
-
-    # Save metadata
-    active_groups = []
-    seen = set()
-    for s in valid_scripts:
-        g = SCRIPT_TO_GROUP[s]
-        if g not in seen:
-            active_groups.append(g)
-            seen.add(g)
-
-    torch.save({
-        "active_scripts": valid_scripts,
-        "active_groups": active_groups,
-        "height": args.height,
-        "max_width": args.max_width,
-        "augmented": args.augment,
-        "samples_per_script": args.samples_per_script,
-    }, shard_dir / "metadata.pt")
-
-    print(f"\nDone: {total} samples → {n_train} train + {n_val} val")
-    print(f"  {shard_dir}/train: {n_train} samples")
-    print(f"  {shard_dir}/val:   {n_val} samples")
 
 
 # ---------------------------------------------------------------------------
@@ -691,7 +638,7 @@ def merge_and_split(shard_dir: Path, valid_scripts: list[str], args,
 
 def _generate_word_batch(args_tuple):
     """Generate word images for one chunk, write to MDS."""
-    script, count, fonts, words, h, mw, do_augment, out_dir, style, punct_prob = args_tuple
+    script, count, fonts, words, h, mw, do_augment, chunk_id, train_dir, val_dir, style, punct_prob = args_tuple
     style_cfg = STYLES.get(style, STYLES["printed"])
     if not do_augment or not style_cfg["ops"]:
         aug = None
@@ -736,18 +683,18 @@ def _generate_word_batch(args_tuple):
             rate = len(images) / elapsed if elapsed > 0 else 0
             print(f"    [{script}] {len(images)}/{count} ({rate:.0f} img/s)", flush=True)
 
-    n = save_mds_samples(images, labels, script, out_dir)
+    n, tw, vw = save_mds_samples(images, labels, script, train_dir, val_dir, chunk_id)
     del images, labels
 
     elapsed = time.time() - t0
     rate = n / elapsed if elapsed > 0 else 0
     print(f"  {script:<15} {n:>5} images in {elapsed:.0f}s ({rate:.0f} img/s)", flush=True)
-    return out_dir, script, n
+    return chunk_id, script, n, tw, vw
 
 
 def _generate_char_batch(args_tuple):
     """Generate single-character images with cmap validation, write to MDS."""
-    script, chars, reps_per_char, fonts, h, mw, do_augment, out_dir = args_tuple
+    script, chars, reps_per_char, fonts, h, mw, do_augment, chunk_id, train_dir, val_dir = args_tuple
     aug = RandAugmentOCR(n_ops=2, p=0.5) if do_augment else None
     t0 = time.time()
 
@@ -778,14 +725,14 @@ def _generate_char_batch(args_tuple):
         if not got_any:
             skipped_chars += 1
 
-    n = save_mds_samples(images, labels, script, out_dir)
+    n, tw, vw = save_mds_samples(images, labels, script, train_dir, val_dir, chunk_id)
     del images, labels
 
     elapsed = time.time() - t0
     skip_str = f", {skipped_chars} chars skipped (bad render)" if skipped_chars else ""
     print(f"  {script:<15} {n:>5} char images "
           f"({len(chars)} unique × {reps_per_char} reps{skip_str}) in {elapsed:.0f}s", flush=True)
-    return out_dir, script, n
+    return chunk_id, script, n, tw, vw
 
 
 # ---------------------------------------------------------------------------
@@ -846,6 +793,15 @@ def main():
         styles_to_gen = [args.style]
         print(f"\nGenerating style: {args.style}")
 
+    import numpy as np
+
+    # Create train/val dirs
+    (shard_dir / "train").mkdir(parents=True, exist_ok=True)
+    (shard_dir / "val").mkdir(parents=True, exist_ok=True)
+
+    all_train_widths = []
+    all_val_widths = []
+
     # Word images
     chunks, next_chunk_idx, skipped = build_word_chunks(
         tasks, script_fonts, word_lists, args, shard_dir, styles_to_gen)
@@ -853,7 +809,9 @@ def main():
         print(f"\nResuming: {skipped} images in existing chunks, "
               f"{sum(c[1] for c in chunks)} remaining")
     if chunks:
-        run_generation_pool(chunks, _generate_word_batch, args.workers, "word")
+        _, tw, vw = run_generation_pool(chunks, _generate_word_batch, args.workers, "word")
+        all_train_widths.extend(tw)
+        all_val_widths.extend(vw)
     else:
         print("All chunks exist. Done.")
 
@@ -864,15 +822,37 @@ def main():
         if char_chunks:
             print(f"\n  {len(char_chunks)} char chunks across "
                   f"{min(args.workers, len(char_chunks))} workers\n")
-            run_generation_pool(char_chunks, _generate_char_batch, args.workers, "char")
+            _, tw, vw = run_generation_pool(char_chunks, _generate_char_batch, args.workers, "char")
+            all_train_widths.extend(tw)
+            all_val_widths.extend(vw)
         else:
             print("  All char chunks exist.")
 
-    # Merge worker chunks into train/val MDS splits
-    print(f"\n{'='*60}")
-    print("Merging chunks into train/val splits...")
-    print(f"{'='*60}")
-    merge_and_split(shard_dir, valid_scripts, args)
+    # Save widths for batch sampling
+    np.save(str(shard_dir / "train" / "widths.npy"),
+            np.array(all_train_widths, dtype=np.int32))
+    np.save(str(shard_dir / "val" / "widths.npy"),
+            np.array(all_val_widths, dtype=np.int32))
+
+    # Save metadata
+    active_groups = []
+    seen = set()
+    for s in valid_scripts:
+        g = SCRIPT_TO_GROUP[s]
+        if g not in seen:
+            active_groups.append(g)
+            seen.add(g)
+    torch.save({
+        "active_scripts": valid_scripts,
+        "active_groups": active_groups,
+        "height": args.height,
+        "max_width": args.max_width,
+    }, shard_dir / "metadata.pt")
+
+    n_train = len(all_train_widths)
+    n_val = len(all_val_widths)
+    print(f"\nDone: {n_train + n_val} samples → {n_train} train + {n_val} val")
+    print(f"  {shard_dir}/train  {shard_dir}/val")
 
 
 if __name__ == "__main__":

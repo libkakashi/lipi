@@ -12,7 +12,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, Sampler
 
-from streaming import StreamingDataset
+from streaming import Stream, StreamingDataset
 
 from src.model.lid import SCRIPT_TO_GROUP, SCRIPT_TO_ID, GROUP_TO_ID
 from src.encoding.decompose import encode_text, script_vocab_size
@@ -84,7 +84,14 @@ class LipiStreamingDataset(Dataset):
         active_scripts: list[str],
         active_groups: list[str],
     ):
-        self._ds = StreamingDataset(local=local, shuffle=False)
+        local_path = Path(local)
+        # Support both flat MDS dirs and dirs with chunk_* sub-directories
+        chunk_dirs = sorted(local_path.glob("chunk_*"))
+        if chunk_dirs:
+            streams = [Stream(local=str(d)) for d in chunk_dirs]
+            self._ds = StreamingDataset(streams=streams, shuffle=False)
+        else:
+            self._ds = StreamingDataset(local=local, shuffle=False)
 
         # Build ID remap tables
         self._global_to_local_group: dict[int, int] = {}
