@@ -62,7 +62,7 @@ def parse_args():
     parser.add_argument("--save-dir", type=str, default="checkpoints/moe")
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--val-split", type=float, default=0.1)
-    parser.add_argument("--log-interval", type=int, default=20)
+    parser.add_argument("--log-interval", type=int, default=1)
     # Model
     parser.add_argument("--stem-depth", type=int, default=3)
     parser.add_argument("--shared-dim", type=int, default=256)
@@ -448,17 +448,21 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
     log_count = 0
     log_time = time.time()
 
+    _t_data = time.time()
+    _t_data_total = 0.0
+    _t_fwd_total = 0.0
+    _t_bwd_total = 0.0
+
     for batch_idx, (imgs, targets, tgt_lens, gids, sids, _labels) in enumerate(train_loader):
+        _t_data_total += time.time() - _t_data
+
         imgs = imgs.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
         tgt_lens = tgt_lens.to(device, non_blocking=True)
         gids = gids.to(device, non_blocking=True)
         sids = sids.to(device, non_blocking=True)
 
-        # Forward — ground truth routing for experts, predicted for LID losses.
-        # LID-1/LID-2 still train from their own predictions (group_logits
-        # and script_logits come from the model's classifiers regardless of
-        # the routing used for expert blocks).
+        _t_fwd = time.time()
         with torch.amp.autocast(device_type, enabled=use_amp, dtype=amp_dtype):
             out = model(imgs, group_ids=gids, script_ids=sids,
                         detach_for_experts=detach_for_experts)
@@ -485,6 +489,8 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         else:
             ace_loss = torch.zeros(1, device=device)
 
+        _t_fwd_total += time.time() - _t_fwd
+
         loss = (ctc_loss
                 + lid1_weight * lid1_loss.float()
                 + lid2_loss.float()
@@ -493,7 +499,9 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         if grad_accum > 1:
             loss = loss / grad_accum
 
+        _t_bwd = time.time()
         scaler.scale(loss).backward()
+        _t_bwd_total += time.time() - _t_bwd
 
         if (batch_idx + 1) % grad_accum == 0 or (batch_idx + 1) == len(train_loader):
             scaler.unscale_(base_optimizer)
@@ -518,6 +526,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         log_total += loss.detach() * mult
         n_batches += 1
         log_count += 1
+        _t_data = time.time()
 
         if n_batches % log_interval == 0:
             avg_ctc = log_ctc.item() / log_count
@@ -544,13 +553,20 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             ms_per_step = elapsed / log_count * 1000
             samples_per_sec = sum(b.shape[0] for b in [imgs]) * log_count / elapsed
             ace_str = f" ace={avg_ace:.4f}" if align_ce_weight > 0 else ""
+            data_ms = _t_data_total / log_count * 1000
+            fwd_ms = _t_fwd_total / log_count * 1000
+            bwd_ms = _t_bwd_total / log_count * 1000
             print(f"  [{epoch}/{total_epochs}] batch {batch_idx+1}/{steps}  "
                   f"loss={avg_total:.4f} "
                   f"(ctc={avg_ctc:.4f} lid1={avg_lid1:.4f} lid2={avg_lid2:.4f}{ace_str})  "
                   f"lr={lr:.2e}  lid1={lid1_acc:.2f}% lid2={lid2_acc:.2f}%  "
                   f"gnorm s={shared_norm:.1f} e={expert_norm:.1f}  "
-                  f"{ms_per_step:.0f}ms/step {samples_per_sec:.0f}img/s")
+                  f"{ms_per_step:.0f}ms/step {samples_per_sec:.0f}img/s  "
+                  f"[data={data_ms:.0f}ms fwd={fwd_ms:.0f}ms bwd={bwd_ms:.0f}ms]")
             log_time = time.time()
+            _t_data_total = 0.0
+            _t_fwd_total = 0.0
+            _t_bwd_total = 0.0
             log_ctc.zero_()
             log_lid1.zero_()
             log_lid2.zero_()
