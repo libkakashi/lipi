@@ -47,6 +47,14 @@ _ASCII_COMMON: list[tuple[int, int]] = [
     (0x0020, 0x0040),   # space !"#$%&'()*+,-./0-9:;<=>?@
     (0x005B, 0x0060),   # [\]^_`
     (0x007B, 0x007E),   # {|}~
+    (0x00A3, 0x00A3),   # £
+    (0x00A5, 0x00A5),   # ¥
+    (0x20AC, 0x20AC),   # €
+]
+
+# Indian Rupee sign — shared across all Indic scripts
+_INDIC_CURRENCY: list[tuple[int, int]] = [
+    (0x20B9, 0x20B9),   # ₹
 ]
 
 # Typographic characters shared across scripts
@@ -355,6 +363,7 @@ FUSION_BASE_RANGES: dict[str, list[list[tuple[int, int]]]] = {
         [(0x0958, 0x0972)],     # Nukta consonants + digits + dandas (skip 0957)
         [(0x0979, 0x097F)],     # Extended consonants (skip Sindhi/Marwari 0973-0978)
         _TYPOGRAPHIC_COMMON,
+        _INDIC_CURRENCY,
         [(0x2015, 0x2015)],     # horizontal bar
     ],
     "gurmukhi": [
@@ -362,11 +371,13 @@ FUSION_BASE_RANGES: dict[str, list[list[tuple[int, int]]]] = {
         [(0x0A00, 0x0A7F)],     # Gurmukhi
         [(0x0964, 0x0964)],     # Devanagari danda
         _TYPOGRAPHIC_COMMON,
+        _INDIC_CURRENCY,
     ],
     "gujarati": [
         _ASCII_COMMON,
         [(0x0A80, 0x0AFF)],     # Gujarati
         _TYPOGRAPHIC_COMMON,
+        _INDIC_CURRENCY,
     ],
     "bengali": [
         _ASCII_COMMON,
@@ -374,6 +385,7 @@ FUSION_BASE_RANGES: dict[str, list[list[tuple[int, int]]]] = {
         [(0x0964, 0x0964)],     # Devanagari danda
         [(0x0970, 0x0970)],     # Devanagari abbreviation sign
         _TYPOGRAPHIC_COMMON,
+        _INDIC_CURRENCY,
         [(0x2032, 0x2032)],     # prime
     ],
     "odia": [
@@ -382,33 +394,39 @@ FUSION_BASE_RANGES: dict[str, list[list[tuple[int, int]]]] = {
         [(0x0964, 0x0964)],     # Devanagari danda
         [(0x0970, 0x0970)],     # Devanagari abbreviation sign
         _TYPOGRAPHIC_COMMON,
+        _INDIC_CURRENCY,
     ],
     "kannada": [
         _ASCII_COMMON,
         [(0x0C80, 0x0CFF)],     # Kannada
         _TYPOGRAPHIC_COMMON,
+        _INDIC_CURRENCY,
     ],
     "telugu": [
         _ASCII_COMMON,
         [(0x0C00, 0x0C7F)],     # Telugu
         _TYPOGRAPHIC_COMMON,
+        _INDIC_CURRENCY,
     ],
     "malayalam": [
         _ASCII_COMMON,
         [(0x0D01, 0x0D57)],     # Malayalam (skip 0D00 Vedic, 0D58-0D5E fractions)
         [(0x0D5F, 0x0D7F)],     # Malayalam letters + chillu + au length mark
         _TYPOGRAPHIC_COMMON,
+        _INDIC_CURRENCY,
     ],
     "tamil": [
         _ASCII_COMMON,
         [(0x0B80, 0x0BF9)],     # Tamil (skip 0BFA number sign)
         _TYPOGRAPHIC_COMMON,
+        _INDIC_CURRENCY,
     ],
     "sinhala": [
         _ASCII_COMMON,
         [(0x0D82, 0x0DE5)],     # Sinhala (skip 0D81 candrabindu, 0DE6-0DEF Lith digits)
         [(0x00A0, 0x00A0)],     # no-break space
         _TYPOGRAPHIC_COMMON,
+        _INDIC_CURRENCY,
     ],
     "thai": [
         _ASCII_COMMON,
@@ -639,7 +657,7 @@ def get_korean_codec() -> KoreanCodec:
 
 # ── CJK codec ───────────────────────────────────────────────────────
 
-_CJK_VOCAB_SIZE = 4000
+_CJK_VOCAB_SIZE = 4003
 _CJK_N_ALT = 24
 
 
