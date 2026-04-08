@@ -96,18 +96,6 @@ def convert(input_dir: Path, output_dir: Path, val_ratio: float = 0.1,
         for i in range(n):
             img = images[i].numpy()  # (C, H, W) uint8
 
-            # Strip padding (trailing zeros) from image width
-            # Images in a shard are padded to uniform width — recover original
-            if img.ndim == 3 and img.shape[0] == 2:
-                # L channel — find last non-zero column
-                col_sum = img[0].sum(axis=0)  # (W,)
-                nonzero = np.nonzero(col_sum)[0]
-                if len(nonzero) > 0:
-                    actual_w = nonzero[-1] + 1
-                    # Keep at least 8px, round up to multiple of 4
-                    actual_w = max(8, ((actual_w + 3) // 4) * 4)
-                    img = img[:, :, :actual_w]
-
             label = labels[i]
             sid = int(script_ids[i].item())
             gid = int(group_ids[i].item())
@@ -116,8 +104,10 @@ def convert(input_dir: Path, output_dir: Path, val_ratio: float = 0.1,
                 tlen = int(shard["target_lens"][i].item())
                 tids = shard["target_ids"][i, :tlen].numpy().astype(np.int64)
             else:
-                tids = np.zeros(1, dtype=np.int64)
                 tlen = 0
+            # MDS can't encode 0-length arrays
+            if tlen == 0:
+                tids = np.zeros(1, dtype=np.int64)
 
             width = img.shape[2]
 
