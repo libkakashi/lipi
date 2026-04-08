@@ -24,9 +24,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.model.encoder import LipiMoEEncoder
 from src.model.lid import SCRIPT_TO_GROUP, NUM_GROUPS, GROUPS
 from src.training.dataloader import (
-    load_shards, build_script_tokenizers, encode_labels,
-    remap_ids, MoEDataset, collate_moe, WidthBudgetBatchSampler,
-    ShardStreamDataset, load_shard_metadata,
+    build_script_tokenizers, collate_moe, WidthBudgetBatchSampler,
+    LipiStreamingDataset,
 )
 from src.training.losses import (
     compute_lid1_loss, compute_lid2_loss, compute_ctc_loss,
@@ -135,10 +134,17 @@ def load_and_prepare_data(args, device):
     data_path = Path(args.data)
     print(f"\nLoading data from {data_path}/...")
 
-    shard_files, meta = load_shard_metadata(data_path)
-    print(f"  {len(shard_files)} shards")
+    # Load metadata
+    meta_path = data_path / "metadata.pt"
+    if not meta_path.exists():
+        # Check parent for metadata (MDS dirs are data_path/train, data_path/val)
+        meta_path = data_path.parent / "metadata.pt"
+    if meta_path.exists():
+        meta = torch.load(meta_path, weights_only=False)
+        active_scripts = meta["active_scripts"]
+    else:
+        active_scripts = list(SCRIPT_TO_GROUP.keys())
 
-    active_scripts = meta["active_scripts"]
     if args.scripts != "all":
         selected = set(s.strip() for s in args.scripts.split(","))
         active_scripts = [s for s in active_scripts if s in selected]
@@ -165,33 +171,36 @@ def load_and_prepare_data(args, device):
         all_scripts, active_groups)
     print(f"  Per-script vocab sizes: {group_script_vocab_sizes}")
 
-    # Build streaming dataset (constant memory — loads one shard at a time)
-    print("Building streaming dataset index...")
-    dataset = ShardStreamDataset(shard_files, all_scripts, active_groups)
-    n_total = len(dataset)
-    print(f"  {n_total} total samples across {len(shard_files)} shards")
+    # MDS streaming datasets
+    train_dir = str(data_path / "train")
+    val_dir = str(data_path / "val")
+    print(f"Loading MDS datasets from {data_path}/...")
 
-    n_val = max(1, int(n_total * args.val_split))
-    n_train = n_total - n_val
-    assert n_train > 0, f"No training samples after split (total={n_total}, val={n_val})"
-    train_set, val_set = torch.utils.data.random_split(
-        dataset, [n_train, n_val], generator=torch.Generator().manual_seed(42))
-    print(f"Train: {n_train}, Val: {n_val}")
+    train_dataset = LipiStreamingDataset(
+        local=train_dir, active_scripts=all_scripts,
+        active_groups=active_groups, shuffle=False)
+    val_dataset = LipiStreamingDataset(
+        local=val_dir, active_scripts=all_scripts,
+        active_groups=active_groups, shuffle=False)
+    print(f"  Train: {len(train_dataset)}, Val: {len(val_dataset)}")
 
-    # Dynamic batch sizing: pack batches by pixel budget (batch_size * 192px ref width).
-    # Narrow-image batches get more samples, wide ones get fewer. No OOM, max GPU usage.
-    ref_width = 192  # typical word width
+    # Dynamic batch sizing: pixel budget = batch_size × 192px reference width
+    import numpy as np
+    ref_width = 192
     max_pixels = args.batch_size * ref_width
-    train_widths = [dataset.widths[i] for i in train_set.indices]
-    train_shard_ids = [dataset.shard_ids[i] for i in train_set.indices]
-    train_batch_sampler = WidthBudgetBatchSampler(
-        train_widths, max_pixels, shard_ids=train_shard_ids)
-    train_loader = DataLoader(train_set, batch_sampler=train_batch_sampler,
-                              collate_fn=collate_moe, pin_memory=(device_type == "cuda"))
+    train_widths = np.load(str(Path(train_dir) / "widths.npy"))
+    train_batch_sampler = WidthBudgetBatchSampler(train_widths, max_pixels)
     print(f"  Dynamic batching: {len(train_batch_sampler)} batches, "
           f"budget={max_pixels}px (batch_size={args.batch_size} × {ref_width}px ref)")
-    val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False,
-                            collate_fn=collate_moe, pin_memory=(device_type == "cuda"))
+
+    train_loader = DataLoader(train_dataset, batch_sampler=train_batch_sampler,
+                              collate_fn=collate_moe, num_workers=4,
+                              pin_memory=(device_type == "cuda"),
+                              persistent_workers=True)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False,
+                            collate_fn=collate_moe, num_workers=2,
+                            pin_memory=(device_type == "cuda"),
+                            persistent_workers=True)
 
     return {
         "train_loader": train_loader,

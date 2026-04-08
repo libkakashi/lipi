@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-train = ["wandb>=0.16.0"]
+train = ["wandb>=0.16.0", "mosaicml-streaming>=0.10.0"]
 synth = ["trdg>=1.8.0"]
 distill = ["transformers>=4.40.0", "accelerate>=0.27.0"]
 pdf = ["pymupdf>=1.24.0"]
