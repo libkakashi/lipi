@@ -81,7 +81,9 @@ def estimate_pixel_budget(model, vram_gb=32, margin=0.85):
     # Shared SWA: each block checkpointed, stores input
     elems += n_shared * 8 * shared_dim
 
-    # Stage 1 pre-pool: expert blocks, checkpoint per attn + per mlp = 2 saves
+    # Expert blocks: groups split the batch (each saves its slice), so total
+    # stored = B * tokens * dim * 2 (attn + mlp) per block — same as ungrouped.
+    # Stage 1 pre-pool
     elems += n_stage1_pre * 2 * 8 * stage1_dim
 
     # Stage 1 post-pool
