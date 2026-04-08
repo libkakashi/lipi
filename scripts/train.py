@@ -624,14 +624,18 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             data_ms = _t_data_total / log_count * 1000
             fwd_ms = _t_fwd_total / log_count * 1000
             bwd_ms = _t_bwd_total / log_count * 1000
-            print(f"  [{epoch}/{total_epochs}] batch {batch_idx+1}/{steps}  "
-                  f"lr={lr:.2e}  "
-                  f"gnorm s={shared_norm:.1f} e={expert_norm:.1f}  "
-                  f"{ms_per_step:.0f}ms/step {samples_per_sec:.0f}img/s  "
-                  f"[data={data_ms:.0f}ms fwd={fwd_ms:.0f}ms bwd={bwd_ms:.0f}ms]\n"
-                  f"    loss={avg_total:.4f} "
-                  f"(ctc={avg_ctc:.4f} lid1={avg_lid1:.4f} lid2={avg_lid2:.4f}{ace_str})  "
-                  f"lid1={lid1_acc:.2f}% lid2={lid2_acc:.2f}%")
+            batch_str = f"{batch_idx+1}/{steps}"
+            print(
+                f"  [{epoch:>2}/{total_epochs}] {batch_str:>9}  "
+                f"lr={lr:.2e}  "
+                f"gnorm s={shared_norm:5.1f} e={expert_norm:5.1f}  "
+                f"{ms_per_step:6.0f}ms/step {samples_per_sec:5.0f}img/s  "
+                f"[data={data_ms:4.0f} fwd={fwd_ms:5.0f} bwd={bwd_ms:5.0f}ms]\n"
+                f"  {'':>14}  "
+                f"loss={avg_total:7.4f} "
+                f"(ctc={avg_ctc:7.4f} lid1={avg_lid1:6.4f} lid2={avg_lid2:6.4f}{ace_str})  "
+                f"lid1={lid1_acc:6.2f}% lid2={lid2_acc:6.2f}%"
+            )
             log_time = time.time()
             _t_data_total = 0.0
             _t_fwd_total = 0.0
