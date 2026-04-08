@@ -53,8 +53,8 @@ def estimate_pixel_budget(model, vram_gb=32, margin=0.85):
     Memory accounting per block type:
     - Shared SWA (entire block checkpointed): saves 1 tensor (input) per block
     - Expert blocks (only inner attn/MLP checkpointed): the outer block's
-      intermediates (normed, attn_out, residual, normed2, mlp_out, output)
-      are NOT checkpointed — ~7 tensors of (B, T, dim) per block
+      intermediates (normed ×2, residual sums, output) are NOT checkpointed
+      — ~5 tensors of (B, T, dim) per block
     - Recompute peak: during backward, one block recomputes its full forward,
       adding QKV + attention + MLP intermediates temporarily
     """
