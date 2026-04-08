@@ -20,8 +20,8 @@ Architecture:
 
 import torch
 import torch.nn as nn
-import torch.utils.checkpoint as ckpt_util
 from torch import Tensor
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import offload_wrapper
 
 from src.data.color import ColorProjection
 from src.model.stem import ResNetStem
@@ -166,15 +166,15 @@ class LipiMoEEncoder(nn.Module):
         # Window sizes scaled 2× from original 4×4/4×16 to match 2×2 stem
         self.shared_swa = nn.ModuleList()
         for i in range(shared_blocks_4x4):
-            self.shared_swa.append(
+            self.shared_swa.append(offload_wrapper(
                 SWABlock(dim=shared_dim, num_heads=shared_dim // 32,
                          window_h=8, window_w=8,
-                         shift=(i % 2 == 1), mlp_ratio=shared_mlp_ratio))
+                         shift=(i % 2 == 1), mlp_ratio=shared_mlp_ratio)))
         for i in range(shared_blocks_4x16):
-            self.shared_swa.append(
+            self.shared_swa.append(offload_wrapper(
                 SWABlock(dim=shared_dim, num_heads=shared_dim // 32,
                          window_h=8, window_w=32,
-                         shift=(i % 2 == 1), mlp_ratio=shared_mlp_ratio))
+                         shift=(i % 2 == 1), mlp_ratio=shared_mlp_ratio)))
 
         # LID-1
         self.lid_coarse = LIDCoarse(in_channels=shared_dim, num_groups=num_groups)
@@ -270,12 +270,9 @@ class LipiMoEEncoder(nn.Module):
         x = x.permute(0, 2, 3, 1).reshape(B, h * w, C)
         x = self.proj_shared(x)
 
-        # Shared SWA (with gradient checkpointing to save activation memory)
+        # Shared SWA (activations offloaded to CPU during forward, copied back for backward)
         for block in self.shared_swa:
-            if self.training and torch.is_grad_enabled():
-                x = ckpt_util.checkpoint(block, x, h, w, use_reentrant=False)
-            else:
-                x = block(x, h=h, w=w)
+            x = block(x, h=h, w=w)
 
         # LID-1 (with learned attention pooling)
         group_logits = self.lid_coarse.forward_seq(x)
