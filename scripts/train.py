@@ -194,13 +194,11 @@ def load_and_prepare_data(args, device):
           f"budget={max_pixels}px (batch_size={args.batch_size} × {ref_width}px ref)")
 
     train_loader = DataLoader(train_dataset, batch_sampler=train_batch_sampler,
-                              collate_fn=collate_moe, num_workers=4,
-                              pin_memory=(device_type == "cuda"),
-                              persistent_workers=True)
+                              collate_fn=collate_moe,
+                              pin_memory=(device_type == "cuda"))
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False,
-                            collate_fn=collate_moe, num_workers=2,
-                            pin_memory=(device_type == "cuda"),
-                            persistent_workers=True)
+                            collate_fn=collate_moe,
+                            pin_memory=(device_type == "cuda"))
 
     return {
         "train_loader": train_loader,
