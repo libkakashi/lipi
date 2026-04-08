@@ -335,7 +335,7 @@ class FullyExpertSWABlock(nn.Module):
             if s < e:
                 if self.training and torch.is_grad_enabled():
                     result = ckpt_util.checkpoint(
-                        self.expert_attns[g], normed[s:e], h, w, use_reentrant=False)
+                        self.expert_attns[g], normed[s:e], h, w, use_reentrant=True)
                 else:
                     result = self.expert_attns[g](normed[s:e], h, w)
                 attn_out[s:e] = result.to(attn_out.dtype)
@@ -349,7 +349,7 @@ class FullyExpertSWABlock(nn.Module):
             if s < e:
                 if self.training and torch.is_grad_enabled():
                     result = ckpt_util.checkpoint(
-                        self.expert_mlps[g], normed[s:e], use_reentrant=False)
+                        self.expert_mlps[g], normed[s:e], use_reentrant=True)
                 else:
                     result = self.expert_mlps[g](normed[s:e])
                 mlp_out[s:e] = result.to(mlp_out.dtype)

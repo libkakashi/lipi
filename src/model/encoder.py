@@ -282,7 +282,7 @@ class LipiMoEEncoder(nn.Module):
         # Shared SWA (gradient checkpointing saves VRAM, recomputes during backward)
         for i, block in enumerate(self.shared_swa):
             if self.training and torch.is_grad_enabled():
-                x = ckpt_util.checkpoint(block, x, h, w, use_reentrant=False)
+                x = ckpt_util.checkpoint(block, x, h, w, use_reentrant=True)
             else:
                 x = block(x, h=h, w=w)
         if _dbg: _sync(); print(f"    [fwd] shared_swa ({len(self.shared_swa)} blocks): {(_time.time()-_t0)*1000:.0f}ms", flush=True); _t0=_time.time()
