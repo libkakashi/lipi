@@ -331,7 +331,7 @@ class ShardStreamDataset(Dataset):
         # LRU cache — keep recent shards in memory
         self._cache: dict[int, dict] = {}
         self._cache_order: list[int] = []
-        self._cache_max = max(1, min(len(shard_files), 32))  # up to 32 shards (~3GB)
+        self._cache_max = len(shard_files)  # cache all shards — first epoch loads, rest is free
 
     def __len__(self):
         return len(self._index)
