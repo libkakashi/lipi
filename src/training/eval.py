@@ -8,7 +8,7 @@ per-group and per-script.
 import torch
 from torch import Tensor
 
-from src.encoding.decompose import decode_ids
+from src.encoding.decompose import decode_ids, script_vocab_size
 
 
 @torch.no_grad()
@@ -112,7 +112,7 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
 
             # CTC greedy decode: argmax → collapse repeats → remove blanks
             pred_sid_safe = min(pred_sid, len(group_script_names[pred_g]) - 1)
-            vs = group_script_vocab_sizes[pred_g][pred_sid_safe] if group_script_vocab_sizes else 2500
+            vs = group_script_vocab_sizes[pred_g][pred_sid_safe] if group_script_vocab_sizes else script_vocab_size(group_script_names[pred_g][pred_sid_safe])
             seq = all_logits[i, :, :vs].argmax(dim=-1).tolist()
             ids = []
             prev = -1

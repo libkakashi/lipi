@@ -86,6 +86,7 @@ class NoFusionCodec:
 
     def encode_text(self, text: str) -> list[int]:
         """Encode a string to a list of CTC token IDs."""
+        text = unicodedata.normalize("NFC", text)
         return [self._char_to_id[c] for c in text if c in self._char_to_id]
 
     def decode_ids(self, ids: list[int]) -> str:
@@ -224,6 +225,7 @@ class FusionCodec:
         token; unknown ones fall back to per-codepoint encoding.
         """
         import regex
+        text = unicodedata.normalize("NFC", text)
         clusters = regex.findall(r'\X', text)
         ids = []
         for cluster in clusters:
@@ -500,6 +502,7 @@ class KoreanCodec:
 
     def encode_text(self, text: str) -> list[int]:
         """Encode string → list of CTC token IDs."""
+        text = unicodedata.normalize("NFC", text)
         ids = []
         for char in text:
             tid = self._token_to_id.get(char)
