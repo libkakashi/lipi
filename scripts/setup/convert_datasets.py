@@ -33,11 +33,12 @@ DATA_DIR = Path(__file__).parent.parent / "training_data" / "real_datasets"
 SHARD_SIZE = 5000  # images per shard
 
 
-def process_image(img_path, height=32, max_width=192):
+def process_image(img_path, height=32, max_width=768):
     """Load, validate, and convert an image to model input format.
 
     Resizes height to target while preserving aspect ratio.
-    Pads width to max_width if narrower, keeps original width if wider.
+    Width is kept natural (up to max_width). Padding to uniform width
+    is done at shard save time, not here.
     """
     try:
         img = Image.open(img_path).convert("RGB")
@@ -52,15 +53,9 @@ def process_image(img_path, height=32, max_width=192):
         new_width = max(1, int(img.width * height / img.height))
         img = img.resize((new_width, height), Image.BILINEAR)
 
-    # Scale down if too wide (never crop)
+    # Cap at max_width (very long lines)
     if img.width > max_width:
         img = img.resize((max_width, height), Image.BILINEAR)
-
-    # Pad narrow images to max_width for uniform tensor stacking
-    if img.width < max_width:
-        padded = Image.new("RGB", (max_width, height), (240, 240, 240))
-        padded.paste(img, (0, 0))
-        img = padded
 
     if not image_has_ink(img):
         return None
@@ -110,11 +105,21 @@ def save_shards(images, labels, script, out_dir, prefix="real"):
         batch_labels = labels[i:i + SHARD_SIZE]
         n = len(batch_imgs)
 
+        # Pad all images to the max width in this shard
+        max_w = max(img.shape[2] for img in batch_imgs)
+        padded = []
+        for img in batch_imgs:
+            if img.shape[2] < max_w:
+                pad = torch.full((img.shape[0], img.shape[1], max_w - img.shape[2]),
+                                 img.max(), dtype=img.dtype)
+                img = torch.cat([img, pad], dim=2)
+            padded.append(img)
+
         target_ids, target_lens = encode_labels_for_shard(batch_labels, script)
 
         shard_path = out_dir / f"{prefix}_{script}_{i // SHARD_SIZE:04d}.pt"
         torch.save({
-            "images": torch.stack(batch_imgs),
+            "images": torch.stack(padded),
             "labels": batch_labels,
             "script_ids": torch.full((n,), script_id, dtype=torch.long),
             "group_ids": torch.full((n,), group_id, dtype=torch.long),

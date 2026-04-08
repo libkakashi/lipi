@@ -74,10 +74,20 @@ def load_shards(shard_dir: Path) -> tuple[
                 all_tids.append(shard["target_ids"])
                 all_tlens.append(shard["target_lens"])
 
-    images = torch.cat(all_imgs)
+    # Pad images to uniform width across shards (real-world data may vary)
+    max_w = max(t.shape[3] for t in all_imgs)
+    padded_imgs = []
+    for t in all_imgs:
+        if t.shape[3] < max_w:
+            pad = torch.zeros(t.shape[0], t.shape[1], t.shape[2],
+                              max_w - t.shape[3], dtype=t.dtype)
+            padded_imgs.append(torch.cat([t, pad], dim=3))
+        else:
+            padded_imgs.append(t)
+    images = torch.cat(padded_imgs)
     script_ids = torch.cat(all_sids)
     group_ids = torch.cat(all_gids)
-    del all_imgs, all_sids, all_gids
+    del all_imgs, padded_imgs, all_sids, all_gids
 
     if has_targets and all_tids:
         max_len = max(t.shape[1] for t in all_tids)
