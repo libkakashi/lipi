@@ -452,6 +452,8 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
     _t_data_total = 0.0
     _t_fwd_total = 0.0
     _t_bwd_total = 0.0
+    shared_norm = 0.0
+    expert_norm = 0.0
 
     for batch_idx, (imgs, targets, tgt_lens, gids, sids, _labels) in enumerate(train_loader):
         _t_data_total += time.time() - _t_data
