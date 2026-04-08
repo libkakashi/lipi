@@ -259,6 +259,13 @@ class LipiMoEEncoder(nn.Module):
         detach_for_experts: bool = False,
     ) -> dict:
         B = images.shape[0]
+        _dbg = not hasattr(self, '_dbg_done')
+        if _dbg:
+            import time as _time
+            def _sync():
+                if images.is_cuda:
+                    torch.cuda.synchronize()
+            _t0 = _time.time()
 
         # Color projection
         x = self.color_proj(images)
@@ -266,25 +273,25 @@ class LipiMoEEncoder(nn.Module):
         # Stem
         x = self.stem(x)
         _, C, h, w = x.shape
+        if _dbg: _sync(); print(f"    [fwd] stem: {(_time.time()-_t0)*1000:.0f}ms  x={list(x.shape)}", flush=True); _t0=_time.time()
+
         # Reshape + project
         x = x.permute(0, 2, 3, 1).reshape(B, h * w, C)
         x = self.proj_shared(x)
 
         # Shared SWA (gradient checkpointing saves VRAM, recomputes during backward)
-        for block in self.shared_swa:
+        for i, block in enumerate(self.shared_swa):
             if self.training and torch.is_grad_enabled():
                 x = ckpt_util.checkpoint(block, x, h, w, use_reentrant=False)
             else:
                 x = block(x, h=h, w=w)
+        if _dbg: _sync(); print(f"    [fwd] shared_swa ({len(self.shared_swa)} blocks): {(_time.time()-_t0)*1000:.0f}ms", flush=True); _t0=_time.time()
 
         # LID-1 (with learned attention pooling)
         group_logits = self.lid_coarse.forward_seq(x)
         if group_ids is None:
             group_ids = group_logits.argmax(dim=-1)
 
-        # Optionally detach shared features before expert stages.
-        # When True: LID-1 gradient → shared encoder, CTC gradient → experts only.
-        # Prevents CTC from competing with LID-1 for shared features early in training.
         if detach_for_experts:
             x = x.detach()
 
@@ -294,13 +301,13 @@ class LipiMoEEncoder(nn.Module):
         # Expert SWA Stage 1 — high-res blocks before downsampling
         for block in self.stage1[:self.stage1_downsample_after]:
             x = block(x, h=h, w=w, group_ids=group_ids)
+        if _dbg: _sync(); print(f"    [fwd] stage1_pre ({self.stage1_downsample_after} blocks): {(_time.time()-_t0)*1000:.0f}ms", flush=True); _t0=_time.time()
 
         # Height pool 16→8, width pool 2×
         C1 = x.shape[-1]
-        x = x.reshape(B, h, w, C1).permute(0, 3, 1, 2)  # (B, C1, h, w)
-        x = self.pool1(x)                                  # (B, C1, 8, w)
+        x = x.reshape(B, h, w, C1).permute(0, 3, 1, 2)
+        x = self.pool1(x)
         h = 8
-        # Width pool: (B, C1, 8, w) → reshape to (B*8, C1, w) → conv → (B*8, C1, w//2)
         x = x.reshape(B * h, C1, w)
         x = self.width_pool(x)
         w = x.shape[2]
@@ -309,6 +316,7 @@ class LipiMoEEncoder(nn.Module):
         # Expert SWA Stage 1 — low-res blocks after downsampling
         for block in self.stage1[self.stage1_downsample_after:]:
             x = block(x, h=h, w=w, group_ids=group_ids)
+        if _dbg: _sync(); print(f"    [fwd] stage1_post + pool: {(_time.time()-_t0)*1000:.0f}ms  h={h} w={w}", flush=True); _t0=_time.time()
 
         # Project to stage2
         x = self.proj2(x)
@@ -316,14 +324,16 @@ class LipiMoEEncoder(nn.Module):
         # Expert SWA Stage 2
         for block in self.stage2:
             x = block(x, h=h, w=w, group_ids=group_ids)
+        if _dbg: _sync(); print(f"    [fwd] stage2 ({len(self.stage2)} blocks): {(_time.time()-_t0)*1000:.0f}ms", flush=True); _t0=_time.time()
 
         # Fold h=8 directly into channels
         C2 = x.shape[-1]
-        x = x.reshape(B, h, w, C2)                         # (B, 8, w, C2)
-        x = x.permute(0, 2, 1, 3).reshape(B, w, C2 * h)   # (B, T, C2*8)
-        T = w  # actual sequence length from encoder (not assumed W//4)
+        x = x.reshape(B, h, w, C2)
+        x = x.permute(0, 2, 1, 3).reshape(B, w, C2 * h)
+        T = w
         # Final norm
         x = self.norm(x)
+        if _dbg: _sync(); print(f"    [fwd] fold+norm: {(_time.time()-_t0)*1000:.0f}ms  T={T}", flush=True); _t0=_time.time()
 
         # Per-group CTC with LID-2
         max_vocab = max(m.max_vocab for m in self.ctc_modules)
@@ -346,6 +356,11 @@ class LipiMoEEncoder(nn.Module):
 
             if g_script_logits is not None:
                 all_script_logits.append((g, g_script_logits, mask))
+
+        if _dbg:
+            _sync()
+            print(f"    [fwd] ctc_heads: {(_time.time()-_t0)*1000:.0f}ms", flush=True)
+            self._dbg_done = True
 
         lengths = torch.full((B,), T, dtype=torch.long, device=x.device)
 
