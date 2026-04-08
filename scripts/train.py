@@ -178,10 +178,10 @@ def load_and_prepare_data(args, device):
 
     train_dataset = LipiStreamingDataset(
         local=train_dir, active_scripts=all_scripts,
-        active_groups=active_groups, shuffle=False)
+        active_groups=active_groups)
     val_dataset = LipiStreamingDataset(
         local=val_dir, active_scripts=all_scripts,
-        active_groups=active_groups, shuffle=False)
+        active_groups=active_groups)
     print(f"  Train: {len(train_dataset)}, Val: {len(val_dataset)}")
 
     # Dynamic batch sizing: pixel budget = batch_size × 192px reference width
