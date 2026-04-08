@@ -11,8 +11,8 @@ Designed for clean ONNX opset 17 export.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.utils.checkpoint as ckpt_util
 from torch import Tensor
-from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import offload_wrapper
 
 from src.model.rope import RoPE2D
 
@@ -293,12 +293,12 @@ class FullyExpertSWABlock(nn.Module):
         self.num_groups = num_groups
         self.norm1 = nn.LayerNorm(dim)
         self.expert_attns = nn.ModuleList([
-            offload_wrapper(ShiftedWindowAttention(dim, num_heads, window_h, window_w, shift))
+            ShiftedWindowAttention(dim, num_heads, window_h, window_w, shift)
             for _ in range(num_groups)
         ])
         self.norm2 = nn.LayerNorm(dim)
         self.expert_mlps = nn.ModuleList([
-            offload_wrapper(MLP(dim, mlp_ratio)) for _ in range(num_groups)
+            MLP(dim, mlp_ratio) for _ in range(num_groups)
         ])
 
     def _get_group_boundaries(self, group_ids: Tensor, B: int) -> list[tuple[int, int]]:
@@ -327,23 +327,31 @@ class FullyExpertSWABlock(nn.Module):
         sorted_idx, bounds = self._get_group_boundaries(group_ids, B)
         x_sorted = x[sorted_idx]
 
-        # Expert attention (activations offloaded to CPU)
+        # Expert attention with gradient checkpointing
         normed = self.norm1(x_sorted)
         attn_out = torch.empty_like(x_sorted)
         for g in range(self.num_groups):
             s, e = bounds[g]
             if s < e:
-                result = self.expert_attns[g](normed[s:e], h, w)
+                if self.training and torch.is_grad_enabled():
+                    result = ckpt_util.checkpoint(
+                        self.expert_attns[g], normed[s:e], h, w, use_reentrant=False)
+                else:
+                    result = self.expert_attns[g](normed[s:e], h, w)
                 attn_out[s:e] = result.to(attn_out.dtype)
         x_sorted = x_sorted + attn_out
 
-        # Expert MLP (activations offloaded to CPU)
+        # Expert MLP with gradient checkpointing
         normed = self.norm2(x_sorted)
         mlp_out = torch.empty_like(x_sorted)
         for g in range(self.num_groups):
             s, e = bounds[g]
             if s < e:
-                result = self.expert_mlps[g](normed[s:e])
+                if self.training and torch.is_grad_enabled():
+                    result = ckpt_util.checkpoint(
+                        self.expert_mlps[g], normed[s:e], use_reentrant=False)
+                else:
+                    result = self.expert_mlps[g](normed[s:e])
                 mlp_out[s:e] = result.to(mlp_out.dtype)
         x_sorted = x_sorted + mlp_out
 
