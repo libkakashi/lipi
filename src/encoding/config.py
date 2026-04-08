@@ -252,6 +252,7 @@ def build_fusion_codec(
     base_chars: list[str],
     fusions_tsv: Path,
     max_vocab: int,
+    guaranteed_fusions: list[str] | None = None,
 ) -> FusionCodec:
     """Build a FusionCodec from base chars + a fusions frequency TSV.
 
@@ -260,14 +261,27 @@ def build_fusion_codec(
         fusions_tsv: path to TSV with columns: cluster, count, codepoint_len.
                      Must be sorted by count descending.
         max_vocab: maximum total vocab size (including BLANK).
+        guaranteed_fusions: multi-codepoint tokens always included before
+                           frequency-ranked fusions (e.g. virama+consonant).
 
     Returns:
-        FusionCodec with top-N fusions that fit within max_vocab.
+        FusionCodec with guaranteed fusions + top-N fusions that fit.
     """
     avail_slots = max_vocab - 1 - len(base_chars)  # -1 for BLANK
     base_set = set(base_chars)
 
     fusions: list[str] = []
+    seen: set[str] = set()
+
+    # Add guaranteed fusions first
+    if guaranteed_fusions:
+        for f in guaranteed_fusions:
+            if len(fusions) >= avail_slots:
+                break
+            fusions.append(f)
+            seen.add(f)
+
+    # Fill remaining with frequency-ranked fusions from TSV
     if fusions_tsv.exists():
         for line in fusions_tsv.read_text(encoding="utf-8").splitlines():
             parts = line.split("\t")
@@ -275,15 +289,46 @@ def build_fusion_codec(
                 continue
             cluster = parts[0]
             cp_len = int(parts[2])
-            # Only multi-codepoint clusters that use known base chars
             if cp_len <= 1:
+                continue
+            if cluster in seen:
                 continue
             if all(c in base_set for c in cluster):
                 fusions.append(cluster)
+                seen.add(cluster)
             if len(fusions) >= avail_slots:
                 break
 
     return FusionCodec(base_chars, fusions)
+
+
+# Virama+consonant pairs for Indic scripts (guaranteed fusions).
+# These ensure consonant conjuncts encode as 2 tokens (base + virama+cons)
+# instead of 3 (base + virama + cons), matching CTC's horizontal alignment.
+_VIRAMA_PAIRS: dict[str, list[str]] = {}
+
+def _build_virama_pairs():
+    """Build virama+consonant token lists for all Indic scripts."""
+    _scripts = {
+        "devanagari": (0x094D, 0x0915, 0x093A),
+        "bengali":    (0x09CD, 0x0995, 0x09B0),
+        "gurmukhi":   (0x0A4D, 0x0A15, 0x0A39),
+        "gujarati":   (0x0ACD, 0x0A95, 0x0AB0),
+        "odia":       (0x0B4D, 0x0B15, 0x0B39),
+        "kannada":    (0x0CCD, 0x0C95, 0x0CB9),
+        "telugu":     (0x0C4D, 0x0C15, 0x0C39),
+        "malayalam":  (0x0D4D, 0x0D15, 0x0D39),
+        "tamil":      (0x0BCD, 0x0B95, 0x0BB9),
+        "sinhala":    (0x0DCA, 0x0D9A, 0x0DC6),
+    }
+    for script, (virama_cp, con_start, con_end) in _scripts.items():
+        v = chr(virama_cp)
+        _VIRAMA_PAIRS[script] = [
+            v + chr(cp) for cp in range(con_start, con_end + 1)
+            if unicodedata.category(chr(cp)) != "Cn"
+        ]
+
+_build_virama_pairs()
 
 
 # ── Fusion scripts ──────────────────────────────────────────────────
@@ -299,8 +344,10 @@ FUSION_BASE_RANGES: dict[str, list[list[tuple[int, int]]]] = {
     ],
     "devanagari": [
         _ASCII_COMMON,
-        [(0x0900, 0x097F)],     # Devanagari
-        [(0xA8E0, 0xA8FF)],     # Devanagari Extended
+        [(0x0900, 0x094D)],     # Devanagari signs + vowels + consonants + matras + virama
+        [(0x0950, 0x0956)],     # OM + vowel signs (skip Kashmiri 094E-094F)
+        [(0x0958, 0x0972)],     # Nukta consonants + digits + dandas (skip 0957)
+        [(0x0979, 0x097F)],     # Extended consonants (skip Sindhi/Marwari 0973-0978)
         _TYPOGRAPHIC_COMMON,
         [(0x2015, 0x2015)],     # horizontal bar
     ],
@@ -412,6 +459,7 @@ def get_fusion_codec(script: str) -> FusionCodec:
         FUSION_BASE_CHARS[script],
         fusions_tsv,
         max_vocab=max_vocab,
+        guaranteed_fusions=_VIRAMA_PAIRS.get(script),
     )
     _fusion_codec_cache[script] = codec
     return codec
