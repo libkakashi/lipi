@@ -8,11 +8,13 @@ automatic caching, multi-worker support, and memory-mapped I/O.
 import random
 from pathlib import Path
 
+import json
+import struct
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 import torch
 from torch.utils.data import Dataset, Sampler
-
-from streaming import Stream, StreamingDataset
 
 from src.model.lid import SCRIPT_TO_GROUP, SCRIPT_TO_ID, GROUP_TO_ID
 from src.encoding.decompose import encode_text, script_vocab_size
@@ -133,48 +135,28 @@ class LipiStreamingDataset(Dataset):
 # Dynamic batch sampler
 # ---------------------------------------------------------------------------
 
-class WidthBudgetBatchSampler(Sampler):
-    """Batch sampler that packs batches by pixel budget, not fixed count.
+class WidthSortedBatchSampler(Sampler):
+    """Sort by width, chunk into fixed-size batches, shuffle batch order.
 
-    Sorts by width, then greedily fills each batch until adding another
-    sample would exceed max_pixels. Wide-image batches get fewer samples,
-    narrow ones get more. Shuffles batch order each epoch.
-
-    Usage: pass as batch_sampler to DataLoader (NOT sampler).
+    Similar-width images end up in the same batch → minimal padding waste.
     """
 
-    def __init__(self, widths: list[int] | np.ndarray, max_pixels: int):
-        self.max_pixels = max_pixels
-        self.widths = widths if isinstance(widths, list) else widths.tolist()
-        self.sorted_indices = sorted(
-            range(len(self.widths)), key=lambda i: self.widths[i])
-        self._batches = self._build_batches()
-
-    def _build_batches(self) -> list[list[int]]:
-        batches = []
-        current_batch = []
-        current_max_w = 0
-        for idx in self.sorted_indices:
-            w = self.widths[idx]
-            new_max_w = max(current_max_w, w)
-            if current_batch and (len(current_batch) + 1) * new_max_w > self.max_pixels:
-                batches.append(current_batch)
-                current_batch = [idx]
-                current_max_w = w
-            else:
-                current_batch.append(idx)
-                current_max_w = new_max_w
-        if current_batch:
-            batches.append(current_batch)
-        return batches
+    def __init__(self, widths: list[int] | np.ndarray, batch_size: int):
+        self.batch_size = batch_size
+        if isinstance(widths, np.ndarray):
+            widths = widths.tolist()
+        self.sorted_indices = sorted(range(len(widths)), key=lambda i: widths[i])
 
     def __iter__(self):
-        batches = self._build_batches()
+        # Chunk into fixed-size batches
+        batches = []
+        for i in range(0, len(self.sorted_indices), self.batch_size):
+            batches.append(self.sorted_indices[i:i + self.batch_size])
         random.shuffle(batches)
         yield from batches
 
     def __len__(self):
-        return len(self._batches)
+        return (len(self.sorted_indices) + self.batch_size - 1) // self.batch_size
 
 
 # ---------------------------------------------------------------------------

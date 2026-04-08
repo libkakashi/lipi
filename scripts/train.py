@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.model.encoder import LipiMoEEncoder
 from src.model.lid import SCRIPT_TO_GROUP, NUM_GROUPS, GROUPS
 from src.training.dataloader import (
-    build_script_tokenizers, collate_moe, WidthBudgetBatchSampler,
+    build_script_tokenizers, collate_moe, WidthSortedBatchSampler,
     LipiStreamingDataset,
 )
 from src.training.losses import (
@@ -184,16 +184,11 @@ def load_and_prepare_data(args, device):
         active_groups=active_groups)
     print(f"  Train: {len(train_dataset)}, Val: {len(val_dataset)}")
 
-    # Dynamic batch sizing: pixel budget = batch_size × reference width.
-    # ref_width=384 matches the old fixed-width behavior where batch_size
-    # controlled how many images at typical document widths.
+    # Sort by width, fixed batch size — similar widths batched together
     import numpy as np
-    ref_width = 384
-    max_pixels = args.batch_size * ref_width
     train_widths = np.load(str(Path(train_dir) / "widths.npy"))
-    train_batch_sampler = WidthBudgetBatchSampler(train_widths, max_pixels)
-    print(f"  Dynamic batching: {len(train_batch_sampler)} batches, "
-          f"budget={max_pixels}px (batch_size={args.batch_size} × {ref_width}px ref)")
+    train_batch_sampler = WidthSortedBatchSampler(train_widths, args.batch_size)
+    print(f"  Width-sorted batching: {len(train_batch_sampler)} batches of {args.batch_size}")
 
     train_loader = DataLoader(train_dataset, batch_sampler=train_batch_sampler,
                               collate_fn=collate_moe,
