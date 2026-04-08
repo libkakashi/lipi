@@ -448,6 +448,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
     log_ace = torch.zeros(1, device=device)
     log_total = torch.zeros(1, device=device)
     log_count = 0
+    log_time = time.time()
 
     for batch_idx, (imgs, targets, tgt_lens, gids, sids, _labels) in enumerate(train_loader):
         imgs = imgs.to(device, non_blocking=True)
@@ -541,12 +542,17 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                     lid2_correct += (pred == true).sum().item()
                     lid2_total += true.shape[0]
             lid2_acc = 100 * lid2_correct / max(lid2_total, 1)
+            elapsed = time.time() - log_time
+            ms_per_step = elapsed / log_count * 1000
+            samples_per_sec = sum(b.shape[0] for b in [imgs]) * log_count / elapsed
             ace_str = f" ace={avg_ace:.4f}" if align_ce_weight > 0 else ""
             print(f"  [{epoch}/{total_epochs}] batch {batch_idx+1}/{steps}  "
                   f"loss={avg_total:.4f} "
                   f"(ctc={avg_ctc:.4f} lid1={avg_lid1:.4f} lid2={avg_lid2:.4f}{ace_str})  "
                   f"lr={lr:.2e}  lid1={lid1_acc:.2f}% lid2={lid2_acc:.2f}%  "
-                  f"gnorm s={shared_norm:.1f} e={expert_norm:.1f}")
+                  f"gnorm s={shared_norm:.1f} e={expert_norm:.1f}  "
+                  f"{ms_per_step:.0f}ms/step {samples_per_sec:.0f}img/s")
+            log_time = time.time()
             log_ctc.zero_()
             log_lid1.zero_()
             log_lid2.zero_()
