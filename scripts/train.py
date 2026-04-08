@@ -46,24 +46,67 @@ def vram(label="", device_type="cuda"):
         print(f"  VRAM [{label}]: {a:.2f} GB allocated, {r:.2f} GB reserved")
 
 
-def estimate_pixel_budget(model, vram_gb=32, margin=0.85,
-                          bytes_per_pixel_col=50_000):
-    """Estimate max pixel budget (B*W) from model size and available VRAM.
+def estimate_pixel_budget(model, vram_gb=32, margin=0.85):
+    """Estimate max pixel budget (B*W) from model architecture and VRAM.
 
-    Fixed costs: params (fp32) + gradients (fp32) + Adam m + Adam v = 4x params.
-    Activation cost scales with B*W — bytes_per_pixel_col is a conservative
-    estimate covering all stages, checkpoint overhead, and CTC loss.
+    Computes bytes_per_pixel_col from the model's actual dimensions:
+    - Stem (not checkpointed): stores conv intermediates
+    - Shared SWA (checkpointed per block): stores block inputs at (16, W/2)
+    - Stage 1 pre-pool (checkpointed attn+mlp): stores inputs at (16, W/2)
+    - Stage 1 post-pool (checkpointed): stores inputs at (8, W/4)
+    - Stage 2 (checkpointed): stores inputs at (8, W/4)
+    - CTC logits: max_vocab at T=W/4
     """
+    # Extract dims from model
+    shared_dim = model.shared_swa[0].norm1.normalized_shape[0]
+    n_shared = len(model.shared_swa)
+    stage1_dim = model.stage1[0].norm1.normalized_shape[0]
+    n_stage1 = len(model.stage1)
+    n_stage1_pre = model.stage1_downsample_after
+    n_stage1_post = n_stage1 - n_stage1_pre
+    stage2_dim = model.stage2[0].norm1.normalized_shape[0]
+    n_stage2 = len(model.stage2)
+    stem_ch = model.stem.layers[0].out_channels  # first conv output channels
+    max_vocab = max(m.max_vocab for m in model.ctc_modules)
+    enc_out_dim = model.enc_out_dim
+
+    # Elements per input width column (W=1), stored for backward.
+    # Spatial: stem outputs (16, W/2), after pool (8, W/4).
+    # "tokens_per_W" before pool = 16*(W/2)/W = 8, after pool = 8*(W/4)/W = 2.
+    elems = 0
+
+    # Stem (not checkpointed): ~3 conv layers worth of intermediates
+    elems += 3 * stem_ch * 16 * 0.5  # (16, W/2) spatial, rough estimate
+
+    # Shared SWA: each block checkpointed, stores input
+    elems += n_shared * 8 * shared_dim
+
+    # Stage 1 pre-pool: expert blocks, checkpoint per attn + per mlp = 2 saves
+    elems += n_stage1_pre * 2 * 8 * stage1_dim
+
+    # Stage 1 post-pool
+    elems += n_stage1_post * 2 * 2 * stage1_dim
+
+    # Stage 2
+    elems += n_stage2 * 2 * 2 * stage2_dim
+
+    # CTC logits + fold output
+    elems += max_vocab * 0.25 + enc_out_dim * 0.25
+
+    # bf16 activations = 2 bytes/element, with 2x safety for
+    # non-checkpointed intermediates, autograd overhead, padding, fragmentation
+    bytes_per_pixel_col = int(elems * 2 * 2)
+
     model_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
     fixed = model_bytes * 4  # params + grads + adam m + adam v
     available = vram_gb * 1e9 * margin - fixed
     pixel_budget = int(available / bytes_per_pixel_col)
 
     print(f"  VRAM estimate: {model_bytes/1e9:.2f}GB model, "
-          f"{fixed/1e9:.2f}GB fixed (params+grads+adam), "
+          f"{fixed/1e9:.2f}GB fixed, "
+          f"{bytes_per_pixel_col/1e3:.0f}KB/px, "
           f"{available/1e9:.1f}GB for activations")
-    print(f"  Pixel budget: {pixel_budget} "
-          f"({bytes_per_pixel_col/1e3:.0f}KB/px)")
+    print(f"  Pixel budget: {pixel_budget}")
 
     return pixel_budget
 
