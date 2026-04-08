@@ -458,6 +458,10 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
     for batch_idx, (imgs, targets, tgt_lens, gids, sids, _labels) in enumerate(train_loader):
         _t_data_total += time.time() - _t_data
 
+        if batch_idx < 5:
+            print(f"    [shape] batch {batch_idx}: imgs={list(imgs.shape)} "
+                  f"B={imgs.shape[0]} W={imgs.shape[3]}", flush=True)
+
         imgs = imgs.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
         tgt_lens = tgt_lens.to(device, non_blocking=True)
