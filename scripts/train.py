@@ -439,15 +439,11 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
     log_count = 0
 
     for batch_idx, (imgs, targets, tgt_lens, gids, sids, _labels) in enumerate(train_loader):
-        if batch_idx == 0:
-            print(f"  First batch loaded: {imgs.shape}", flush=True)
         imgs = imgs.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
         tgt_lens = tgt_lens.to(device, non_blocking=True)
         gids = gids.to(device, non_blocking=True)
         sids = sids.to(device, non_blocking=True)
-        if batch_idx == 0:
-            print(f"  Moved to device, starting forward...", flush=True)
 
         # Forward — ground truth routing for experts, predicted for LID losses.
         # LID-1/LID-2 still train from their own predictions (group_logits
@@ -456,8 +452,10 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         with torch.amp.autocast(device_type, enabled=use_amp, dtype=amp_dtype):
             out = model(imgs, group_ids=gids, script_ids=sids,
                         detach_for_experts=detach_for_experts)
+
         if batch_idx == 0:
-            print(f"  Forward done, logits: {out['logits'].shape}", flush=True)
+            if device_type == "cuda": torch.cuda.synchronize()
+            print(f"  [dbg] forward sync done, VRAM={torch.cuda.memory_allocated()/1e9:.1f}GB", flush=True)
 
         # LID-1 loss (all samples — learns from its own predictions)
         lid1_loss = compute_lid1_loss(out["group_logits"], gids, ce_loss_fn)
@@ -481,6 +479,9 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         else:
             ace_loss = torch.zeros(1, device=device)
 
+        if batch_idx == 0:
+            print(f"  [dbg] losses done: ctc={ctc_loss.item():.3f} lid1={lid1_loss.item():.3f}", flush=True)
+
         loss = (ctc_loss
                 + lid1_weight * lid1_loss.float()
                 + lid2_loss.float()
@@ -489,7 +490,12 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         if grad_accum > 1:
             loss = loss / grad_accum
 
+        if batch_idx == 0:
+            print(f"  [dbg] starting backward...", flush=True)
         scaler.scale(loss).backward()
+        if batch_idx == 0:
+            if device_type == "cuda": torch.cuda.synchronize()
+            print(f"  [dbg] backward done, VRAM={torch.cuda.memory_allocated()/1e9:.1f}GB", flush=True)
 
         if (batch_idx + 1) % grad_accum == 0 or (batch_idx + 1) == len(train_loader):
             scaler.unscale_(base_optimizer)
