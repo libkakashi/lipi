@@ -46,6 +46,54 @@ def vram(label="", device_type="cuda"):
         print(f"  VRAM [{label}]: {a:.2f} GB allocated, {r:.2f} GB reserved")
 
 
+def calibrate_pixel_budget(model, device, device_type, use_amp, amp_dtype,
+                           num_groups, max_width, vram_gb=32, margin=0.9):
+    """Run a trial forward+backward to measure per-pixel VRAM cost.
+
+    Returns pixel_budget = max total pixels (B*W) per batch.
+    """
+    if device_type != "cuda":
+        return None  # can't measure, fall back to fixed batch size
+
+    torch.cuda.reset_peak_memory_stats()
+    baseline = torch.cuda.memory_allocated()
+
+    # Trial: small batch at max width
+    trial_B = 8
+    trial_W = max_width
+    dummy_imgs = torch.randn(trial_B, 2, 32, trial_W, device=device)
+    dummy_gids = torch.randint(0, num_groups, (trial_B,), device=device)
+    dummy_sids = torch.zeros(trial_B, dtype=torch.long, device=device)
+
+    model.train()
+    with torch.amp.autocast(device_type, enabled=use_amp, dtype=amp_dtype):
+        out = model(dummy_imgs, group_ids=dummy_gids, script_ids=dummy_sids)
+    loss = out["logits"].sum()
+    loss.backward()
+    model.zero_grad(set_to_none=True)
+
+    peak = torch.cuda.max_memory_allocated()
+    batch_cost = peak - baseline
+    per_pixel = batch_cost / (trial_B * trial_W)  # bytes per pixel column
+
+    # Clean up
+    del dummy_imgs, dummy_gids, dummy_sids, out, loss
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
+
+    available = vram_gb * 1e9 * margin - baseline
+    pixel_budget = int(available / per_pixel)
+
+    print(f"  VRAM calibration: {baseline/1e9:.2f}GB baseline, "
+          f"{batch_cost/1e9:.2f}GB for {trial_B}x{trial_W}px trial, "
+          f"{per_pixel/1e3:.1f}KB/px")
+    print(f"  Pixel budget: {pixel_budget} "
+          f"(~{pixel_budget // max_width} imgs at W={max_width}, "
+          f"~{pixel_budget // 64} imgs at W=64)")
+
+    return pixel_budget
+
+
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
@@ -184,26 +232,16 @@ def load_and_prepare_data(args, device):
         active_groups=active_groups)
     print(f"  Train: {len(train_dataset)}, Val: {len(val_dataset)}")
 
-    # Sort by width, fixed batch size — similar widths batched together
     import numpy as np
     train_widths = np.load(str(Path(train_dir) / "widths.npy"))
-    max_width = int(train_widths.max())
-    train_batch_sampler = WidthSortedBatchSampler(train_widths, args.batch_size,
-                                                   max_width=max_width)
-    batch_sizes = [len(b) for b in train_batch_sampler._batches]
-    print(f"  Width-budgeted batching: {len(train_batch_sampler)} batches, "
-          f"size {min(batch_sizes)}-{max(batch_sizes)} "
-          f"(budget={args.batch_size}x{max_width}px)")
 
-    train_loader = DataLoader(train_dataset, batch_sampler=train_batch_sampler,
-                              collate_fn=collate_moe,
-                              pin_memory=(device_type == "cuda"))
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False,
                             collate_fn=collate_moe,
                             pin_memory=(device_type == "cuda"))
 
     return {
-        "train_loader": train_loader,
+        "train_dataset": train_dataset,
+        "train_widths": train_widths,
         "val_loader": val_loader,
         "n_groups": n_groups,
         "active_groups": active_groups,
@@ -567,7 +605,8 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             print(f"  [{epoch}/{total_epochs}] batch {batch_idx+1}/{steps}  "
                   f"loss={avg_total:.4f} "
                   f"(ctc={avg_ctc:.4f} lid1={avg_lid1:.4f} lid2={avg_lid2:.4f}{ace_str})  "
-                  f"lr={lr:.2e}  lid1={lid1_acc:.2f}% lid2={lid2_acc:.2f}%  "
+                  f"lr={lr:.2e}\n"
+                  f"    lid1={lid1_acc:.2f}% lid2={lid2_acc:.2f}%  "
                   f"gnorm s={shared_norm:.1f} e={expert_norm:.1f}  "
                   f"{ms_per_step:.0f}ms/step {samples_per_sec:.0f}img/s  "
                   f"[data={data_ms:.0f}ms fwd={fwd_ms:.0f}ms bwd={bwd_ms:.0f}ms]")
@@ -631,7 +670,38 @@ def main():
         print(f"Freeze mode: training {args.freeze_except} only")
         print(f"  Trainable: {trainable/1e6:.1f}M, Frozen: {frozen/1e6:.1f}M")
 
-    steps_per_epoch = len(data["train_loader"])
+    # Build train_loader with VRAM-calibrated pixel budget
+    import numpy as np
+    train_widths = data["train_widths"]
+    max_width = int(train_widths.max())
+
+    pixel_budget = calibrate_pixel_budget(
+        model, device, device_type,
+        use_amp=(device_type in ("cuda", "mps")),
+        amp_dtype=torch.bfloat16 if device_type == "cuda" and torch.cuda.is_bf16_supported()
+                 else torch.float32,
+        num_groups=data["n_groups"], max_width=max_width)
+
+    if pixel_budget is not None:
+        max_batch_at_widest = pixel_budget // max_width
+        max_batch_size = min(args.batch_size, max(max_batch_at_widest, 1))
+    else:
+        pixel_budget = args.batch_size * max_width
+        max_batch_size = args.batch_size
+
+    train_batch_sampler = WidthSortedBatchSampler(
+        train_widths, max_batch_size, max_width=0,
+        pixel_budget=pixel_budget)
+    batch_sizes = [len(b) for b in train_batch_sampler._batches]
+    print(f"  Batching: {len(train_batch_sampler)} batches, "
+          f"size {min(batch_sizes)}-{max(batch_sizes)} "
+          f"(max={max_batch_size}, budget={pixel_budget}px)")
+
+    train_loader = DataLoader(data["train_dataset"], batch_sampler=train_batch_sampler,
+                              collate_fn=collate_moe,
+                              pin_memory=(device_type == "cuda"))
+
+    steps_per_epoch = len(train_loader)
     opt = build_optimizer_and_scheduler(args, model, device_type, steps_per_epoch)
 
     # NOTE: torch.compile moved AFTER optimizer creation + resume.
@@ -654,10 +724,10 @@ def main():
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    eff_batch = args.batch_size * args.grad_accum
+    eff_batch = f"{min(batch_sizes)}-{max(batch_sizes)}"
     print(f"\n{'=' * 60}")
     print(f"TRAINING: epochs {start_epoch}-{args.epochs}, lr={args.lr}")
-    print(f"  Batch: {args.batch_size} x {args.grad_accum} = {eff_batch} effective")
+    print(f"  Batch: {eff_batch} x {args.grad_accum} (pixel-budgeted)")
     ace_str = f" + ACE x{args.align_ce_weight}" if args.align_ce_weight > 0 else ""
     print(f"  Losses: CTC x1.0 + LID1 x{args.lid1_weight}{ace_str}")
     print(f"  Routing: ground truth (CTC on all samples)")
@@ -670,7 +740,7 @@ def main():
         if detach:
             print(f"  [detach mode: CTC gradient stops at expert boundary, epoch {epoch}/{args.detach_epochs}]")
         metrics = train_one_epoch(
-            model, data["train_loader"], opt["optimizer"], opt["base_optimizer"],
+            model, train_loader, opt["optimizer"], opt["base_optimizer"],
             opt["scheduler"], opt["scaler"], ce_loss_fn, device, device_type,
             opt["use_amp"], opt["amp_dtype"], epoch, args.epochs, args.grad_accum,
             args.log_interval, lid1_weight=args.lid1_weight,

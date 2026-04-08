@@ -143,17 +143,20 @@ class WidthSortedBatchSampler(Sampler):
     """
 
     def __init__(self, widths: list[int] | np.ndarray, max_batch_size: int,
-                 max_width: int = 0):
+                 max_width: int = 0, pixel_budget: int = 0):
         self.max_batch_size = max_batch_size
         if isinstance(widths, np.ndarray):
             widths = widths.tolist()
         self.sorted_indices = sorted(range(len(widths)), key=lambda i: widths[i])
         self.widths = widths
 
-        # Pixel budget: what the max batch size would cost at the widest image
-        if max_width <= 0:
-            max_width = max(widths)
-        self.pixel_budget = max_batch_size * max_width
+        # Pixel budget: either provided directly or derived from max batch size
+        if pixel_budget > 0:
+            self.pixel_budget = pixel_budget
+        else:
+            if max_width <= 0:
+                max_width = max(widths)
+            self.pixel_budget = max_batch_size * max_width
 
         # Pre-build batches so __len__ is accurate
         self._batches = self._build_batches()
