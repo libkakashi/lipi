@@ -263,21 +263,26 @@ class MoEDataset(Dataset):
 class WidthBudgetBatchSampler(Sampler):
     """Batch sampler that packs batches by pixel budget, not fixed count.
 
-    Sorts by width, then greedily fills each batch until adding another
-    sample would exceed max_pixels (= batch_size * reference_width).
+    Sorts by (shard, width) so batches stay shard-local (cache-friendly)
+    while still grouping similar widths to minimize padding.
     Wide-image batches get fewer samples, narrow ones get more.
-    Maximizes GPU utilization on every step.
 
-    Usage: pass as batch_sampler to DataLoader (NOT sampler), and set
-    batch_size=1 in the DataLoader.
+    Usage: pass as batch_sampler to DataLoader (NOT sampler).
     """
 
-    def __init__(self, widths: list[int], max_pixels: int, min_batch: int = 8):
+    def __init__(self, widths: list[int], max_pixels: int,
+                 shard_ids: list[int] | None = None, min_batch: int = 8):
         self.max_pixels = max_pixels
         self.min_batch = min_batch
         self.widths = widths
-        self.sorted_indices = sorted(range(len(widths)), key=lambda i: widths[i])
-        # Pre-compute batches for __len__
+        # Sort by (shard, width) for cache locality, fall back to width-only
+        if shard_ids is not None:
+            self.sorted_indices = sorted(
+                range(len(widths)),
+                key=lambda i: (shard_ids[i], widths[i]))
+        else:
+            self.sorted_indices = sorted(
+                range(len(widths)), key=lambda i: widths[i])
         self._batches = self._build_batches()
 
     def _build_batches(self) -> list[list[int]]:
@@ -372,7 +377,8 @@ class ShardStreamDataset(Dataset):
                 self._global_sid_to_local[SCRIPT_TO_ID[script]] = local_s
 
         # Build index from cached shard info or scan
-        self.widths: list[int] = []  # per-sample image widths for batching
+        self.widths: list[int] = []    # per-sample image widths for batching
+        self.shard_ids: list[int] = [] # per-sample shard index for cache locality
         index_path = shard_files[0].parent / ".shard_index_v2.pt"
         loaded = False
         if index_path.exists():
@@ -382,6 +388,7 @@ class ShardStreamDataset(Dataset):
                 for si, n in enumerate(cached["sizes"].tolist()):
                     for i in range(n):
                         self._index.append((si, i))
+                        self.shard_ids.append(si)
                 self.widths = cached["widths"].tolist()
                 loaded = True
 
@@ -403,6 +410,7 @@ class ShardStreamDataset(Dataset):
                 for i in range(n):
                     self._index.append((si, i))
                     self.widths.append(w)
+                    self.shard_ids.append(si)
             # Cache for next time
             torch.save({"sizes": torch.tensor(sizes),
                          "widths": torch.tensor(self.widths)}, index_path)

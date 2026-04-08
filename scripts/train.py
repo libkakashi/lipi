@@ -183,7 +183,9 @@ def load_and_prepare_data(args, device):
     ref_width = 192  # typical word width
     max_pixels = args.batch_size * ref_width
     train_widths = [dataset.widths[i] for i in train_set.indices]
-    train_batch_sampler = WidthBudgetBatchSampler(train_widths, max_pixels)
+    train_shard_ids = [dataset.shard_ids[i] for i in train_set.indices]
+    train_batch_sampler = WidthBudgetBatchSampler(
+        train_widths, max_pixels, shard_ids=train_shard_ids)
     train_loader = DataLoader(train_set, batch_sampler=train_batch_sampler,
                               collate_fn=collate_moe, pin_memory=(device_type == "cuda"))
     print(f"  Dynamic batching: {len(train_batch_sampler)} batches, "
@@ -453,10 +455,6 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             out = model(imgs, group_ids=gids, script_ids=sids,
                         detach_for_experts=detach_for_experts)
 
-        if batch_idx == 0:
-            if device_type == "cuda": torch.cuda.synchronize()
-            print(f"  [dbg] forward sync done, VRAM={torch.cuda.memory_allocated()/1e9:.1f}GB", flush=True)
-
         # LID-1 loss (all samples — learns from its own predictions)
         lid1_loss = compute_lid1_loss(out["group_logits"], gids, ce_loss_fn)
 
@@ -479,9 +477,6 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         else:
             ace_loss = torch.zeros(1, device=device)
 
-        if batch_idx == 0:
-            print(f"  [dbg] losses done: ctc={ctc_loss.item():.3f} lid1={lid1_loss.item():.3f}", flush=True)
-
         loss = (ctc_loss
                 + lid1_weight * lid1_loss.float()
                 + lid2_loss.float()
@@ -490,12 +485,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         if grad_accum > 1:
             loss = loss / grad_accum
 
-        if batch_idx == 0:
-            print(f"  [dbg] starting backward...", flush=True)
         scaler.scale(loss).backward()
-        if batch_idx == 0:
-            if device_type == "cuda": torch.cuda.synchronize()
-            print(f"  [dbg] backward done, VRAM={torch.cuda.memory_allocated()/1e9:.1f}GB", flush=True)
 
         if (batch_idx + 1) % grad_accum == 0 or (batch_idx + 1) == len(train_loader):
             scaler.unscale_(base_optimizer)
