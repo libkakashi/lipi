@@ -283,8 +283,9 @@ def _typo_quote(w: str) -> str:
         return "\u201E" + w + "\u201C"       # „word"
 
 
-# Patterns: (weight, builder) — builder takes word, returns augmented word
-_MIX_PATTERNS = [
+# Patterns safe for ALL scripts — original word is always preserved,
+# so LID-1 can still identify the script from the non-ASCII characters.
+_MIX_PATTERNS_UNIVERSAL = [
     # Trailing punctuation: word. word, word; word! word?
     (25, lambda w: w + random.choice(".,;:!?")),
     # Trailing typographic: word… word–
@@ -297,23 +298,34 @@ _MIX_PATTERNS = [
     (10, lambda w: random.choice(_DIGITS) + random.choice(".)") + " " + w),
     # Number suffix: word-1, word/2
     (5,  lambda w: w + random.choice("-/") + random.choice(_DIGITS)),
+    # Mixed: word-word, word/word (keeps both halves from word list)
+    (3,  lambda w: w + random.choice("-/&") + w[:max(2, len(w) // 2)]),
+    # Short number (1-3 digits) — common in all scripts (page nos, counts, refs)
+    (5,  lambda w: str(random.randint(1, 999))),
+]
+
+# Patterns that produce PURE numbers/ASCII — only safe for Latin,
+# since the output has no script-specific chars for LID-1 to route on.
+_MIX_PATTERNS_LATIN_ONLY = [
     # Pure number sequences: 12345, 1,234, 12.34
     (8,  lambda w: _random_number()),
     # Date-like: 12/03/2024, 12-03-24
     (5,  lambda w: _random_date()),
-    # Currency: ₹1,234 $56.78
+    # Currency: $56.78
     (5,  lambda w: random.choice(_CURRENCY) + _random_number()),
     # Phone/ID-like: 123-456-7890
     (3,  lambda w: "-".join("".join(random.choices(_DIGITS, k=random.randint(2, 4)))
                             for _ in range(random.randint(2, 3)))),
-    # Section/reference: §12, #34, *note
+    # Section/reference: #34, *note
     (3,  lambda w: random.choice("#*") + "".join(random.choices(_DIGITS, k=random.randint(1, 3)))),
-    # Mixed: word-word, word/word (keeps both halves from word list)
-    (3,  lambda w: w + random.choice("-/&") + w[:max(2, len(w) // 2)]),
 ]
 
-_MIX_WEIGHTS = [p[0] for p in _MIX_PATTERNS]
-_MIX_BUILDERS = [p[1] for p in _MIX_PATTERNS]
+_UNIVERSAL_WEIGHTS = [p[0] for p in _MIX_PATTERNS_UNIVERSAL]
+_UNIVERSAL_BUILDERS = [p[1] for p in _MIX_PATTERNS_UNIVERSAL]
+_LATIN_WEIGHTS = [p[0] for p in _MIX_PATTERNS_LATIN_ONLY]
+_LATIN_BUILDERS = [p[1] for p in _MIX_PATTERNS_LATIN_ONLY]
+_ALL_WEIGHTS = _UNIVERSAL_WEIGHTS + _LATIN_WEIGHTS
+_ALL_BUILDERS = _UNIVERSAL_BUILDERS + _LATIN_BUILDERS
 
 
 def _random_number() -> str:
@@ -344,14 +356,22 @@ def _random_date() -> str:
         return f"{y}{sep}{m:02d}{sep}{d:02d}"
 
 
-def mix_punctuation(word: str, p: float = 0.15) -> str:
+def mix_punctuation(word: str, p: float = 0.15, script: str = "latin") -> str:
     """With probability p, mix punctuation/numbers into the word.
+
+    Pure-number patterns (dates, currency, phone numbers) are only used for
+    Latin, since they contain no script-specific characters and would confuse
+    LID-1 routing if assigned to other scripts.
 
     Returns the original word unchanged (1-p) of the time.
     """
     if random.random() > p:
         return word
-    builder = random.choices(_MIX_BUILDERS, weights=_MIX_WEIGHTS, k=1)[0]
+    if script == "latin":
+        weights, builders = _ALL_WEIGHTS, _ALL_BUILDERS
+    else:
+        weights, builders = _UNIVERSAL_WEIGHTS, _UNIVERSAL_BUILDERS
+    builder = random.choices(builders, weights=weights, k=1)[0]
     return builder(word)
 
 
@@ -642,7 +662,7 @@ def _generate_word_batch(args_tuple):
         else:
             word = random.choice(words)
             # Mix in punctuation/numbers
-            word = mix_punctuation(word, p=punct_prob)
+            word = mix_punctuation(word, p=punct_prob, script=script)
             font = random.choice(fonts)
             # Verify font can render ALL chars in the word (prevents partial renders)
             if not font_covers_text(font, word):
