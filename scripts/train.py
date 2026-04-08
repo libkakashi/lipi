@@ -95,9 +95,10 @@ def estimate_pixel_budget(model, vram_gb=32, margin=0.85):
     # CTC logits + fold output
     elems += max_vocab * 0.25 + enc_out_dim * 0.25
 
-    # bf16 activations = 2 bytes/element, with 2x safety for
-    # non-checkpointed intermediates, autograd overhead, padding, fragmentation
-    bytes_per_pixel_col = int(elems * 2 * 2)
+    # bf16 activations = 2 bytes/element, with 3x safety for
+    # non-checkpointed intermediates, autograd overhead, CTC loss buffers,
+    # attention scores during checkpoint recompute, CUDA fragmentation
+    bytes_per_pixel_col = int(elems * 2 * 3)
 
     model_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
     fixed = model_bytes * 4  # params + grads + adam m + adam v
