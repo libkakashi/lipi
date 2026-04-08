@@ -8,13 +8,11 @@ automatic caching, multi-worker support, and memory-mapped I/O.
 import random
 from pathlib import Path
 
-import json
-import struct
-from concurrent.futures import ThreadPoolExecutor
-
 import numpy as np
 import torch
 from torch.utils.data import Dataset, Sampler
+
+from streaming import Stream, StreamingDataset
 
 from src.model.lid import SCRIPT_TO_GROUP, SCRIPT_TO_ID, GROUP_TO_ID
 from src.encoding.decompose import encode_text, script_vocab_size
