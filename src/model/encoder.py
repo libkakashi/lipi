@@ -20,7 +20,6 @@ Architecture:
 
 import torch
 import torch.nn as nn
-import torch.utils.checkpoint as ckpt_util
 from torch import Tensor
 
 from src.data.color import ColorProjection
@@ -270,9 +269,7 @@ class LipiMoEEncoder(nn.Module):
         x = x.permute(0, 2, 3, 1).reshape(B, h * w, C)
         x = self.proj_shared(x)
 
-        # Shared SWA (with gradient checkpointing to save activation memory)
-        # Shared SWA — no gradient checkpointing (only 6 blocks, keep activations
-        # in VRAM for faster backward; expert blocks still checkpoint)
+        # Shared SWA
         for block in self.shared_swa:
             x = block(x, h=h, w=w)
 
