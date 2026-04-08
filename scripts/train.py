@@ -46,50 +46,24 @@ def vram(label="", device_type="cuda"):
         print(f"  VRAM [{label}]: {a:.2f} GB allocated, {r:.2f} GB reserved")
 
 
-def calibrate_pixel_budget(model, device, device_type, use_amp, amp_dtype,
-                           num_groups, max_width, vram_gb=32, margin=0.9):
-    """Run a trial forward+backward to measure per-pixel VRAM cost.
+def estimate_pixel_budget(model, vram_gb=32, margin=0.85,
+                          bytes_per_pixel_col=50_000):
+    """Estimate max pixel budget (B*W) from model size and available VRAM.
 
-    Returns pixel_budget = max total pixels (B*W) per batch.
+    Fixed costs: params (fp32) + gradients (fp32) + Adam m + Adam v = 4x params.
+    Activation cost scales with B*W — bytes_per_pixel_col is a conservative
+    estimate covering all stages, checkpoint overhead, and CTC loss.
     """
-    if device_type != "cuda":
-        return None  # can't measure, fall back to fixed batch size
+    model_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
+    fixed = model_bytes * 4  # params + grads + adam m + adam v
+    available = vram_gb * 1e9 * margin - fixed
+    pixel_budget = int(available / bytes_per_pixel_col)
 
-    torch.cuda.reset_peak_memory_stats()
-    baseline = torch.cuda.memory_allocated()
-
-    # Trial: small batch at max width
-    trial_B = 8
-    trial_W = max_width
-    dummy_imgs = torch.randn(trial_B, 2, 32, trial_W, device=device)
-    dummy_gids = torch.randint(0, num_groups, (trial_B,), device=device)
-    dummy_sids = torch.zeros(trial_B, dtype=torch.long, device=device)
-
-    model.train()
-    with torch.amp.autocast(device_type, enabled=use_amp, dtype=amp_dtype):
-        out = model(dummy_imgs, group_ids=dummy_gids, script_ids=dummy_sids)
-    loss = out["logits"].sum()
-    loss.backward()
-    model.zero_grad(set_to_none=True)
-
-    peak = torch.cuda.max_memory_allocated()
-    batch_cost = peak - baseline
-    per_pixel = batch_cost / (trial_B * trial_W)  # bytes per pixel column
-
-    # Clean up
-    del dummy_imgs, dummy_gids, dummy_sids, out, loss
-    torch.cuda.empty_cache()
-    torch.cuda.reset_peak_memory_stats()
-
-    available = vram_gb * 1e9 * margin - baseline
-    pixel_budget = int(available / per_pixel)
-
-    print(f"  VRAM calibration: {baseline/1e9:.2f}GB baseline, "
-          f"{batch_cost/1e9:.2f}GB for {trial_B}x{trial_W}px trial, "
-          f"{per_pixel/1e3:.1f}KB/px")
+    print(f"  VRAM estimate: {model_bytes/1e9:.2f}GB model, "
+          f"{fixed/1e9:.2f}GB fixed (params+grads+adam), "
+          f"{available/1e9:.1f}GB for activations")
     print(f"  Pixel budget: {pixel_budget} "
-          f"(~{pixel_budget // max_width} imgs at W={max_width}, "
-          f"~{pixel_budget // 64} imgs at W=64)")
+          f"({bytes_per_pixel_col/1e3:.0f}KB/px)")
 
     return pixel_budget
 
@@ -103,7 +77,10 @@ def parse_args():
     parser.add_argument("--data", type=str, required=True)
     parser.add_argument("--scripts", type=str, default="all")
     parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--batch-size", type=int, default=192)
+    parser.add_argument("--batch-size", type=int, default=192,
+                        help="Max batch size (actual size varies by width)")
+    parser.add_argument("--vram", type=float, default=32,
+                        help="GPU VRAM in GB (used to auto-size batches)")
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--grad-accum", type=int, default=1)
     parser.add_argument("--device", type=str, default="auto")
@@ -670,24 +647,14 @@ def main():
         print(f"Freeze mode: training {args.freeze_except} only")
         print(f"  Trainable: {trainable/1e6:.1f}M, Frozen: {frozen/1e6:.1f}M")
 
-    # Build train_loader with VRAM-calibrated pixel budget
+    # Build train_loader with VRAM-estimated pixel budget
     import numpy as np
     train_widths = data["train_widths"]
     max_width = int(train_widths.max())
 
-    pixel_budget = calibrate_pixel_budget(
-        model, device, device_type,
-        use_amp=(device_type in ("cuda", "mps")),
-        amp_dtype=torch.bfloat16 if device_type == "cuda" and torch.cuda.is_bf16_supported()
-                 else torch.float32,
-        num_groups=data["n_groups"], max_width=max_width)
-
-    if pixel_budget is not None:
-        max_batch_at_widest = pixel_budget // max_width
-        max_batch_size = min(args.batch_size, max(max_batch_at_widest, 1))
-    else:
-        pixel_budget = args.batch_size * max_width
-        max_batch_size = args.batch_size
+    pixel_budget = estimate_pixel_budget(model, vram_gb=args.vram)
+    max_batch_at_widest = pixel_budget // max_width
+    max_batch_size = max(max_batch_at_widest, 1)
 
     train_batch_sampler = WidthSortedBatchSampler(
         train_widths, max_batch_size, max_width=0,
