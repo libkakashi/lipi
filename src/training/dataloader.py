@@ -134,27 +134,56 @@ class LipiStreamingDataset(Dataset):
 # ---------------------------------------------------------------------------
 
 class WidthSortedBatchSampler(Sampler):
-    """Sort by width, chunk into fixed-size batches, shuffle batch order.
+    """Sort by width, budget-aware batching, shuffle batch order.
 
-    Similar-width images end up in the same batch → minimal padding waste.
+    Images sorted by width so similar widths are batched together.
+    Each batch gets up to `max_batch_size` images, but is also capped
+    by a pixel budget (max_batch_size * max_width) so wide images
+    get smaller batches and narrow images get larger batches.
     """
 
-    def __init__(self, widths: list[int] | np.ndarray, batch_size: int):
-        self.batch_size = batch_size
+    def __init__(self, widths: list[int] | np.ndarray, max_batch_size: int,
+                 max_width: int = 0):
+        self.max_batch_size = max_batch_size
         if isinstance(widths, np.ndarray):
             widths = widths.tolist()
         self.sorted_indices = sorted(range(len(widths)), key=lambda i: widths[i])
+        self.widths = widths
+
+        # Pixel budget: what the max batch size would cost at the widest image
+        if max_width <= 0:
+            max_width = max(widths)
+        self.pixel_budget = max_batch_size * max_width
+
+        # Pre-build batches so __len__ is accurate
+        self._batches = self._build_batches()
+
+    def _build_batches(self):
+        batches = []
+        i = 0
+        while i < len(self.sorted_indices):
+            # Width of the widest image in this batch (last one, since sorted)
+            # Peek ahead to find how many fit under the budget
+            batch = [self.sorted_indices[i]]
+            batch_width = self.widths[self.sorted_indices[i]]
+            i += 1
+            while i < len(self.sorted_indices) and len(batch) < self.max_batch_size:
+                w = self.widths[self.sorted_indices[i]]
+                # All images padded to max width in batch, so cost = (len+1) * w
+                if (len(batch) + 1) * w > self.pixel_budget:
+                    break
+                batch.append(self.sorted_indices[i])
+                i += 1
+            batches.append(batch)
+        return batches
 
     def __iter__(self):
-        # Chunk into fixed-size batches
-        batches = []
-        for i in range(0, len(self.sorted_indices), self.batch_size):
-            batches.append(self.sorted_indices[i:i + self.batch_size])
+        batches = list(self._batches)
         random.shuffle(batches)
         yield from batches
 
     def __len__(self):
-        return (len(self.sorted_indices) + self.batch_size - 1) // self.batch_size
+        return len(self._batches)
 
 
 # ---------------------------------------------------------------------------

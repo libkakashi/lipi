@@ -187,8 +187,13 @@ def load_and_prepare_data(args, device):
     # Sort by width, fixed batch size — similar widths batched together
     import numpy as np
     train_widths = np.load(str(Path(train_dir) / "widths.npy"))
-    train_batch_sampler = WidthSortedBatchSampler(train_widths, args.batch_size)
-    print(f"  Width-sorted batching: {len(train_batch_sampler)} batches of {args.batch_size}")
+    max_width = int(train_widths.max())
+    train_batch_sampler = WidthSortedBatchSampler(train_widths, args.batch_size,
+                                                   max_width=max_width)
+    batch_sizes = [len(b) for b in train_batch_sampler._batches]
+    print(f"  Width-budgeted batching: {len(train_batch_sampler)} batches, "
+          f"size {min(batch_sizes)}-{max(batch_sizes)} "
+          f"(budget={args.batch_size}x{max_width}px)")
 
     train_loader = DataLoader(train_dataset, batch_sampler=train_batch_sampler,
                               collate_fn=collate_moe,
