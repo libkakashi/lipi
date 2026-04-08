@@ -436,6 +436,8 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
     log_count = 0
 
     for batch_idx, (imgs, targets, tgt_lens, gids, sids, _labels) in enumerate(train_loader):
+        if batch_idx == 0:
+            print(f"  First batch loaded: {imgs.shape}", flush=True)
         imgs = imgs.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
         tgt_lens = tgt_lens.to(device, non_blocking=True)
