@@ -429,37 +429,6 @@ def download_cyrillic(out_dir):
     print(f"  Saved to {dest}/")
 
 
-@register("ocr-mlt-50m",
-          ["latin", "cyrillic", "greek", "arabic", "hebrew", "han_kana", "korean",
-           "devanagari", "gurmukhi", "gujarati", "bengali", "kannada", "telugu",
-           "malayalam", "tamil", "sinhala", "thai", "ethiopic"],
-          "interfaze-ai OCR-MLT-50M: 50.2M image-text pairs, 50 languages, 14 scripts")
-def download_ocr_mlt_50m(out_dir):
-    """Download per-language shards from HuggingFace.
-
-    Dataset has per-language subsets. We download the languages that map
-    to our supported scripts.
-    """
-    check_hf()
-    dest = out_dir / "ocr-mlt-50m"
-    dest.mkdir(parents=True, exist_ok=True)
-
-    # Map our scripts to their language codes in this dataset
-    langs = [
-        "en", "zh", "ja", "ko", "ar", "hi", "de", "fr", "es", "pt",
-        "ru", "th", "vi", "it", "nl", "pl", "tr", "sv", "cs", "ro",
-        "da", "fi", "hu", "el", "bg", "uk", "hr", "sk", "sl", "lt",
-        "lv", "et", "mt", "ga", "ms", "id", "tl", "sw", "am",
-        "bn", "ta", "te", "kn", "ml", "gu", "mr", "pa", "ur", "ne", "si",
-    ]
-
-    print(f"  Downloading {len(langs)} language shards...")
-    run(f"huggingface-cli download interfaze-ai/ocr-mlt-50m "
-        f"--repo-type dataset --local-dir {dest}")
-
-    print(f"  Saved to {dest}/")
-
-
 @register("chinese-scene",
           ["han_kana"],
           "RCTW-17 + CTW: Chinese scene text in the wild")
