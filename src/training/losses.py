@@ -82,13 +82,12 @@ def compute_ctc_loss(
             # Slice to this script's exact vocab size before log_softmax
             s_log_probs = (s_logits[:, :, :vs].float()
                            .log_softmax(dim=-1).permute(1, 0, 2))
-            # Concatenate targets (1-D form) so CTC allocates DP tables
+            # 1-D concatenated targets so CTC allocates DP tables
             # proportional to actual target lengths, not the padded max.
             s_tgt_lens = tgt_lens[s_mask]
-            s_targets = torch.cat([
-                targets[i, :s_tgt_lens[j]]
-                for j, i in enumerate(s_mask.nonzero(as_tuple=False).squeeze(1))
-            ])
+            s_targets_2d = targets[s_mask]
+            col_idx = torch.arange(s_targets_2d.shape[1], device=device)
+            s_targets = s_targets_2d[col_idx < s_tgt_lens.unsqueeze(1)]
             s_ctc = F.ctc_loss(
                 s_log_probs, s_targets,
                 enc_lengths[s_mask], s_tgt_lens,

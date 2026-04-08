@@ -50,24 +50,27 @@ def vram(label="", device_type="cuda"):
 def estimate_pixel_budget(model, vram_gb=32, margin=0.85):
     """Estimate max pixel budget (B*W) from model architecture and VRAM.
 
-    Computes bytes_per_pixel_col from the model's actual dimensions:
-    - Stem (not checkpointed): stores conv intermediates
-    - Shared SWA (checkpointed per block): stores block inputs at (16, W/2)
-    - Stage 1 pre-pool (checkpointed attn+mlp): stores inputs at (16, W/2)
-    - Stage 1 post-pool (checkpointed): stores inputs at (8, W/4)
-    - Stage 2 (checkpointed): stores inputs at (8, W/4)
-    - CTC logits: max_vocab at T=W/4
+    Memory accounting per block type:
+    - Shared SWA (entire block checkpointed): saves 1 tensor (input) per block
+    - Expert blocks (only inner attn/MLP checkpointed): the outer block's
+      intermediates (normed, attn_out, residual, normed2, mlp_out, output)
+      are NOT checkpointed — ~7 tensors of (B, T, dim) per block
+    - Recompute peak: during backward, one block recomputes its full forward,
+      adding QKV + attention + MLP intermediates temporarily
     """
     # Extract dims from model
     shared_dim = model.shared_swa[0].norm1.normalized_shape[0]
     n_shared = len(model.shared_swa)
+    shared_mlp_ratio = model.shared_swa[0].mlp.fc1.out_features // shared_dim
     stage1_dim = model.stage1[0].norm1.normalized_shape[0]
     n_stage1 = len(model.stage1)
     n_stage1_pre = model.stage1_downsample_after
     n_stage1_post = n_stage1 - n_stage1_pre
+    stage1_mlp_ratio = model.stage1[0].expert_mlps[0].fc1.out_features // stage1_dim
     stage2_dim = model.stage2[0].norm1.normalized_shape[0]
     n_stage2 = len(model.stage2)
-    stem_ch = model.stem.layers[0].out_channels  # first conv output channels
+    stage2_mlp_ratio = model.stage2[0].expert_mlps[0].fc1.out_features // stage2_dim
+    stem_ch = model.stem.layers[0].out_channels
     max_vocab = max(m.max_vocab for m in model.ctc_modules)
     enc_out_dim = model.enc_out_dim
 
@@ -77,30 +80,35 @@ def estimate_pixel_budget(model, vram_gb=32, margin=0.85):
     elems = 0
 
     # Stem (not checkpointed): ~3 conv layers worth of intermediates
-    elems += 3 * stem_ch * 16 * 0.5  # (16, W/2) spatial, rough estimate
+    elems += 3 * stem_ch * 16 * 0.5
 
-    # Shared SWA: each block checkpointed, stores input
-    elems += n_shared * 8 * shared_dim
+    # Shared SWA: entire block checkpointed → saves only the input (1 tensor)
+    elems += n_shared * 1 * 8 * shared_dim
 
-    # Expert blocks: groups split the batch (each saves its slice), so total
-    # stored = B * tokens * dim * 2 (attn + mlp) per block — same as ungrouped.
-    # Stage 1 pre-pool
-    elems += n_stage1_pre * 2 * 8 * stage1_dim
-
-    # Stage 1 post-pool
-    elems += n_stage1_post * 2 * 2 * stage1_dim
-
-    # Stage 2
-    elems += n_stage2 * 2 * 2 * stage2_dim
+    # Expert blocks: only inner attn/MLP are checkpointed. The outer block
+    # keeps ~7 tensors in the autograd graph: input, normed1, attn_out,
+    # post-attn residual, normed2, mlp_out, post-mlp residual.
+    elems += n_stage1_pre * 7 * 8 * stage1_dim
+    elems += n_stage1_post * 7 * 2 * stage1_dim
+    elems += n_stage2 * 7 * 2 * stage2_dim
 
     # CTC logits + fold output
     elems += max_vocab * 0.25 + enc_out_dim * 0.25
 
-    # bf16 activations = 2 bytes/element, with 2x safety for
-    # non-checkpointed intermediates, attention scores during recompute,
-    # CUDA fragmentation. Per-sample overhead (CTC, autograd) is handled
-    # separately by --batch-size cap.
-    bytes_per_pixel_col = int(elems * 2 * 2)
+    # Recompute peak: during backward, one block recomputes forward,
+    # temporarily holding norm + QKV + attn_out + MLP intermediates.
+    # ~(7 + 2*mlp_ratio) * dim per token for the largest block.
+    def _recompute_peak(dim, mlp_ratio, tokens_per_px):
+        return (7 + 2 * mlp_ratio) * dim * tokens_per_px
+
+    recompute_peak = max(
+        _recompute_peak(shared_dim, shared_mlp_ratio, 8),
+        _recompute_peak(stage1_dim, stage1_mlp_ratio, 8),
+        _recompute_peak(stage2_dim, stage2_mlp_ratio, 2),
+    )
+
+    # bf16 = 2 bytes/element
+    bytes_per_pixel_col = int((elems + recompute_peak) * 2)
 
     model_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
     fixed = model_bytes * 4  # params + grads + adam m + adam v
@@ -491,6 +499,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                     detach_for_experts=False, align_ce_weight=0.0):
     model.train()
     n_batches = 0
+    oom_skipped = 0
 
     # Cache param split for grad clipping (avoid iterating named_parameters every step)
     shared_params = []
@@ -533,46 +542,60 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         gids = gids.to(device, non_blocking=True)
         sids = sids.to(device, non_blocking=True)
 
-        _t_fwd = time.time()
-        with torch.amp.autocast(device_type, enabled=use_amp, dtype=amp_dtype):
-            out = model(imgs, group_ids=gids, script_ids=sids,
-                        detach_for_experts=detach_for_experts)
+        try:
+            _t_fwd = time.time()
+            with torch.amp.autocast(device_type, enabled=use_amp, dtype=amp_dtype):
+                out = model(imgs, group_ids=gids, script_ids=sids,
+                            detach_for_experts=detach_for_experts)
 
-        # LID-1 loss (all samples — learns from its own predictions)
-        lid1_loss = compute_lid1_loss(out["group_logits"], gids, ce_loss_fn)
+            # LID-1 loss (all samples — learns from its own predictions)
+            lid1_loss = compute_lid1_loss(out["group_logits"], gids, ce_loss_fn)
 
-        # CTC loss (all samples — ground truth routing ensures correct expert)
-        all_ok = (tgt_lens <= out["lengths"]) & (tgt_lens > 0)
-        ctc_loss = compute_ctc_loss(
-            out["logits"], targets, out["lengths"], tgt_lens,
-            all_ok, gids, sids, group_script_vocabs)
-
-        # LID-2 loss (all samples in multi-script groups)
-        all_true = torch.ones(imgs.shape[0], dtype=torch.bool, device=device)
-        lid2_loss = compute_lid2_loss(
-            out["script_logits_per_group"], sids, all_true, ce_loss_fn)
-
-        # Regional token loss (spatial partial credit for multi-token chars)
-        if align_ce_weight > 0:
-            ace_loss = compute_regional_token_loss(
+            # CTC loss (all samples — ground truth routing ensures correct expert)
+            all_ok = (tgt_lens <= out["lengths"]) & (tgt_lens > 0)
+            ctc_loss = compute_ctc_loss(
                 out["logits"], targets, out["lengths"], tgt_lens,
                 all_ok, gids, sids, group_script_vocabs)
-        else:
-            ace_loss = torch.zeros(1, device=device)
 
-        _t_fwd_total += time.time() - _t_fwd
+            # LID-2 loss (all samples in multi-script groups)
+            all_true = torch.ones(imgs.shape[0], dtype=torch.bool, device=device)
+            lid2_loss = compute_lid2_loss(
+                out["script_logits_per_group"], sids, all_true, ce_loss_fn)
 
-        loss = (ctc_loss
-                + lid1_weight * lid1_loss.float()
-                + lid2_loss.float()
-                + align_ce_weight * ace_loss.float())
+            # Regional token loss (spatial partial credit for multi-token chars)
+            if align_ce_weight > 0:
+                ace_loss = compute_regional_token_loss(
+                    out["logits"], targets, out["lengths"], tgt_lens,
+                    all_ok, gids, sids, group_script_vocabs)
+            else:
+                ace_loss = torch.zeros(1, device=device)
 
-        if grad_accum > 1:
-            loss = loss / grad_accum
+            _t_fwd_total += time.time() - _t_fwd
 
-        _t_bwd = time.time()
-        scaler.scale(loss).backward()
-        _t_bwd_total += time.time() - _t_bwd
+            loss = (ctc_loss
+                    + lid1_weight * lid1_loss.float()
+                    + lid2_loss.float()
+                    + align_ce_weight * ace_loss.float())
+
+            if grad_accum > 1:
+                loss = loss / grad_accum
+
+            _t_bwd = time.time()
+            scaler.scale(loss).backward()
+            _t_bwd_total += time.time() - _t_bwd
+        except torch.cuda.OutOfMemoryError:
+            oom_skipped += 1
+            a = torch.cuda.memory_allocated() / 1e9
+            r = torch.cuda.memory_reserved() / 1e9
+            print(f"  ** OOM at batch {batch_idx+1}/{steps} "
+                  f"(B={imgs.shape[0]} W={imgs.shape[3]}) — "
+                  f"skipping [{a:.1f}GB alloc, {r:.1f}GB reserved, "
+                  f"{oom_skipped} skipped this epoch]", flush=True)
+            del imgs, targets, tgt_lens, gids, sids
+            optimizer.zero_grad(set_to_none=True)
+            torch.cuda.empty_cache()
+            _t_data = time.time()
+            continue
 
         if (batch_idx + 1) % grad_accum == 0 or (batch_idx + 1) == len(train_loader):
             scaler.unscale_(base_optimizer)
@@ -623,22 +646,19 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             elapsed = time.time() - log_time
             ms_per_step = elapsed / log_count * 1000
             samples_per_sec = sum(b.shape[0] for b in [imgs]) * log_count / elapsed
-            ace_str = f"  ace={avg_ace:6.4f}" if align_ce_weight > 0 else ""
+            ace_str = f"  ace {avg_ace:.4f}" if align_ce_weight > 0 else ""
             data_ms = _t_data_total / log_count * 1000
             fwd_ms = _t_fwd_total / log_count * 1000
             bwd_ms = _t_bwd_total / log_count * 1000
             batch_str = f"{batch_idx+1}/{steps}"
-            pad = " " * 21  # align with content after [ep/tot] batch/steps
+            header = f"  [{epoch:>2}/{total_epochs}] {batch_str:>9}"
             print(
-                f"  [{epoch:>2}/{total_epochs}] {batch_str:>9}  "
-                f"lr={lr:.2e}  "
-                f"gnorm s={shared_norm:5.1f} e={expert_norm:5.1f}  "
-                f"{ms_per_step:6.0f}ms/step {samples_per_sec:5.0f}img/s  "
-                f"[data={data_ms:4.0f}  fwd={fwd_ms:4.0f}  bwd={bwd_ms:4.0f}ms]\n"
-                f"{pad}  "
-                f"loss={avg_total:7.4f}  "
-                f"ctc={avg_ctc:7.4f}  lid1={avg_lid1:6.4f}  lid2={avg_lid2:6.4f}{ace_str}  "
-                f"lid1={lid1_acc:6.2f}%  lid2={lid2_acc:6.2f}%"
+                f"{header}  "
+                f"loss {avg_total:.4f}  "
+                f"ctc {avg_ctc:.4f}  lid1 {avg_lid1:.4f}  lid2 {avg_lid2:.4f}{ace_str}  "
+                f"| acc {lid1_acc:5.1f}% {lid2_acc:5.1f}%  "
+                f"| {samples_per_sec:.0f} img/s  {ms_per_step:.0f}ms/step  "
+                f"gnorm {shared_norm:.1f}/{expert_norm:.1f}"
             )
             log_time = time.time()
             _t_data_total = 0.0
@@ -650,6 +670,9 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             log_ace.zero_()
             log_total.zero_()
             log_count = 0
+
+    if oom_skipped > 0:
+        print(f"  ** {oom_skipped} batches skipped due to OOM this epoch")
 
     if n_batches == 0:
         return {}
