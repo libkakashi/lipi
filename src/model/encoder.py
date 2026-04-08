@@ -20,6 +20,7 @@ Architecture:
 
 import torch
 import torch.nn as nn
+import torch.utils.checkpoint as ckpt_util
 from torch import Tensor
 
 from src.data.color import ColorProjection
@@ -269,9 +270,12 @@ class LipiMoEEncoder(nn.Module):
         x = x.permute(0, 2, 3, 1).reshape(B, h * w, C)
         x = self.proj_shared(x)
 
-        # Shared SWA
+        # Shared SWA (with gradient checkpointing to save activation memory)
         for block in self.shared_swa:
-            x = block(x, h=h, w=w)
+            if self.training and torch.is_grad_enabled():
+                x = ckpt_util.checkpoint(block, x, h, w, use_reentrant=False)
+            else:
+                x = block(x, h=h, w=w)
 
         # LID-1 (with learned attention pooling)
         group_logits = self.lid_coarse.forward_seq(x)
