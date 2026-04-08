@@ -62,7 +62,7 @@ def parse_args():
     parser.add_argument("--save-dir", type=str, default="checkpoints/moe")
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--val-split", type=float, default=0.1)
-    parser.add_argument("--log-interval", type=int, default=1)
+    parser.add_argument("--log-interval", type=int, default=20)
     # Model
     parser.add_argument("--stem-depth", type=int, default=3)
     parser.add_argument("--shared-dim", type=int, default=256)
