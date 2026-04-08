@@ -320,18 +320,34 @@ class ShardStreamDataset(Dataset):
             for local_s, script in enumerate(members):
                 self._global_sid_to_local[SCRIPT_TO_ID[script]] = local_s
 
-        # Build index by scanning shard sizes (loads metadata only briefly)
-        for si, path in enumerate(shard_files):
-            shard = torch.load(path, weights_only=False)
-            n = shard["images"].shape[0]
-            for i in range(n):
-                self._index.append((si, i))
-            del shard
+        # Build index from cached shard sizes or scan
+        index_path = shard_files[0].parent / ".shard_index.pt"
+        if index_path.exists():
+            shard_sizes = torch.load(index_path, weights_only=True)
+            if len(shard_sizes) == len(shard_files):
+                for si, n in enumerate(shard_sizes.tolist()):
+                    for i in range(n):
+                        self._index.append((si, i))
+            else:
+                index_path = None  # mismatch, rescan
+
+        if not self._index:
+            # Scan shard sizes using only script_ids (small tensor, fast to load)
+            sizes = []
+            for si, path in enumerate(shard_files):
+                shard = torch.load(path, weights_only=False)
+                n = shard["script_ids"].shape[0]
+                sizes.append(n)
+                for i in range(n):
+                    self._index.append((si, i))
+                del shard
+            # Cache for next time
+            torch.save(torch.tensor(sizes), index_path)
 
         # LRU cache — keep recent shards in memory
         self._cache: dict[int, dict] = {}
         self._cache_order: list[int] = []
-        self._cache_max = len(shard_files)  # cache all shards — first epoch loads, rest is free
+        self._cache_max = 32  # ~3GB
 
     def __len__(self):
         return len(self._index)
