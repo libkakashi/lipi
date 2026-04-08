@@ -168,7 +168,7 @@ NO_FUSION_SCRIPTS: dict[str, NoFusionCodec] = {
 # ── Fusion codec ────────────────────────────────────────────────────
 
 FUSION_VOCAB: dict[str, int] = {
-    "arabic": 750,
+    "arabic": 500,
     "bengali": 1000,
     "burmese": 1000,
     "devanagari": 1500,
@@ -294,10 +294,7 @@ def build_fusion_codec(
 FUSION_BASE_RANGES: dict[str, list[list[tuple[int, int]]]] = {
     "arabic": [
         _ASCII_COMMON,
-        [(0x0600, 0x06FF)],     # Arabic
-        [(0x0750, 0x077F)],     # Arabic Supplement
-        [(0x0870, 0x089F)],     # Arabic Extended-B
-        [(0x08A0, 0x08FF)],     # Arabic Extended-A
+        [(0x0600, 0x06FF)],     # Arabic (covers Arabic, Urdu, Persian, Pashto)
         _TYPOGRAPHIC_COMMON,
     ],
     "devanagari": [
