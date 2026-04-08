@@ -33,7 +33,7 @@ DATA_DIR = Path(__file__).parent.parent / "training_data" / "real_datasets"
 SHARD_SIZE = 5000  # images per shard
 
 
-def process_image(img_path, height=32, max_width=768):
+def process_image(img_path, height=32, max_width=192):
     """Load, validate, and convert an image to model input format.
 
     Resizes height to target while preserving aspect ratio.
@@ -68,8 +68,30 @@ def process_image(img_path, height=32, max_width=768):
     return rgb_to_input(img)
 
 
+def encode_labels_for_shard(labels, script):
+    """Pre-encode labels into token IDs."""
+    from src.encoding.decompose import encode_text
+
+    encoded = []
+    max_len = 0
+    for label in labels:
+        ids = encode_text(label, script)
+        encoded.append(ids)
+        max_len = max(max_len, len(ids))
+
+    if max_len == 0:
+        max_len = 1
+    target_ids = torch.zeros(len(encoded), max_len, dtype=torch.long)
+    target_lens = torch.zeros(len(encoded), dtype=torch.long)
+    for i, ids in enumerate(encoded):
+        target_lens[i] = len(ids)
+        if ids:
+            target_ids[i, :len(ids)] = torch.tensor(ids, dtype=torch.long)
+    return target_ids, target_lens
+
+
 def save_shards(images, labels, script, out_dir, prefix="real"):
-    """Save images and labels as shards."""
+    """Save images and labels as shards with pre-encoded targets."""
     if not images:
         return 0
 
@@ -88,12 +110,16 @@ def save_shards(images, labels, script, out_dir, prefix="real"):
         batch_labels = labels[i:i + SHARD_SIZE]
         n = len(batch_imgs)
 
+        target_ids, target_lens = encode_labels_for_shard(batch_labels, script)
+
         shard_path = out_dir / f"{prefix}_{script}_{i // SHARD_SIZE:04d}.pt"
         torch.save({
             "images": torch.stack(batch_imgs),
             "labels": batch_labels,
             "script_ids": torch.full((n,), script_id, dtype=torch.long),
             "group_ids": torch.full((n,), group_id, dtype=torch.long),
+            "target_ids": target_ids,
+            "target_lens": target_lens,
         }, shard_path)
         total += n
 
