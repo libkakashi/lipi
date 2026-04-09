@@ -502,6 +502,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             del imgs, targets, tgt_lens, gids, sids
             try:
                 optimizer.zero_grad(set_to_none=True)
+                import gc; gc.collect()
                 torch.cuda.empty_cache()
             except Exception:
                 print("  ** CUDA context corrupted after OOM, exiting",
