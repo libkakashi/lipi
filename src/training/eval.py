@@ -43,32 +43,12 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
         if batch_idx >= max_batches:
             break
         imgs, targets, tgt_lens, gids, sids, labels = batch
+        imgs = imgs.to(device, non_blocking=True)
         gids = gids.to(device, non_blocking=True)
         sids_dev = sids.to(device, non_blocking=True)
 
-        # Process in small chunks to avoid OOM (no checkpointing during eval)
-        chunk = 32
-        all_logits, all_group_logits, all_group_ids = [], [], []
-        all_script_logits = []
-        for start in range(0, imgs.shape[0], chunk):
-            chunk_imgs = imgs[start:start + chunk].to(device, non_blocking=True)
-            with torch.amp.autocast(device_type, enabled=use_amp, dtype=amp_dtype):
-                o = model(chunk_imgs, group_ids=None)
-            all_logits.append(o["logits"].cpu())
-            all_group_logits.append(o["group_logits"].cpu())
-            all_group_ids.append(o["group_ids"].cpu())
-            if start == 0:
-                all_script_logits = o["script_logits_per_group"]
-                T = o["lengths"][0].item()
-            del o, chunk_imgs
-        out = {
-            "logits": torch.cat(all_logits).to(device),
-            "group_logits": torch.cat(all_group_logits).to(device),
-            "group_ids": torch.cat(all_group_ids).to(device),
-            "lengths": torch.full((imgs.shape[0],), T, dtype=torch.long, device=device),
-            "script_logits_per_group": all_script_logits,
-        }
-        del all_logits, all_group_logits, all_group_ids
+        with torch.amp.autocast(device_type, enabled=use_amp, dtype=amp_dtype):
+            out = model(imgs, group_ids=None)
 
         # LID-1
         pred_gids = out["group_logits"].argmax(-1)

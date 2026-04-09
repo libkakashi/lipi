@@ -717,12 +717,25 @@ def main():
         save_checkpoint(model, opt["optimizer"], opt["scheduler"], opt["scaler"],
                         epoch, args, save_dir)
 
-        # Free training memory before eval
+        # Move optimizer state to CPU to free VRAM for eval
+        optimizer = opt["optimizer"]
+        for state in optimizer.state.values():
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    state[k] = v.cpu()
         torch.cuda.empty_cache()
+
         print(f"\n  Eval epoch {epoch}:")
         evaluate(model, data["val_loader"], data["group_tokenizers"],
                  data["group_script_names"], data["active_groups"],
-                 device, device_type, opt["use_amp"], opt["amp_dtype"])
+                 device, device_type, opt["use_amp"], opt["amp_dtype"],
+                 group_script_vocab_sizes=data["group_script_vocab_sizes"])
+
+        # Move optimizer state back to GPU
+        for state in optimizer.state.values():
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    state[k] = v.to(device)
 
     print(f"\n{'=' * 60}")
     print("DONE")
