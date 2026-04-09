@@ -16,6 +16,7 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -32,7 +33,6 @@ from src.training.losses import (
     compute_lid1_loss, compute_lid2_loss, compute_ctc_loss,
     compute_regional_token_loss,
 )
-from src.training.routing import get_predicted_script_ids, build_routing_masks
 from src.training.eval import evaluate
 
 
@@ -265,7 +265,7 @@ def load_and_prepare_data(args, device):
         active_groups=active_groups)
     print(f"  Train: {len(train_dataset)}, Val: {len(val_dataset)}")
 
-    import numpy as np
+
     train_widths = np.load(str(Path(train_dir) / "widths.npy"))
 
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False,
@@ -496,10 +496,11 @@ def save_checkpoint(model, optimizer, scheduler, scaler, epoch, args, save_dir):
 def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, scaler,
                     ce_loss_fn, device, device_type, use_amp, amp_dtype,
                     epoch, total_epochs, grad_accum, log_interval,
-                    lid1_weight, routing_penalty, group_script_vocabs,
+                    lid1_weight, group_script_vocabs,
                     detach_for_experts=False, align_ce_weight=0.0,
                     save_dir=None, args=None):
     model.train()
+    steps = len(train_loader)
     n_batches = 0
     oom_skipped = 0
 
@@ -523,17 +524,10 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
     log_total = torch.zeros(1, device=device)
     log_count = 0
     log_time = time.time()
-
-    _t_data = time.time()
-    _t_data_total = 0.0
-    _t_fwd_total = 0.0
-    _t_bwd_total = 0.0
     shared_norm = 0.0
     expert_norm = 0.0
 
     for batch_idx, (imgs, targets, tgt_lens, gids, sids, _labels) in enumerate(train_loader):
-        _t_data_total += time.time() - _t_data
-
         if batch_idx < 5:
             print(f"    [shape] batch {batch_idx}: imgs={list(imgs.shape)} "
                   f"B={imgs.shape[0]} W={imgs.shape[3]}", flush=True)
@@ -545,7 +539,6 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         sids = sids.to(device, non_blocking=True)
 
         try:
-            _t_fwd = time.time()
             with torch.amp.autocast(device_type, enabled=use_amp, dtype=amp_dtype):
                 out = model(imgs, group_ids=gids, script_ids=sids,
                             detach_for_experts=detach_for_experts)
@@ -572,8 +565,6 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             else:
                 ace_loss = torch.zeros(1, device=device)
 
-            _t_fwd_total += time.time() - _t_fwd
-
             loss = (ctc_loss
                     + lid1_weight * lid1_loss.float()
                     + lid2_loss.float()
@@ -582,9 +573,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             if grad_accum > 1:
                 loss = loss / grad_accum
 
-            _t_bwd = time.time()
             scaler.scale(loss).backward()
-            _t_bwd_total += time.time() - _t_bwd
         except torch.cuda.OutOfMemoryError:
             oom_skipped += 1
             print(f"  ** OOM at batch {batch_idx+1}/{steps} "
@@ -601,7 +590,6 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                 print("  ** CUDA context corrupted after OOM, exiting",
                       flush=True)
                 sys.exit(1)
-            _t_data = time.time()
             continue
 
         if (batch_idx + 1) % grad_accum == 0 or (batch_idx + 1) == len(train_loader):
@@ -627,7 +615,6 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         log_total += loss.detach() * mult
         n_batches += 1
         log_count += 1
-        _t_data = time.time()
 
         if save_dir and n_batches % 500 == 0:
             save_checkpoint(model, optimizer, scheduler, scaler,
@@ -639,8 +626,6 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             avg_lid2 = log_lid2.item() / log_count
             avg_ace = log_ace.item() / log_count
             avg_total = log_total.item() / log_count
-            lr = scheduler.get_last_lr()[0]
-            steps = len(train_loader)
             # LID-1 accuracy (predicted vs ground truth)
             pred_gids = out["group_logits"].argmax(-1)
             lid1_acc = (pred_gids == gids).float().mean().item() * 100
@@ -656,15 +641,11 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             lid2_acc = 100 * lid2_correct / max(lid2_total, 1)
             elapsed = time.time() - log_time
             ms_per_step = elapsed / log_count * 1000
-            samples_per_sec = sum(b.shape[0] for b in [imgs]) * log_count / elapsed
+            samples_per_sec = imgs.shape[0] * log_count / elapsed
             ace_str = f"  ace {avg_ace:.4f}" if align_ce_weight > 0 else ""
-            data_ms = _t_data_total / log_count * 1000
-            fwd_ms = _t_fwd_total / log_count * 1000
-            bwd_ms = _t_bwd_total / log_count * 1000
             batch_str = f"{batch_idx+1}/{steps}"
-            header = f"  [{epoch:>2}/{total_epochs}] {batch_str:>9}"
             print(
-                f"{header}  "
+                f"  [{epoch:>2}/{total_epochs}] {batch_str:>9}  "
                 f"loss {avg_total:.4f}  "
                 f"ctc {avg_ctc:.4f}  lid1 {avg_lid1:.4f}  lid2 {avg_lid2:.4f}{ace_str}  "
                 f"| acc {lid1_acc:5.1f}% {lid2_acc:5.1f}%  "
@@ -672,9 +653,6 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                 f"gnorm {shared_norm:.1f}/{expert_norm:.1f}"
             )
             log_time = time.time()
-            _t_data_total = 0.0
-            _t_fwd_total = 0.0
-            _t_bwd_total = 0.0
             log_ctc.zero_()
             log_lid1.zero_()
             log_lid2.zero_()
@@ -735,7 +713,7 @@ def main():
         print(f"  Trainable: {trainable/1e6:.1f}M, Frozen: {frozen/1e6:.1f}M")
 
     # Build train_loader with VRAM-estimated pixel budget
-    import numpy as np
+
     train_widths = data["train_widths"]
     max_width = int(train_widths.max())
 
@@ -801,7 +779,6 @@ def main():
             opt["scheduler"], opt["scaler"], ce_loss_fn, device, device_type,
             opt["use_amp"], opt["amp_dtype"], epoch, args.epochs, args.grad_accum,
             args.log_interval, lid1_weight=args.lid1_weight,
-            routing_penalty=args.routing_penalty,
             group_script_vocabs=data["group_script_vocab_sizes"],
             detach_for_experts=detach,
             align_ce_weight=args.align_ce_weight,
