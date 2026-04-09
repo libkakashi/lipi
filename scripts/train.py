@@ -197,7 +197,7 @@ def load_and_prepare_data(args, device):
 
     # Eval uses more memory (no gradient checkpointing), so cap batch size
     eval_batch_size = min(args.batch_size, 128)
-    val_loader = DataLoader(val_dataset, batch_size=eval_batch_size, shuffle=False,
+    val_loader = DataLoader(val_dataset, batch_size=eval_batch_size, shuffle=True,
                             collate_fn=collate_moe,
                             pin_memory=(device_type == "cuda"))
 
