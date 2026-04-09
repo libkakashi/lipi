@@ -47,8 +47,28 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
         gids = gids.to(device, non_blocking=True)
         sids_dev = sids.to(device, non_blocking=True)
 
-        with torch.amp.autocast(device_type, enabled=use_amp, dtype=amp_dtype):
-            out = model(imgs, group_ids=None)
+        # Run inference, halving batch on OOM
+        try:
+            with torch.amp.autocast(device_type, enabled=use_amp, dtype=amp_dtype):
+                out = model(imgs, group_ids=None)
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            half = imgs.shape[0] // 2
+            if half == 0:
+                continue
+            outs = []
+            for start in range(0, imgs.shape[0], half):
+                end = min(start + half, imgs.shape[0])
+                with torch.amp.autocast(device_type, enabled=use_amp, dtype=amp_dtype):
+                    outs.append(model(imgs[start:end], group_ids=None))
+            out = {
+                "logits": torch.cat([o["logits"] for o in outs]),
+                "lengths": outs[0]["lengths"],
+                "group_logits": torch.cat([o["group_logits"] for o in outs]),
+                "group_ids": torch.cat([o["group_ids"] for o in outs]),
+                "script_logits_per_group": outs[0]["script_logits_per_group"],
+            }
+            del outs
 
         # LID-1
         pred_gids = out["group_logits"].argmax(-1)
