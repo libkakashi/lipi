@@ -16,11 +16,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-try:
-    import freetype
-    HAS_FREETYPE = True
-except ImportError:
-    HAS_FREETYPE = False
+import freetype
 
 # Cache loaded faces to avoid reloading the same font
 _face_cache: dict[str, "freetype.Face"] = {}
@@ -118,40 +114,7 @@ def render_text_freetype(text: str, font_path: str, font_size: int,
         return None
 
 
-def render_text_pil(text: str, font_path: str, font_size: int,
-                    ink: tuple[int, ...], bg: tuple[int, ...],
-                    height: int = 32, pad_x: int = 4, pad_y: int = 2) -> Image.Image | None:
-    """Fallback: render text using PIL."""
-    try:
-        from PIL import ImageFont, ImageDraw
-
-        font = ImageFont.truetype(font_path, size=font_size)
-        dummy = Image.new("RGB", (1, 1))
-        bbox = ImageDraw.Draw(dummy).textbbox((0, 0), text, font=font)
-        text_w = bbox[2] - bbox[0]
-        text_h = bbox[3] - bbox[1]
-        if text_w <= 0 or text_h <= 0:
-            return None
-
-        img_w = text_w + 2 * pad_x
-        img_h = text_h + 2 * pad_y
-        img = Image.new("RGB", (img_w, img_h), bg)
-        ImageDraw.Draw(img).text(
-            (pad_x - bbox[0], pad_y - bbox[1]), text, fill=ink, font=font,
-        )
-
-        scale = height / img_h
-        new_w = max(4, int(img_w * scale))
-        return img.resize((new_w, height), Image.BILINEAR)
-    except Exception:
-        return None
-
-
-# Auto-select the best renderer
-if HAS_FREETYPE:
-    render_text = render_text_freetype
-else:
-    render_text = render_text_pil
+render_text = render_text_freetype
 
 
 def font_has_codepoint(font_path: str, char: str) -> bool:
@@ -161,10 +124,8 @@ def font_has_codepoint(font_path: str, char: str) -> bool:
     (which is what triggers tofu rendering). This is a definitive check —
     no pixel heuristics needed.
 
-    Falls back to True if freetype is unavailable (let pixel check handle it).
+    Returns False if the glyph is missing (cmap index 0 = .notdef).
     """
-    if not HAS_FREETYPE:
-        return True  # can't check, assume yes
     try:
         face = _get_face(font_path, 24)
         return face.get_char_index(ord(char)) != 0

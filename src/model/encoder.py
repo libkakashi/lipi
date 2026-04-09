@@ -4,18 +4,17 @@ Lipi MoE Vision Encoder.
 Architecture:
     Input: (B, 2, 32, W) — L+a from rgb_to_input
     -> ColorProjection: L+a → 1ch
-    -> ResNet Stem: 1→64ch, stride 2×2  → (B, 64, 16, W/2)
-    -> Shared SWA 8×8: character-level universal features   (h=16, w=W/2)
-    -> Shared SWA 8×32: sequence-level universal features
+    -> ResNet Stem: 1→64ch, stride 2×2          → (B, 64, 16, W/2)
+    -> Shared SWA: 4× 8×8 + 2× 8×32, dim/2      (h=16, w=W/2)
     -> LID-1: 13-group classification
-    -> Expert SWA 8×8: group-specific features (high-res)   (h=16, w=W/2)
-    -> Height pool 16→8 + Width pool 2×                    (h=8, w=W/4)
-    -> Expert SWA 8×8: group-specific features (low-res)   (h=8, w=W/4)
-    -> Expert SWA 8×8: group-specific sequence features    (h=8, w=W/4)
-    -> Fold h=8 into channels → (B, W/4, C*8)
+    -> Expert Pool 1: height 16→8, width ÷2      (h=8, w=W/4)
+    -> Project dim/2 → dim
+    -> Expert SWA Stage 1: 4× 8×8, dim           (h=8, w=W/4)
+    -> Expert Pool 2: height 8→4, width ÷2       (h=4, w=W/8)
+    -> Expert SWA Stage 2: 2× 4×4 + 4× 4×16     (h=4, w=W/8)
+    -> Fold h=4 into channels → (B, W/8, dim*4)
     -> LayerNorm
-    -> LID-2: per-script classification (multi-script groups only)
-    -> Per-script CTC heads (T=W/4, richer features from direct h=4 fold)
+    -> LID-2 + Per-script CTC heads (T=W/8)
 """
 
 import torch
@@ -25,7 +24,7 @@ from torch import Tensor
 
 from src.data.color import ColorProjection
 from src.model.stem import ResNetStem
-from src.model.pooling import LearnedHeightPooling
+from src.model.pooling import ExpertPooling
 from src.model.attention import SWABlock, FullyExpertSWABlock
 from src.model.lid import LIDCoarse, NUM_GROUPS
 
@@ -33,7 +32,7 @@ from src.model.lid import LIDCoarse, NUM_GROUPS
 class CTCHead(nn.Module):
     """Linear CTC head — SWA blocks already provide full context."""
 
-    def __init__(self, enc_dim: int, vocab_size: int, **_kwargs):
+    def __init__(self, enc_dim: int, vocab_size: int):
         super().__init__()
         self.vocab_size = vocab_size
         self.proj = nn.Linear(enc_dim, vocab_size)
@@ -50,7 +49,7 @@ class GroupCTCModule(nn.Module):
     """
 
     def __init__(self, enc_dim: int, script_vocab_sizes: list[int],
-                 script_names: list[str], **_kwargs):
+                 script_names: list[str]):
         super().__init__()
         self.n_scripts = len(script_vocab_sizes)
         self.script_names = script_names
@@ -124,31 +123,12 @@ class LipiMoEEncoder(nn.Module):
 
     def __init__(
         self,
-        stem_channels: int = 64,
-        stem_depth: int = 3,
-        # Shared SWA
-        shared_dim: int = 288,
-        shared_blocks_4x4: int = 8,
-        shared_blocks_4x16: int = 4,
-        shared_mlp_ratio: int = 4,
-        # Expert SWA Stage 1
-        stage1_dim: int = 288,
-        stage1_blocks: int = 12,
-        stage1_downsample_after: int = 4,
-        stage1_mlp_ratio: int = 4,
-        # Expert SWA Stage 2
-        stage2_dim: int = 576,
-        stage2_blocks: int = 8,
-        stage2_mlp_ratio: int = 4,
-        # Groups and scripts
+        dim: int,
         num_groups: int = NUM_GROUPS,
         group_script_vocab_sizes: list[list[int]] | None = None,
         group_script_names: list[list[str]] | None = None,
         # Legacy: single vocab per group (no LID-2)
         vocab_sizes: list[int] | int | None = None,
-        head_hidden: int = 384,
-        head_layers: int = 2,
-        head_dropout: float = 0.1,
     ):
         super().__init__()
         self.num_groups = num_groups
@@ -157,99 +137,81 @@ class LipiMoEEncoder(nn.Module):
         self.color_proj = ColorProjection()
 
         # Stem
-        self.stem = ResNetStem(out_channels=stem_channels, depth=stem_depth)
+        shared_dim = dim // 2
+        self.stem = ResNetStem(out_channels=64, depth=3)
+        self.proj_stem = nn.Linear(64, shared_dim)
 
-        # Channel projection
-        self.proj_shared = nn.Linear(stem_channels, shared_dim)
-
-        # Shared SWA: 8×8 (local) then 8×32 (wide context)
-        # Window sizes scaled 2× from original 4×4/4×16 to match 2×2 stem
+        # Shared SWA: 4× 8×8 (local) + 2× 8×32 (wide context) at shared_dim
         self.shared_swa = nn.ModuleList()
-        for i in range(shared_blocks_4x4):
+        for i in range(4):
             self.shared_swa.append(
                 SWABlock(dim=shared_dim, num_heads=shared_dim // 32,
                          window_h=8, window_w=8,
-                         shift=(i % 2 == 1), mlp_ratio=shared_mlp_ratio))
-        for i in range(shared_blocks_4x16):
+                         shift=(i % 2 == 1), mlp_ratio=4))
+        for i in range(2):
             self.shared_swa.append(
                 SWABlock(dim=shared_dim, num_heads=shared_dim // 32,
                          window_h=8, window_w=32,
-                         shift=(i % 2 == 1), mlp_ratio=shared_mlp_ratio))
+                         shift=(i % 2 == 1), mlp_ratio=4))
 
         # LID-1
         self.lid_coarse = LIDCoarse(in_channels=shared_dim, num_groups=num_groups)
 
-        # Channel projection
-        self.proj1 = nn.Linear(shared_dim, stage1_dim) if shared_dim != stage1_dim else nn.Identity()
+        # Expert Pool 1: height 16→8, width ÷2 (operates at shared_dim)
+        self.pool1 = ExpertPooling(channels=shared_dim, h_in=16, h_out=8, num_groups=num_groups)
 
-        # Expert SWA Stage 1 (8×8 windows, same scale as shared)
+        # Project shared_dim → dim after pool1
+        self.proj_up = nn.Linear(shared_dim, dim)
+
+        # Expert SWA Stage 1: 4× 8×8 at h=8
         self.stage1 = nn.ModuleList([
-            FullyExpertSWABlock(dim=stage1_dim, num_heads=stage1_dim // 32,
+            FullyExpertSWABlock(dim=dim, num_heads=dim // 32,
                                 num_groups=num_groups, window_h=8, window_w=8,
-                                shift=(i % 2 == 1), mlp_ratio=stage1_mlp_ratio)
-            for i in range(stage1_blocks)
-        ])
-        self.stage1_downsample_after = stage1_downsample_after
-
-        # Height pool 16→8 + width pool 2×
-        self.pool1 = LearnedHeightPooling(channels=stage1_dim, h_in=16, h_out=8)
-        self.width_pool = nn.Sequential(
-            nn.Conv1d(stage1_dim, stage1_dim, kernel_size=3, stride=2, padding=1),
-            nn.GroupNorm(1, stage1_dim),
-            nn.GELU(),
-        )
-
-        # Channel projection
-        self.proj2 = nn.Linear(stage1_dim, stage2_dim) if stage1_dim != stage2_dim else nn.Identity()
-
-        # Expert SWA Stage 2 (8×8 windows at h=8, full vertical coverage)
-        self.stage2 = nn.ModuleList([
-            FullyExpertSWABlock(dim=stage2_dim, num_heads=stage2_dim // 32,
-                                num_groups=num_groups, window_h=8, window_w=8,
-                                shift=(i % 2 == 1), mlp_ratio=stage2_mlp_ratio)
-            for i in range(stage2_blocks)
+                                shift=(i % 2 == 1), mlp_ratio=4)
+            for i in range(4)
         ])
 
-        # Fold h=8 directly into channels (no height pool — SWA already contextualized)
-        self.enc_out_dim = stage2_dim * 8
+        # Expert Pool 2: height 8→4, width ÷2
+        self.pool2 = ExpertPooling(channels=dim, h_in=8, h_out=4, num_groups=num_groups)
+
+        # Expert SWA Stage 2: 2× 4×4 (per-char) + 4× 4×16 (wide)
+        self.stage2 = nn.ModuleList()
+        for i in range(2):
+            self.stage2.append(
+                FullyExpertSWABlock(dim=dim, num_heads=dim // 32,
+                                    num_groups=num_groups, window_h=4, window_w=4,
+                                    shift=(i % 2 == 1), mlp_ratio=4))
+        for i in range(4):
+            self.stage2.append(
+                FullyExpertSWABlock(dim=dim, num_heads=dim // 32,
+                                    num_groups=num_groups, window_h=4, window_w=16,
+                                    shift=(i % 2 == 1), mlp_ratio=4))
+
+        # Fold h=4 into channels
+        self.enc_out_dim = dim * 4
         self.norm = nn.LayerNorm(self.enc_out_dim)
 
         # CTC heads: per-script within each group (with LID-2 for multi-script groups)
-        if group_script_vocab_sizes is not None:
-            # New: per-script CTC heads with LID-2
-            if group_script_names is None:
-                group_script_names = [[f"s{i}" for i in range(len(vs))]
-                                      for vs in group_script_vocab_sizes]
-            self.ctc_modules = nn.ModuleList([
-                GroupCTCModule(
-                    enc_dim=self.enc_out_dim,
-                    script_vocab_sizes=group_script_vocab_sizes[g],
-                    script_names=group_script_names[g],
-                    hidden_dim=head_hidden,
-                    num_layers=head_layers,
-                    dropout=head_dropout,
-                )
-                for g in range(num_groups)
-            ])
-        else:
+        if group_script_vocab_sizes is None:
             # Legacy: single CTC head per group
             if isinstance(vocab_sizes, int):
                 vocab_sizes = [vocab_sizes] * num_groups
             if vocab_sizes is None:
                 vocab_sizes = [171] * num_groups
-            self.ctc_modules = nn.ModuleList([
-                GroupCTCModule(
-                    enc_dim=self.enc_out_dim,
-                    script_vocab_sizes=[vocab_sizes[g]],
-                    script_names=[f"group{g}"],
-                    hidden_dim=head_hidden,
-                    num_layers=head_layers,
-                    dropout=head_dropout,
-                )
-                for g in range(num_groups)
-            ])
+            group_script_vocab_sizes = [[vs] for vs in vocab_sizes]
+            group_script_names = [[f"group{g}"] for g in range(num_groups)]
+        elif group_script_names is None:
+            group_script_names = [[f"s{i}" for i in range(len(vs))]
+                                  for vs in group_script_vocab_sizes]
 
-        self.output_dim = self.enc_out_dim
+        self.ctc_modules = nn.ModuleList([
+            GroupCTCModule(
+                enc_dim=self.enc_out_dim,
+                script_vocab_sizes=group_script_vocab_sizes[g],
+                script_names=group_script_names[g],
+            )
+            for g in range(num_groups)
+        ])
 
     def forward(
         self,
@@ -269,10 +231,10 @@ class LipiMoEEncoder(nn.Module):
 
         # Reshape + project
         x = x.permute(0, 2, 3, 1).reshape(B, h * w, C)
-        x = self.proj_shared(x)
+        x = self.proj_stem(x)
 
         # Shared SWA
-        for i, block in enumerate(self.shared_swa):
+        for block in self.shared_swa:
             if self.training and torch.is_grad_enabled():
                 x = ckpt_util.checkpoint(block, x, h, w, use_reentrant=True)
             else:
@@ -286,33 +248,24 @@ class LipiMoEEncoder(nn.Module):
         if detach_for_experts:
             x = x.detach()
 
-        x = self.proj1(x)
+        # Expert Pool 1: height 16→8, width ÷2
+        x, h, w = self.pool1(x, h, w, group_ids)
 
-        # Expert SWA Stage 1 — before downsampling
-        for i, block in enumerate(self.stage1[:self.stage1_downsample_after]):
+        # Project shared_dim → dim
+        x = self.proj_up(x)
+
+        # Expert SWA Stage 1
+        for block in self.stage1:
             x = block(x, h=h, w=w, group_ids=group_ids)
 
-        # Height pool 16→8, width pool 2×
-        C1 = x.shape[-1]
-        x = x.reshape(B, h, w, C1).permute(0, 3, 1, 2)
-        x = self.pool1(x)
-        h = 8
-        x = x.reshape(B * h, C1, w)
-        x = self.width_pool(x)
-        w = x.shape[2]
-        x = x.reshape(B, h, C1, w).permute(0, 1, 3, 2).reshape(B, h * w, C1)
-
-        # Expert SWA Stage 1 — after downsampling
-        for i, block in enumerate(self.stage1[self.stage1_downsample_after:]):
-            x = block(x, h=h, w=w, group_ids=group_ids)
-
-        x = self.proj2(x)
+        # Expert Pool 2: height 8→4, width ÷2
+        x, h, w = self.pool2(x, h, w, group_ids)
 
         # Expert SWA Stage 2
-        for i, block in enumerate(self.stage2):
+        for block in self.stage2:
             x = block(x, h=h, w=w, group_ids=group_ids)
 
-        # Fold h=8 into channels
+        # Fold h=4 into channels
         C2 = x.shape[-1]
         x = x.reshape(B, h, w, C2)
         x = x.permute(0, 2, 1, 3).reshape(B, w, C2 * h)

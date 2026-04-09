@@ -1,7 +1,6 @@
 # Lipi: Multilingual OCR via Mixture of Experts
 
 > 26 scripts, 13 groups, 100+ languages, ~95% of world's literate population.
-> 759M total params, 65M active per sample. 32 MB inference on phone.
 
 ---
 
@@ -12,15 +11,16 @@ Takes a cropped word image and outputs the text. Script identification and chara
 ```
 Word Image (32 x W x 3)
   -> Color Projection (RGB -> L+a -> 1ch)
-  -> ResNet Stem (stride 2x2, 64ch)       -> (16 x W/2)
-  -> Shared SWA (12 blocks, dim=288)      <- universal visual features
-  -> LID-1 (13-group classifier)          <- which script family?
-  -> Expert SWA Stage 1 (12 blocks)       <- group-specific features (h=16, w=W/2)
-  -> Height Pool (16->4) + Width Pool (2x) -> (h=4, w=W/4)
-  -> Expert SWA Stage 2 (8 blocks)        <- deep group-specific features
-  -> Height Pool (4->1), fold h into C
-  -> LID-2 (per-script classifier)        <- which exact script?
-  -> Per-Script CTC Head (T=W/4)          <- character sequence
+  -> ResNet Stem (stride 2x2, 64ch)        -> (h=16, w=W/2)
+  -> Shared SWA (4x 8x8 + 2x 8x32, dim)   <- universal visual features
+  -> LID-1 (13-group classifier)            <- which script family?
+  -> Expert Pool 1 (16->8, width /2)        -> (h=8, w=W/4)
+  -> Expert SWA Stage 1 (4x 8x8)           <- group-specific features
+  -> Expert Pool 2 (8->4, width /2)         -> (h=4, w=W/8)
+  -> Expert SWA Stage 2 (2x 4x4 + 4x 4x16) <- deep group-specific features
+  -> Fold h=4 into channels                 -> (T=W/8, dim*4)
+  -> LID-2 (per-script classifier)          <- which exact script?
+  -> Per-Script CTC Head (T=W/8)            <- character sequence
   -> Output: decoded text
 ```
 
@@ -48,33 +48,35 @@ Word Image (32 x W x 3)
 
 ## Model Architecture
 
-### Shared Path (always active, ~13M params)
+Single `dim` parameter controls all layer widths. Default: 256.
+
+### Shared Path (always active)
 
 ```
-ColorProjection:     Conv2d(2->32->16->1, 1x1)     641 params
-ResNet Stem:         depth=3, 64ch, stride 4x       526K params
-Shared SWA 4x4:     8 blocks, dim=288              8.0M params
-Shared SWA 4x16:    4 blocks, dim=288              4.0M params
-LID-1 Classifier:   attn pool (288->64->1) -> MLP 288->576->288->13    354K params
+ColorProjection:     Conv2d(2->32->16->1, 1x1)
+ResNet Stem:         depth=3, 64ch, stride 2x2
+  -> proj_stem:      Linear(64, dim)
+Shared SWA 8x8:     4 blocks, dim
+Shared SWA 8x32:    2 blocks, dim
+LID-1 Classifier:   attn pool -> MLP (dim -> 13 groups)
 ```
 
-### Expert Path (1 of 13 active, ~52M per group)
+### Expert Path (1 of 13 active per sample)
 
 ```
-Expert SWA Stage 1:  12 FullyExpertSWABlock, dim=288   12.0M/group
-Height Pool 8->4:    LearnedHeightPooling               13K
-Channel Projection:  Linear(288->576)                   166K
-Expert SWA Stage 2:  8 FullyExpertSWABlock, dim=576    31.9M/group
-Height Pool 4->1:    LearnedHeightPooling               4K
-LayerNorm:           dim=576                            1.2K
+Expert Pool 1:       per-group LearnedHeightPooling (16->8) + Conv1d width pool (stride 2)
+Expert SWA Stage 1:  4 FullyExpertSWABlock, 8x8 windows, dim     (h=8, w=W/4)
+Expert Pool 2:       per-group LearnedHeightPooling (8->4) + Conv1d width pool (stride 2)
+Expert SWA Stage 2:  2 FullyExpertSWABlock 4x4 + 4 FullyExpertSWABlock 4x16, dim  (h=4, w=W/8)
+Fold:                h=4 into channels -> dim*4
+LayerNorm:           dim*4
 ```
 
-### CTC Heads (1 of 26 active, ~7M per script)
+### CTC Heads (1 of 26 active per sample)
 
 ```
-LID-2:      attention pool -> MLP (multi-script groups only)
-BiLSTM:     input=576, hidden=384, layers=2, bidirectional
-Projection: Linear(768 -> vocab_size)
+LID-2:      Conv1d pool -> MLP (multi-script groups only)
+CTC Head:   Linear(dim*4 -> vocab_size)
 ```
 
 ### Encoding
@@ -83,16 +85,6 @@ Projection: Linear(768 -> vocab_size)
 - **Korean**: 11-symbol decomposition + SEP + 2500 BPE = 2512 vocab
 - **Arabic**: 9-symbol decomposition + SEP + 2500 BPE = 2511 vocab
 - **Other scripts**: direct character tokens, CTC decoded
-
-### Parameter Summary
-
-| Component | Total | Active/sample |
-|-----------|-------|--------------|
-| Shared | 12.9M | 12.9M |
-| Expert Stage 1 (13 groups) | 155.7M | 12.0M |
-| Expert Stage 2 (13 groups) | 414.6M | 31.9M |
-| CTC Heads (26 scripts) | 175.8M | ~7M |
-| **Total** | **759.2M** | **~65M (8%)** |
 
 ---
 
@@ -132,22 +124,17 @@ scheduler:    linear warmup (1 epoch) + cosine decay
 batch_size:   256-500
 grad_clip:    max_norm=25
 amp:          bf16 (model cast to bf16 natively)
-checkpointing: all 32 SWA blocks (shared + expert)
+checkpointing: all SWA blocks (shared + expert)
 ```
 
 ---
 
 ## Inference
 
-| Format | Full model | Active path | Per-group download |
-|--------|-----------|-------------|-------------------|
-| bf16 | 1.5 GB | 130 MB | 90 MB |
-| FP4 | 380 MB | 32 MB | 25 MB |
-
 ### Deployment
 
-1. Ship shared weights (13M, always loaded) + LID-1
-2. User installs language packs (expert group + CTC heads, 25 MB each in FP4)
+1. Ship shared weights (always loaded) + LID-1
+2. User installs language packs (expert group + CTC heads per group)
 3. LID-1 routes -> load correct expert group -> decode
 4. Top-K fallback: if LID-1 uncertain, try top-2 groups, pick best CTC confidence
 
@@ -161,7 +148,8 @@ src/
     encoder.py          LipiMoEEncoder (full model)
     attention.py        SWABlock, FullyExpertSWABlock
     stem.py             ResNetStem
-    pooling.py          LearnedHeightPooling
+    pooling.py          LearnedHeightPooling, ExpertPooling
+    memory.py           VRAM budget estimation
     rope.py             RoPE2D
     lid.py              SCRIPTS, GROUPS, LIDCoarse
   encoding/

@@ -134,13 +134,10 @@ def main():
     from src.model.encoder import LipiMoEEncoder
 
     model = LipiMoEEncoder(
-        shared_dim=256, shared_blocks_4x4=4, shared_blocks_4x16=2,
-        stage1_dim=256, stage1_blocks=6,
-        stage2_dim=256, stage2_blocks=4,
+        dim=256,
         num_groups=n_groups,
         group_script_vocab_sizes=group_vocab_sizes,
         group_script_names=group_names,
-        head_hidden=384,
     ).to(device)
     model.train()
 

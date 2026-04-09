@@ -1,7 +1,6 @@
 """Smoke test: model instantiation, forward pass, loss computation."""
 
 import torch
-import pytest
 
 
 def test_model_forward_pass():
@@ -9,13 +8,7 @@ def test_model_forward_pass():
     from src.model.encoder import LipiMoEEncoder
 
     model = LipiMoEEncoder(
-        shared_dim=64,
-        stage1_dim=64,
-        stage2_dim=64,
-        shared_blocks_4x4=1,
-        shared_blocks_4x16=1,
-        stage1_blocks=1,
-        stage2_blocks=1,
+        dim=64,
         num_groups=2,
         group_script_vocab_sizes=[[100], [100]],
         group_script_names=[["test1"], ["test2"]],

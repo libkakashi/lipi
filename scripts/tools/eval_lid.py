@@ -31,22 +31,22 @@ from src.training.dataloader import (
 
 
 class SharedEncoder(torch.nn.Module):
-    def __init__(self, stem_depth, shared_dim, shared_blocks_4x4,
-                 shared_blocks_4x16, num_groups, stem_channels=64):
+    def __init__(self, dim, num_groups):
         super().__init__()
+        shared_dim = dim // 2
         self.color_proj = ColorProjection()
-        self.stem = ResNetStem(out_channels=stem_channels, depth=stem_depth)
-        self.proj_shared = torch.nn.Linear(stem_channels, shared_dim)
+        self.stem = ResNetStem(out_channels=64, depth=3)
+        self.proj_stem = torch.nn.Linear(64, shared_dim)
         self.shared_swa = torch.nn.ModuleList()
-        for i in range(shared_blocks_4x4):
+        for i in range(4):
             self.shared_swa.append(
                 SWABlock(dim=shared_dim, num_heads=shared_dim // 32,
-                         window_h=4, window_w=4,
+                         window_h=8, window_w=8,
                          shift=(i % 2 == 1), mlp_ratio=4))
-        for i in range(shared_blocks_4x16):
+        for i in range(2):
             self.shared_swa.append(
                 SWABlock(dim=shared_dim, num_heads=shared_dim // 32,
-                         window_h=4, window_w=16,
+                         window_h=8, window_w=32,
                          shift=(i % 2 == 1), mlp_ratio=4))
         self.lid_coarse = LIDCoarse(in_channels=shared_dim, num_groups=num_groups)
 
@@ -56,7 +56,7 @@ class SharedEncoder(torch.nn.Module):
         _, C, h, w = x.shape
         B = x.shape[0]
         x = x.permute(0, 2, 3, 1).reshape(B, h * w, C)
-        x = self.proj_shared(x)
+        x = self.proj_stem(x)
         for block in self.shared_swa:
             x = block(x, h=h, w=w)
         return self.lid_coarse.forward_seq(x)
@@ -70,10 +70,7 @@ def main():
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--max-batches", type=int, default=0,
                         help="Limit eval batches (0 = all)")
-    parser.add_argument("--shared-dim", type=int, default=384)
-    parser.add_argument("--shared-blocks-4x4", type=int, default=8)
-    parser.add_argument("--shared-blocks-4x16", type=int, default=4)
-    parser.add_argument("--stem-depth", type=int, default=3)
+    parser.add_argument("--dim", type=int, default=256)
     args = parser.parse_args()
 
     if args.device == "auto":
@@ -121,10 +118,7 @@ def main():
 
     # Model
     model = SharedEncoder(
-        stem_depth=args.stem_depth,
-        shared_dim=args.shared_dim,
-        shared_blocks_4x4=args.shared_blocks_4x4,
-        shared_blocks_4x16=args.shared_blocks_4x16,
+        dim=args.dim,
         num_groups=n_groups,
     ).to(device)
 
@@ -132,7 +126,7 @@ def main():
     ckpt = torch.load(args.resume, map_location="cpu", weights_only=False)
     model_state = model.state_dict()
     ckpt_state = ckpt["model"]
-    # Remap legacy keys
+    # Remap legacy keys from old architecture
     n_4x4 = len(set(k.split(".")[1] for k in ckpt_state if k.startswith("shared_swa_4x4.")))
     for k in list(ckpt_state.keys()):
         if k.startswith("shared_swa_4x4."):
@@ -142,6 +136,8 @@ def main():
             idx = int(k.split(".")[1])
             rest = ".".join(k.split(".")[2:])
             ckpt_state[f"shared_swa.{idx + n_4x4}.{rest}"] = ckpt_state.pop(k)
+        elif k.startswith("proj_shared."):
+            ckpt_state[k.replace("proj_shared.", "proj_stem.", 1)] = ckpt_state.pop(k)
     loaded = 0
     for k in model_state:
         if k in ckpt_state and ckpt_state[k].shape == model_state[k].shape:

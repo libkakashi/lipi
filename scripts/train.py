@@ -24,6 +24,7 @@ from torch.utils.data import DataLoader
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.model.encoder import LipiMoEEncoder
+from src.model.memory import estimate_pixel_budget
 from src.model.lid import SCRIPT_TO_GROUP, NUM_GROUPS, GROUPS
 from src.training.dataloader import (
     build_script_tokenizers, collate_moe, WidthSortedBatchSampler,
@@ -47,82 +48,6 @@ def vram(label="", device_type="cuda"):
         print(f"  VRAM [{label}]: {a:.2f} GB allocated, {r:.2f} GB reserved")
 
 
-def estimate_pixel_budget(model, vram_gb=32, margin=0.75):
-    """Estimate max pixel budget (B*W) from model architecture and VRAM.
-
-    Memory accounting per block type:
-    - Shared SWA (entire block checkpointed): saves 1 tensor (input) per block
-    - Expert blocks (only inner attn/MLP checkpointed): the outer block's
-      intermediates (normed ×2, residual sums, output) are NOT checkpointed
-      — ~5 tensors of (B, T, dim) per block
-    - Recompute peak: during backward, one block recomputes its full forward,
-      adding QKV + attention + MLP intermediates temporarily
-    """
-    # Extract dims from model
-    shared_dim = model.shared_swa[0].norm1.normalized_shape[0]
-    n_shared = len(model.shared_swa)
-    shared_mlp_ratio = model.shared_swa[0].mlp.fc1.out_features // shared_dim
-    stage1_dim = model.stage1[0].norm1.normalized_shape[0]
-    n_stage1 = len(model.stage1)
-    n_stage1_pre = model.stage1_downsample_after
-    n_stage1_post = n_stage1 - n_stage1_pre
-    stage1_mlp_ratio = model.stage1[0].expert_mlps[0].fc1.out_features // stage1_dim
-    stage2_dim = model.stage2[0].norm1.normalized_shape[0]
-    n_stage2 = len(model.stage2)
-    stage2_mlp_ratio = model.stage2[0].expert_mlps[0].fc1.out_features // stage2_dim
-    stem_ch = model.stem.layers[0].out_channels
-    max_vocab = max(m.max_vocab for m in model.ctc_modules)
-    enc_out_dim = model.enc_out_dim
-
-    # Elements per input width column (W=1), stored for backward.
-    # Spatial: stem outputs (16, W/2), after pool (8, W/4).
-    # "tokens_per_W" before pool = 16*(W/2)/W = 8, after pool = 8*(W/4)/W = 2.
-    elems = 0
-
-    # Stem (not checkpointed): ~3 conv layers worth of intermediates
-    elems += 3 * stem_ch * 16 * 0.5
-
-    # Shared SWA: entire block checkpointed → saves only the input (1 tensor)
-    elems += n_shared * 1 * 8 * shared_dim
-
-    # Expert blocks: only inner attn/MLP are checkpointed. The outer block
-    # keeps tensors in autograd: input, normed (×2 checkpoint inputs),
-    # post-attn residual, post-mlp output. ~5 tensors of (B, T, dim).
-    elems += n_stage1_pre * 5 * 8 * stage1_dim
-    elems += n_stage1_post * 5 * 2 * stage1_dim
-    elems += n_stage2 * 5 * 2 * stage2_dim
-
-    # CTC logits + fold output
-    elems += max_vocab * 0.25 + enc_out_dim * 0.25
-
-    # Recompute peak: during backward, one block recomputes forward,
-    # temporarily holding norm + QKV + attn_out + MLP intermediates.
-    # ~(7 + 2*mlp_ratio) * dim per token for the largest block.
-    def _recompute_peak(dim, mlp_ratio, tokens_per_px):
-        return (7 + 2 * mlp_ratio) * dim * tokens_per_px
-
-    recompute_peak = max(
-        _recompute_peak(shared_dim, shared_mlp_ratio, 8),
-        _recompute_peak(stage1_dim, stage1_mlp_ratio, 8),
-        _recompute_peak(stage2_dim, stage2_mlp_ratio, 2),
-    )
-
-    # bf16 = 2 bytes/element
-    bytes_per_pixel_col = int((elems + recompute_peak) * 2)
-
-    model_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
-    fixed = model_bytes * 4  # params + grads + adam m + adam v
-    available = vram_gb * 1e9 * margin - fixed
-    pixel_budget = int(available / bytes_per_pixel_col)
-
-    print(f"  VRAM estimate: {model_bytes/1e9:.2f}GB model, "
-          f"{fixed/1e9:.2f}GB fixed, "
-          f"{bytes_per_pixel_col/1e3:.0f}KB/px, "
-          f"{available/1e9:.1f}GB for activations")
-    print(f"  Pixel budget: {pixel_budget}")
-
-    return pixel_budget
-
 
 # ---------------------------------------------------------------------------
 # Argument parsing
@@ -145,17 +70,7 @@ def parse_args():
     parser.add_argument("--val-split", type=float, default=0.1)
     parser.add_argument("--log-interval", type=int, default=20)
     # Model
-    parser.add_argument("--stem-depth", type=int, default=3)
-    parser.add_argument("--shared-dim", type=int, default=256)
-    parser.add_argument("--shared-blocks-4x4", type=int, default=4)
-    parser.add_argument("--shared-blocks-4x16", type=int, default=2)
-    parser.add_argument("--stage1-dim", type=int, default=256)
-    parser.add_argument("--stage1-blocks", type=int, default=6)
-    parser.add_argument("--stage1-downsample-after", type=int, default=4,
-                        help="Downsample after this many stage1 blocks")
-    parser.add_argument("--stage2-dim", type=int, default=256)
-    parser.add_argument("--stage2-blocks", type=int, default=4)
-    parser.add_argument("--head-hidden", type=int, default=384)
+    parser.add_argument("--dim", type=int, default=256)
     parser.add_argument("--no-compile", action="store_true")
     parser.add_argument("--lid1-weight", type=float, default=1.0)
     parser.add_argument("--align-ce-weight", type=float, default=0.0,
@@ -291,19 +206,10 @@ def load_and_prepare_data(args, device):
 def build_model(args, n_groups, group_script_vocab_sizes, group_script_names, device):
     device_type = device.type
     model = LipiMoEEncoder(
-        stem_depth=args.stem_depth,
-        shared_dim=args.shared_dim,
-        shared_blocks_4x4=args.shared_blocks_4x4,
-        shared_blocks_4x16=args.shared_blocks_4x16,
-        stage1_dim=args.stage1_dim,
-        stage1_blocks=args.stage1_blocks,
-        stage1_downsample_after=args.stage1_downsample_after,
-        stage2_dim=args.stage2_dim,
-        stage2_blocks=args.stage2_blocks,
+        dim=args.dim,
         num_groups=n_groups,
         group_script_vocab_sizes=group_script_vocab_sizes,
         group_script_names=group_script_names,
-        head_hidden=args.head_hidden,
     ).to(device)
 
     vram("after model to device (fp32)", device_type)
@@ -383,7 +289,7 @@ def resume_from_checkpoint(args, model, optimizer, base_optimizer, scaler, sched
     # Partial load: skip mismatched layers (e.g., CTC proj after vocab change)
     model_state = ckpt["model"]
 
-    # Remap legacy key names (shared_swa_4x4/4x16 → shared_swa)
+    # Remap legacy key names from old architecture
     n_4x4 = len(set(k.split(".")[1] for k in model_state if k.startswith("shared_swa_4x4.")))
     remapped = 0
     for k in list(model_state.keys()):
@@ -397,8 +303,11 @@ def resume_from_checkpoint(args, model, optimizer, base_optimizer, scaler, sched
             new_k = f"shared_swa.{idx + n_4x4}.{rest}"
             model_state[new_k] = model_state.pop(k)
             remapped += 1
+        elif k.startswith("proj_shared."):
+            model_state[k.replace("proj_shared.", "proj_stem.", 1)] = model_state.pop(k)
+            remapped += 1
     if remapped:
-        print(f"  Remapped {remapped} legacy shared_swa keys")
+        print(f"  Remapped {remapped} legacy checkpoint keys")
 
     current_state = model.state_dict()
     skipped = []

@@ -47,19 +47,10 @@ def load_model(checkpoint_path: str, device: torch.device):
     vocab_sizes, script_names = build_vocab_tables()
 
     model = LipiMoEEncoder(
-        stem_depth=3,
-        shared_dim=256,
-        shared_blocks_4x4=4,
-        shared_blocks_4x16=2,
-        stage1_dim=256,
-        stage1_blocks=6,
-        stage1_downsample_after=4,
-        stage2_dim=256,
-        stage2_blocks=4,
+        dim=256,
         num_groups=len(GROUPS),
         group_script_vocab_sizes=vocab_sizes,
         group_script_names=script_names,
-        head_hidden=384,
     )
 
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
