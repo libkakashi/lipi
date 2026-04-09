@@ -61,8 +61,8 @@ def estimate_pixel_budget(model, vram_gb: float = 32) -> int:
     fixed_activation = small_bytes - bytes_per_pixel * small_pixels
 
     available = vram_gb * 1e9 - fixed_model - max(fixed_activation, 0)
-    # 15% reserve for CUDA fragmentation
-    pixel_budget = int(available * 0.85 / bytes_per_pixel)
+    # 5% reserve — expandable_segments handles fragmentation well
+    pixel_budget = int(available * 0.95 / bytes_per_pixel)
 
     print(f"  VRAM estimate: {model_bytes/1e9:.2f}GB model, "
           f"{fixed_model/1e9:.2f}GB fixed (optimizer), "
