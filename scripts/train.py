@@ -412,7 +412,6 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
     steps = len(train_loader)
     n_batches = 0
     oom_skipped = 0
-    oom_retried = 0
 
     # Cache param split for grad clipping (avoid iterating named_parameters every step)
     shared_params = []
@@ -484,10 +483,6 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             print(f"    [shape] batch {batch_idx}: imgs={list(imgs.shape)} "
                   f"B={imgs.shape[0]} W={imgs.shape[3]}", flush=True)
 
-        # Keep CPU refs for OOM retry before moving to GPU
-        cpu_imgs, cpu_targets, cpu_tgt_lens = imgs, targets, tgt_lens
-        cpu_gids, cpu_sids = gids, sids
-
         imgs = imgs.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
         tgt_lens = tgt_lens.to(device, non_blocking=True)
@@ -498,70 +493,13 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             ctc_loss, lid1_loss, lid2_loss, ace_loss, loss, group_logits, script_logits = \
                 _forward_backward(imgs, targets, tgt_lens, gids, sids, scale=1.0)
         except torch.cuda.OutOfMemoryError:
-            # Clean up the failed forward/backward
             del imgs, targets, tgt_lens, gids, sids
-            try:
-                optimizer.zero_grad(set_to_none=True)
-                import gc; gc.collect()
-                torch.cuda.empty_cache()
-            except Exception:
-                print("  ** CUDA context corrupted after OOM, exiting",
-                      flush=True)
-                sys.exit(1)
-
-            # Retry: split CPU batch in half, run each half separately
-            B = cpu_imgs.shape[0]
-            half = B // 2
-            if half == 0:
-                oom_skipped += 1
-                print(f"  ** OOM at batch {batch_idx+1}/{steps} "
-                      f"(B=1) — skipping [{oom_skipped} this epoch]",
-                      flush=True)
-                del cpu_imgs, cpu_targets, cpu_tgt_lens, cpu_gids, cpu_sids
-                continue
-
-            print(f"  ** OOM at batch {batch_idx+1}/{steps} "
-                  f"(B={B} W={cpu_imgs.shape[3]}) — "
-                  f"retrying as 2×{half}", flush=True)
-            oom_retried += 1
-
-            retry_ok = True
-            for sub_start in (0, half):
-                sub_end = sub_start + half if sub_start == 0 else B
-                s_imgs = cpu_imgs[sub_start:sub_end].to(device)
-                s_targets = cpu_targets[sub_start:sub_end].to(device)
-                s_tgt_lens = cpu_tgt_lens[sub_start:sub_end].to(device)
-                s_gids = cpu_gids[sub_start:sub_end].to(device)
-                s_sids = cpu_sids[sub_start:sub_end].to(device)
-                try:
-                    sub_ctc, sub_lid1, sub_lid2, sub_ace, sub_loss, sub_glogits, sub_slogits = \
-                        _forward_backward(s_imgs, s_targets, s_tgt_lens,
-                                          s_gids, s_sids,
-                                          scale=(sub_end - sub_start) / B)
-                except torch.cuda.OutOfMemoryError:
-                    # Half still OOMs — give up on this batch
-                    del s_imgs, s_targets, s_tgt_lens, s_gids, s_sids
-                    try:
-                        optimizer.zero_grad(set_to_none=True)
-                        torch.cuda.empty_cache()
-                    except Exception:
-                        print("  ** CUDA context corrupted after OOM, exiting",
-                              flush=True)
-                        sys.exit(1)
-                    oom_skipped += 1
-                    print(f"  ** OOM retry also failed — "
-                          f"skipping [{oom_skipped} this epoch]", flush=True)
-                    retry_ok = False
-                    break
-                del s_imgs, s_targets, s_tgt_lens, s_gids, s_sids
-
-            del cpu_imgs, cpu_targets, cpu_tgt_lens, cpu_gids, cpu_sids
-            if not retry_ok:
-                continue
-            # Use last sub-batch values for logging (approximate)
-            ctc_loss, lid1_loss = sub_ctc, sub_lid1
-            lid2_loss, ace_loss, loss = sub_lid2, sub_ace, sub_loss
-            group_logits, script_logits = sub_glogits, sub_slogits
+            optimizer.zero_grad(set_to_none=True)
+            torch.cuda.empty_cache()
+            oom_skipped += 1
+            print(f"  ** OOM at batch {batch_idx+1}/{steps} — "
+                  f"skipping [{oom_skipped} this epoch]", flush=True)
+            continue
 
         if (batch_idx + 1) % grad_accum == 0 or (batch_idx + 1) == len(train_loader):
             scaler.unscale_(base_optimizer)
@@ -631,9 +569,8 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             log_total.zero_()
             log_count = 0
 
-    if oom_retried > 0 or oom_skipped > 0:
-        print(f"  ** OOM: {oom_retried} retried (halved), "
-              f"{oom_skipped} skipped this epoch")
+    if oom_skipped > 0:
+        print(f"  ** OOM: {oom_skipped} batches skipped this epoch")
 
     if n_batches == 0:
         return {}
