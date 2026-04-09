@@ -488,6 +488,7 @@ def save_checkpoint(model, optimizer, scheduler, scaler, epoch, args, save_dir):
     print(f"  Saved: {ckpt_path}")
 
 
+
 # ---------------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------------
@@ -496,7 +497,8 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                     ce_loss_fn, device, device_type, use_amp, amp_dtype,
                     epoch, total_epochs, grad_accum, log_interval,
                     lid1_weight, routing_penalty, group_script_vocabs,
-                    detach_for_experts=False, align_ce_weight=0.0):
+                    detach_for_experts=False, align_ce_weight=0.0,
+                    save_dir=None, args=None):
     model.train()
     n_batches = 0
     oom_skipped = 0
@@ -626,6 +628,10 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         n_batches += 1
         log_count += 1
         _t_data = time.time()
+
+        if save_dir and n_batches % 500 == 0:
+            save_checkpoint(model, optimizer, scheduler, scaler,
+                            epoch, args, save_dir)
 
         if n_batches % log_interval == 0:
             avg_ctc = log_ctc.item() / log_count
@@ -798,7 +804,8 @@ def main():
             routing_penalty=args.routing_penalty,
             group_script_vocabs=data["group_script_vocab_sizes"],
             detach_for_experts=detach,
-            align_ce_weight=args.align_ce_weight)
+            align_ce_weight=args.align_ce_weight,
+            save_dir=save_dir, args=args)
 
         elapsed = time.time() - t0
         if metrics:
