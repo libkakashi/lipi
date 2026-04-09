@@ -471,7 +471,8 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             loss = loss / grad_accum
 
         scaler.scale(loss).backward()
-        return ctc_loss, lid1_loss, lid2_loss, ace_loss, loss
+        return (ctc_loss, lid1_loss, lid2_loss, ace_loss, loss,
+                out["group_logits"].detach(), out["script_logits_per_group"])
 
     for batch_idx, (imgs, targets, tgt_lens, gids, sids, _labels) in enumerate(train_loader):
         if batch_idx < 5:
@@ -489,7 +490,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         sids = sids.to(device, non_blocking=True)
 
         try:
-            ctc_loss, lid1_loss, lid2_loss, ace_loss, loss = \
+            ctc_loss, lid1_loss, lid2_loss, ace_loss, loss, group_logits, script_logits = \
                 _forward_backward(imgs, targets, tgt_lens, gids, sids, scale=1.0)
         except torch.cuda.OutOfMemoryError:
             # Clean up the failed forward/backward
@@ -527,7 +528,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                 s_gids = cpu_gids[sub_start:sub_end].to(device)
                 s_sids = cpu_sids[sub_start:sub_end].to(device)
                 try:
-                    sub_ctc, sub_lid1, sub_lid2, sub_ace, sub_loss = \
+                    sub_ctc, sub_lid1, sub_lid2, sub_ace, sub_loss, sub_glogits, sub_slogits = \
                         _forward_backward(s_imgs, s_targets, s_tgt_lens,
                                           s_gids, s_sids,
                                           scale=(sub_end - sub_start) / B)
@@ -551,9 +552,10 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             del cpu_imgs, cpu_targets, cpu_tgt_lens, cpu_gids, cpu_sids
             if not retry_ok:
                 continue
-            # Use last sub-batch losses for logging (approximate)
+            # Use last sub-batch values for logging (approximate)
             ctc_loss, lid1_loss = sub_ctc, sub_lid1
             lid2_loss, ace_loss, loss = sub_lid2, sub_ace, sub_loss
+            group_logits, script_logits = sub_glogits, sub_slogits
 
         if (batch_idx + 1) % grad_accum == 0 or (batch_idx + 1) == len(train_loader):
             scaler.unscale_(base_optimizer)
@@ -589,15 +591,15 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             avg_lid2 = log_lid2.item() / log_count
             avg_ace = log_ace.item() / log_count
             avg_total = log_total.item() / log_count
-            # LID-1 accuracy (predicted vs ground truth)
-            pred_gids = out["group_logits"].argmax(-1)
+            # LID-1 accuracy (predicted vs ground truth, last batch only)
+            pred_gids = group_logits.argmax(-1)
             lid1_acc = (pred_gids == gids).float().mean().item() * 100
             # LID-2 accuracy (all samples in multi-script groups)
             lid2_correct = 0
             lid2_total = 0
-            for _g, script_logits, group_mask in out["script_logits_per_group"]:
-                if script_logits is not None:
-                    pred = script_logits.argmax(-1)
+            for _g, sl, group_mask in script_logits:
+                if sl is not None:
+                    pred = sl.argmax(-1)
                     true = sids[group_mask]
                     lid2_correct += (pred == true).sum().item()
                     lid2_total += true.shape[0]

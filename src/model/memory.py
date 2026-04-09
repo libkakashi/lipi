@@ -6,7 +6,7 @@ at each stage of the encoder.
 """
 
 def estimate_pixel_budget(model, vram_gb: float = 32,
-                          margin: float = 0.75) -> int:
+                          margin: float = 0.65) -> int:
     """Estimate max pixel budget (B*W) from model architecture and VRAM.
 
     Memory accounting per component:
