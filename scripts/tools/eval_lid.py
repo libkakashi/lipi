@@ -23,7 +23,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.model.lid import SCRIPT_TO_GROUP, LIDCoarse
 from src.model.stem import ResNetStem
 from src.model.attention import SWABlock
-from src.data.color import ColorProjection
 from src.training.dataloader import (
     load_shards, build_script_tokenizers, encode_labels,
     remap_ids, MoEDataset, collate_moe,
@@ -34,7 +33,6 @@ class SharedEncoder(torch.nn.Module):
     def __init__(self, dim, num_groups):
         super().__init__()
         shared_dim = dim // 2
-        self.color_proj = ColorProjection()
         self.stem = ResNetStem(out_channels=shared_dim)
         self.shared_swa = torch.nn.ModuleList()
         for i in range(4):
@@ -50,7 +48,7 @@ class SharedEncoder(torch.nn.Module):
         self.lid_coarse = LIDCoarse(in_channels=shared_dim, num_groups=num_groups)
 
     def forward(self, images):
-        x = self.color_proj(images)
+        x = images.float() / 255.0 if images.dtype == torch.uint8 else images
         x = self.stem(x)
         _, C, h, w = x.shape
         B = x.shape[0]

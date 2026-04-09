@@ -3,8 +3,7 @@ Lipi MoE Vision Encoder.
 
 Architecture:
     Input: (B, 2, 32, W) — L+a from rgb_to_input
-    -> ColorProjection: L+a → 1ch
-    -> ResNet Stem: stride 2×2, out=dim/2        → (B, dim/2, 16, W/2)
+    -> ResNet Stem: L+a → dim/2, stride 2×2      → (B, dim/2, 16, W/2)
     -> Shared SWA: 4× 8×8 + 2× 8×32, dim/2      (h=16, w=W/2)
     -> LID-1: 13-group classification
     -> Expert Pool 1: height 16→8, width ÷2      (h=8, w=W/4)
@@ -22,7 +21,6 @@ import torch.nn as nn
 import torch.utils.checkpoint as ckpt_util
 from torch import Tensor
 
-from src.data.color import ColorProjection
 from src.model.stem import ResNetStem
 from src.model.pooling import ExpertPooling
 from src.model.attention import SWABlock, FullyExpertSWABlock
@@ -133,10 +131,7 @@ class LipiMoEEncoder(nn.Module):
         super().__init__()
         self.num_groups = num_groups
 
-        # Color projection
-        self.color_proj = ColorProjection()
-
-        # Stem outputs shared_dim directly
+        # Stem takes L+a (2ch) directly, outputs shared_dim
         shared_dim = dim // 2
         self.stem = ResNetStem(out_channels=shared_dim)
 
@@ -221,8 +216,8 @@ class LipiMoEEncoder(nn.Module):
     ) -> dict:
         B = images.shape[0]
 
-        # Color projection
-        x = self.color_proj(images)
+        # Dequantize uint8 L+a input if needed
+        x = images.float() / 255.0 if images.dtype == torch.uint8 else images
 
         # Stem
         x = self.stem(x)

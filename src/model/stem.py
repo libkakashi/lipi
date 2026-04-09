@@ -8,7 +8,6 @@ Expands 1ch → 64 → out_channels with two strided convs + ResBlocks.
 import torch.nn as nn
 from torch import Tensor
 
-from src.data.color import INPUT_CHANNELS
 
 
 
@@ -42,7 +41,7 @@ class ResNetStem(nn.Module):
       ResBlock out_channels              (refine)
     """
 
-    def __init__(self, in_channels: int = INPUT_CHANNELS, out_channels: int = 128):
+    def __init__(self, in_channels: int = 2, out_channels: int = 128):
         super().__init__()
         self.layers = nn.Sequential(
             # Downsample 2× height, expand channels
