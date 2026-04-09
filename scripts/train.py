@@ -303,8 +303,9 @@ def resume_from_checkpoint(args, model, optimizer, base_optimizer, scaler, sched
             new_k = f"shared_swa.{idx + n_4x4}.{rest}"
             model_state[new_k] = model_state.pop(k)
             remapped += 1
-        elif k.startswith("proj_shared."):
-            model_state[k.replace("proj_shared.", "proj_stem.", 1)] = model_state.pop(k)
+        elif k.startswith(("proj_shared.", "proj_stem.")):
+            # proj_stem removed — stem outputs shared_dim directly
+            model_state.pop(k)
             remapped += 1
     if remapped:
         print(f"  Remapped {remapped} legacy checkpoint keys")

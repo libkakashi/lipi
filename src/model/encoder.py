@@ -4,7 +4,7 @@ Lipi MoE Vision Encoder.
 Architecture:
     Input: (B, 2, 32, W) — L+a from rgb_to_input
     -> ColorProjection: L+a → 1ch
-    -> ResNet Stem: 1→64ch, stride 2×2          → (B, 64, 16, W/2)
+    -> ResNet Stem: stride 2×2, out=dim/2        → (B, dim/2, 16, W/2)
     -> Shared SWA: 4× 8×8 + 2× 8×32, dim/2      (h=16, w=W/2)
     -> LID-1: 13-group classification
     -> Expert Pool 1: height 16→8, width ÷2      (h=8, w=W/4)
@@ -136,10 +136,9 @@ class LipiMoEEncoder(nn.Module):
         # Color projection
         self.color_proj = ColorProjection()
 
-        # Stem
+        # Stem outputs shared_dim directly
         shared_dim = dim // 2
-        self.stem = ResNetStem(out_channels=64, depth=3)
-        self.proj_stem = nn.Linear(64, shared_dim)
+        self.stem = ResNetStem(out_channels=shared_dim)
 
         # Shared SWA: 4× 8×8 (local) + 2× 8×32 (wide context) at shared_dim
         self.shared_swa = nn.ModuleList()
@@ -229,9 +228,8 @@ class LipiMoEEncoder(nn.Module):
         x = self.stem(x)
         _, C, h, w = x.shape
 
-        # Reshape + project
+        # Reshape to sequence
         x = x.permute(0, 2, 3, 1).reshape(B, h * w, C)
-        x = self.proj_stem(x)
 
         # Shared SWA
         for block in self.shared_swa:

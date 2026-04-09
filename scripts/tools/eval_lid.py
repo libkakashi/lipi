@@ -35,8 +35,7 @@ class SharedEncoder(torch.nn.Module):
         super().__init__()
         shared_dim = dim // 2
         self.color_proj = ColorProjection()
-        self.stem = ResNetStem(out_channels=64, depth=3)
-        self.proj_stem = torch.nn.Linear(64, shared_dim)
+        self.stem = ResNetStem(out_channels=shared_dim)
         self.shared_swa = torch.nn.ModuleList()
         for i in range(4):
             self.shared_swa.append(
@@ -56,7 +55,6 @@ class SharedEncoder(torch.nn.Module):
         _, C, h, w = x.shape
         B = x.shape[0]
         x = x.permute(0, 2, 3, 1).reshape(B, h * w, C)
-        x = self.proj_stem(x)
         for block in self.shared_swa:
             x = block(x, h=h, w=w)
         return self.lid_coarse.forward_seq(x)
@@ -136,8 +134,9 @@ def main():
             idx = int(k.split(".")[1])
             rest = ".".join(k.split(".")[2:])
             ckpt_state[f"shared_swa.{idx + n_4x4}.{rest}"] = ckpt_state.pop(k)
-        elif k.startswith("proj_shared."):
-            ckpt_state[k.replace("proj_shared.", "proj_stem.", 1)] = ckpt_state.pop(k)
+        elif k.startswith(("proj_shared.", "proj_stem.")):
+            # proj_stem removed — stem outputs shared_dim directly
+            ckpt_state.pop(k)
     loaded = 0
     for k in model_state:
         if k in ckpt_state and ckpt_state[k].shape == model_state[k].shape:

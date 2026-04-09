@@ -54,10 +54,9 @@ Single `dim` parameter controls all layer widths. Default: 256.
 
 ```
 ColorProjection:     Conv2d(2->32->16->1, 1x1)
-ResNet Stem:         depth=3, 64ch, stride 2x2
-  -> proj_stem:      Linear(64, dim)
-Shared SWA 8x8:     4 blocks, dim
-Shared SWA 8x32:    2 blocks, dim
+ResNet Stem:         stride 2x2, outputs dim/2 directly
+Shared SWA 8x8:     4 blocks, dim/2
+Shared SWA 8x32:    2 blocks, dim/2
 LID-1 Classifier:   attn pool -> MLP (dim -> 13 groups)
 ```
 
