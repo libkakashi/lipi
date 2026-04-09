@@ -471,8 +471,13 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             loss = loss / grad_accum
 
         scaler.scale(loss).backward()
+        # Detach logits for logging — prevents autograd graph from leaking
+        detached_script_logits = [
+            (g, sl.detach() if sl is not None else None, m.detach())
+            for g, sl, m in out["script_logits_per_group"]
+        ]
         return (ctc_loss, lid1_loss, lid2_loss, ace_loss, loss,
-                out["group_logits"].detach(), out["script_logits_per_group"])
+                out["group_logits"].detach(), detached_script_logits)
 
     for batch_idx, (imgs, targets, tgt_lens, gids, sids, _labels) in enumerate(train_loader):
         if batch_idx < 5:
