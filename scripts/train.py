@@ -180,6 +180,18 @@ def load_and_prepare_data(args, device):
         active_groups=active_groups)
     print(f"  Train: {len(train_dataset)}, Val: {len(val_dataset)}")
 
+    # Log per-script sample counts from val set
+    from collections import Counter
+    val_script_counts = Counter()
+    for i in range(min(len(val_dataset), 20000)):
+        sample = val_dataset._ds[i]
+        sid = int(sample["script_id"])
+        val_script_counts[sid] += 1
+    print("  Val script distribution:")
+    for sid, count in sorted(val_script_counts.items()):
+        sname = all_scripts[sid] if sid < len(all_scripts) else f"id={sid}"
+        print(f"    {sname:<18s} {count:>6d}")
+
 
     train_widths = np.load(str(Path(train_dir) / "widths.npy"))
 
