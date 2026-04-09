@@ -717,6 +717,8 @@ def main():
         save_checkpoint(model, opt["optimizer"], opt["scheduler"], opt["scaler"],
                         epoch, args, save_dir)
 
+        # Free training memory before eval
+        torch.cuda.empty_cache()
         print(f"\n  Eval epoch {epoch}:")
         evaluate(model, data["val_loader"], data["group_tokenizers"],
                  data["group_script_names"], data["active_groups"],
