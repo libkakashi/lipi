@@ -585,17 +585,17 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             _t_bwd_total += time.time() - _t_bwd
         except torch.cuda.OutOfMemoryError:
             oom_skipped += 1
-            a = torch.cuda.memory_allocated() / 1e9
-            r = torch.cuda.memory_reserved() / 1e9
             print(f"  ** OOM at batch {batch_idx+1}/{steps} "
                   f"(B={imgs.shape[0]} W={imgs.shape[3]}) — "
-                  f"skipping [{a:.1f}GB alloc, {r:.1f}GB reserved, "
-                  f"{oom_skipped} skipped this epoch]", flush=True)
+                  f"skipping [{oom_skipped} this epoch]", flush=True)
+            # Free python references first, then try CUDA cleanup.
+            # If CUDA context is corrupted, exit immediately — further
+            # CUDA ops can crash the driver and kill the GPU.
             del imgs, targets, tgt_lens, gids, sids
             try:
                 optimizer.zero_grad(set_to_none=True)
                 torch.cuda.empty_cache()
-            except RuntimeError:
+            except Exception:
                 print("  ** CUDA context corrupted after OOM, exiting",
                       flush=True)
                 sys.exit(1)
