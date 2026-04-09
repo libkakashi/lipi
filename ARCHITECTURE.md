@@ -10,8 +10,8 @@ Takes a cropped word image and outputs the text. Script identification and chara
 
 ```
 Word Image (32 x W x 3)
-  -> Color Projection (RGB -> L+a -> 1ch)
-  -> ResNet Stem (stride 2x2, 64ch)        -> (h=16, w=W/2)
+  -> RGB to L+a (preprocessing, 2ch)
+  -> ResNet Stem (L+a -> dim/2, stride 2x2) -> (h=16, w=W/2)
   -> Shared SWA (4x 8x8 + 2x 8x32, dim)   <- universal visual features
   -> LID-1 (13-group classifier)            <- which script family?
   -> Expert Pool 1 (16->8, width /2)        -> (h=8, w=W/4)
@@ -53,11 +53,10 @@ Single `dim` parameter controls all layer widths. Default: 256.
 ### Shared Path (always active)
 
 ```
-ColorProjection:     Conv2d(2->32->16->1, 1x1)
-ResNet Stem:         stride 2x2, outputs dim/2 directly
+ResNet Stem:         L+a (2ch) -> dim/2, stride 2x2
 Shared SWA 8x8:     4 blocks, dim/2
 Shared SWA 8x32:    2 blocks, dim/2
-LID-1 Classifier:   attn pool -> MLP (dim -> 13 groups)
+LID-1 Classifier:   attn pool -> MLP (dim/2 -> 13 groups)
 ```
 
 ### Expert Path (1 of 13 active per sample)
@@ -159,7 +158,7 @@ src/
     frozen_vocabs/      Pre-built vocab files per script
   data/
     augmentation.py     24 augmentation ops
-    color.py            L+a color projection
+    color.py            RGB to L+a conversion
     dataset.py          Dataset classes
     fonts.py            Font discovery, cmap validation
     rendering.py        Word/char rendering, ink detection

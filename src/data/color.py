@@ -1,20 +1,16 @@
 """
 Color space conversion for model input.
 
-Pipeline: RGB → fixed L+a (2ch) → learned correction (2→1ch) → stem
+Pipeline: RGB → L+a (2ch) → stem directly
 
-The fixed L+a gives a proven-good encoding. The learned correction
-compresses it to 1 channel, learning the optimal way to combine
-luminance and chrominance for OCR. Zero-initialized so it starts
-as simple averaging of L and a.
+The L+a encoding separates luminance from chrominance, which is what
+matters for OCR — text is defined by contrast. The stem's first conv
+learns to combine the 2 channels optimally.
 """
 
 import numpy as np
 import torch
-import torch.nn as nn
 from PIL import Image
-
-INPUT_CHANNELS = 1  # stem sees 1 channel
 
 
 def _srgb_to_linear(arr: np.ndarray) -> np.ndarray:
@@ -36,30 +32,7 @@ def rgb_to_input(img: Image.Image) -> torch.Tensor:
     fx, fy = f(x / xn), f(y / yn)
     L = (116 * fy - 16) / 100.0
     a = (500 * (fx - fy) + 128) / 255.0
-    # Quantize to uint8 for 4× smaller shards; dequantize with dequantize_input()
+    # Quantize to uint8 for 4× smaller shards; dequantize with float() / 255.0
     L_u8 = np.clip(L * 255, 0, 255).astype(np.uint8)
     a_u8 = np.clip(a * 255, 0, 255).astype(np.uint8)
     return torch.tensor(np.stack([L_u8, a_u8], axis=0), dtype=torch.uint8)
-
-
-class ColorProjection(nn.Module):
-    """Learned 2→1 projection on top of fixed L+a.
-
-    Takes L+a (2ch), learns optimal compression to 1 channel.
-    """
-
-    def __init__(self, hidden: int = 32):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(2, hidden, kernel_size=1),
-            nn.GELU(),
-            nn.Conv2d(hidden, hidden // 2, kernel_size=1),
-            nn.GELU(),
-            nn.Conv2d(hidden // 2, 1, kernel_size=1),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """(B, 2, H, W) → (B, 1, H, W). Accepts uint8 or float32 input."""
-        if x.dtype == torch.uint8:
-            x = x.float() / 255.0
-        return self.net(x)

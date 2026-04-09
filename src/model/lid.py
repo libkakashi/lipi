@@ -146,8 +146,7 @@ GROUP_SCRIPTS = {
 class LIDCoarse(nn.Module):
     """LID-1: Coarse group classifier with learned spatial projection.
 
-    Learns a direct projection from T spatial positions to 1, similar
-    to how ColorProjection reduces 2 channels to 1. No softmax
+    Learns a direct projection from T spatial positions to 1. No softmax
     bottleneck — gradient flows directly through linear layers.
 
     Operates on (B, C, T) via 1D convolutions with groups=C, so each
