@@ -178,26 +178,28 @@ def load_and_prepare_data(args, device):
     val_dataset = LipiStreamingDataset(
         local=val_dir, active_scripts=all_scripts,
         active_groups=active_groups)
-    print(f"  Train: {len(train_dataset)}, Val: {len(val_dataset)}")
+    print(f"  Train: {len(train_dataset)}, Val (full): {len(val_dataset)}")
 
-    # Log per-script sample counts from val set
+    # Subsample val to 500 per script for fast, balanced eval
     from collections import Counter
-    val_script_counts = Counter()
-    for i in range(min(len(val_dataset), 20000)):
-        sample = val_dataset._ds[i]
-        sid = int(sample["script_id"])
-        val_script_counts[sid] += 1
-    print("  Val script distribution:")
-    for sid, count in sorted(val_script_counts.items()):
+    max_per_script = 500
+    script_counts = Counter()
+    val_indices = []
+    for i in range(len(val_dataset)):
+        sid = int(val_dataset._ds[i]["script_id"])
+        if script_counts[sid] < max_per_script:
+            val_indices.append(i)
+            script_counts[sid] += 1
+    val_subset = torch.utils.data.Subset(val_dataset, val_indices)
+    print(f"  Val (subsampled): {len(val_subset)} ({max_per_script}/script)")
+    for sid, count in sorted(script_counts.items()):
         sname = all_scripts[sid] if sid < len(all_scripts) else f"id={sid}"
         print(f"    {sname:<18s} {count:>6d}")
 
-
     train_widths = np.load(str(Path(train_dir) / "widths.npy"))
 
-    # Eval uses more memory (no gradient checkpointing), so cap batch size
     eval_batch_size = min(args.batch_size, 128)
-    val_loader = DataLoader(val_dataset, batch_size=eval_batch_size, shuffle=True,
+    val_loader = DataLoader(val_subset, batch_size=eval_batch_size, shuffle=True,
                             collate_fn=collate_moe,
                             pin_memory=(device_type == "cuda"))
 

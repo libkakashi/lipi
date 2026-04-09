@@ -14,7 +14,7 @@ from src.encoding.decompose import decode_ids, script_vocab_size
 @torch.no_grad()
 def evaluate(model, val_loader, group_tokenizers, group_script_names,
              active_groups, device, device_type, use_amp, amp_dtype,
-             group_script_vocab_sizes=None, max_batches=50):
+             group_script_vocab_sizes=None):
     model.eval()
     n_groups = len(group_tokenizers)
 
@@ -40,8 +40,6 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
     s_lid2_total: dict[tuple[int, int], int] = {}
 
     for batch_idx, batch in enumerate(val_loader):
-        if batch_idx >= max_batches:
-            break
         imgs, targets, tgt_lens, gids, sids, labels = batch
         imgs = imgs.to(device, non_blocking=True)
         gids = gids.to(device, non_blocking=True)

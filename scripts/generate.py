@@ -397,6 +397,8 @@ MDS_COLUMNS = {
 }
 
 
+_MAX_VAL_PER_SCRIPT = 500  # Set from args before workers spawn
+
 def save_mds_samples(images, labels, script, train_dir, val_dir, chunk_id):
     """Write samples directly to train/val MDS splits. No merge needed."""
     if not images:
@@ -418,6 +420,7 @@ def save_mds_samples(images, labels, script, train_dir, val_dir, chunk_id):
     Path(v_dir).mkdir(parents=True, exist_ok=True)
 
     train_widths, val_widths = [], []
+    val_count = 0
     with MDSWriter(out=t_dir, columns=MDS_COLUMNS, size_limit=1 << 26) as tw, \
          MDSWriter(out=v_dir, columns=MDS_COLUMNS, size_limit=1 << 26) as vw:
         for idx, (img_tensor, label, ids) in enumerate(zip(images, labels, encoded)):
@@ -433,9 +436,10 @@ def save_mds_samples(images, labels, script, train_dir, val_dir, chunk_id):
                 "width": img_np.shape[2],
             }
             h = int(hashlib.md5(f"{chunk_id}_{idx}_{label}".encode()).hexdigest(), 16)
-            if h % 1000 < 100:  # 10% val
+            if h % 1000 < 100 and val_count < _MAX_VAL_PER_SCRIPT:  # 10% val, capped
                 vw.write(sample)
                 val_widths.append(img_np.shape[2])
+                val_count += 1
             else:
                 tw.write(sample)
                 train_widths.append(img_np.shape[2])
@@ -450,6 +454,8 @@ def save_mds_samples(images, labels, script, train_dir, val_dir, chunk_id):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate training data")
     parser.add_argument("--samples-per-script", type=int, default=10000)
+    parser.add_argument("--val-samples-per-script", type=int, default=500,
+                        help="Max val samples per script (default: 500)")
     parser.add_argument("--scripts", type=str, default="all")
     parser.add_argument("--balance-groups", action="store_true")
     parser.add_argument("--vocab-proportional", action="store_true",
@@ -740,7 +746,9 @@ def _generate_char_batch(args_tuple):
 # ---------------------------------------------------------------------------
 
 def main():
+    global _MAX_VAL_PER_SCRIPT
     args = parse_args()
+    _MAX_VAL_PER_SCRIPT = args.val_samples_per_script
 
     active_scripts = (list(SCRIPTS) if args.scripts == "all"
                       else [s.strip() for s in args.scripts.split(",")])

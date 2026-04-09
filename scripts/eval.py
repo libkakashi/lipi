@@ -33,7 +33,6 @@ def main():
     parser.add_argument("--resume", type=str, required=True)
     parser.add_argument("--dim", type=int, default=256)
     parser.add_argument("--batch-size", type=int, default=200)
-    parser.add_argument("--max-batches", type=int, default=50)
     parser.add_argument("--device", type=str, default="auto")
     args = parser.parse_args()
 
@@ -62,10 +61,21 @@ def main():
     val_dataset = LipiStreamingDataset(
         local=val_dir, active_scripts=all_scripts,
         active_groups=active_groups)
-    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False,
+    # Subsample to 500 per script for balanced eval
+    from collections import Counter
+    max_per_script = 500
+    script_counts = Counter()
+    val_indices = []
+    for i in range(len(val_dataset)):
+        sid = int(val_dataset._ds[i]["script_id"])
+        if script_counts[sid] < max_per_script:
+            val_indices.append(i)
+            script_counts[sid] += 1
+    val_subset = torch.utils.data.Subset(val_dataset, val_indices)
+    val_loader = DataLoader(val_subset, batch_size=args.batch_size, shuffle=True,
                             collate_fn=collate_moe,
                             pin_memory=(device_type == "cuda"))
-    print(f"Val samples: {len(val_dataset)}")
+    print(f"Val samples: {len(val_subset)} ({max_per_script}/script from {len(val_dataset)} total)")
 
     # Build model
     model = LipiMoEEncoder(
@@ -112,11 +122,10 @@ def main():
     amp_dtype = torch.bfloat16 if device_type == "cuda" else torch.float16
 
     # Evaluate
-    print(f"\n  Eval ({args.max_batches} batches):")
+    print(f"\n  Eval:")
     evaluate(model, val_loader, group_tokenizers, group_script_names,
              active_groups, device, device_type, use_amp, amp_dtype,
-             group_script_vocab_sizes=group_script_vocab_sizes,
-             max_batches=args.max_batches)
+             group_script_vocab_sizes=group_script_vocab_sizes)
 
 
 if __name__ == "__main__":
