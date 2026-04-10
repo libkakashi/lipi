@@ -77,45 +77,28 @@ def main():
                             pin_memory=(device_type == "cuda"))
     print(f"Val samples: {len(val_subset)} ({max_per_script}/script from {len(val_dataset)} total)")
 
-    # Build model
-    model = LipiMoEEncoder(
-        dim=args.dim,
-        num_groups=n_groups,
-        group_script_vocab_sizes=group_script_vocab_sizes,
-        group_script_names=group_script_names,
-    ).to(device)
-
     # Load checkpoint
     ckpt = torch.load(args.resume, map_location="cpu", weights_only=False)
+
+    # Build model from checkpoint config if available, else use CLI args
+    if "model_config" in ckpt:
+        cfg = ckpt["model_config"]
+        print(f"Using model config from checkpoint: dim={cfg['dim']}")
+        model = LipiMoEEncoder(**cfg).to(device)
+    else:
+        print(f"No model config in checkpoint, using CLI args: dim={args.dim}")
+        model = LipiMoEEncoder(
+            dim=args.dim,
+            num_groups=n_groups,
+            group_script_vocab_sizes=group_script_vocab_sizes,
+            group_script_names=group_script_names,
+        ).to(device)
+
     model_state = ckpt["model"] if "model" in ckpt else ckpt
 
-    # Remap legacy keys
-    n_4x4 = len(set(k.split(".")[1] for k in model_state if k.startswith("shared_swa_4x4.")))
-    for k in list(model_state.keys()):
-        if k.startswith("shared_swa_4x4."):
-            new_k = k.replace("shared_swa_4x4.", "shared_swa.", 1)
-            model_state[new_k] = model_state.pop(k)
-        elif k.startswith("shared_swa_4x16."):
-            idx = int(k.split(".")[1])
-            rest = ".".join(k.split(".")[2:])
-            model_state[f"shared_swa.{idx + n_4x4}.{rest}"] = model_state.pop(k)
-        elif k.startswith(("proj_shared.", "proj_stem.", "color_proj.")):
-            model_state.pop(k)
-
-    # Load with shape matching
-    current = model.state_dict()
-    loaded = 0
-    skipped = []
-    for k in current:
-        if k in model_state and model_state[k].shape == current[k].shape:
-            current[k] = model_state[k]
-            loaded += 1
-        elif k in model_state:
-            skipped.append(f"{k} (shape {model_state[k].shape} vs {current[k].shape})")
-    model.load_state_dict(current)
-    print(f"Loaded {loaded}/{len(current)} tensors from {args.resume}")
-    if skipped:
-        print(f"  Skipped {len(skipped)}: {skipped[:5]}")
+    # Load weights (strict — checkpoint must match model exactly)
+    model.load_state_dict(model_state)
+    print(f"Loaded {len(model_state)} tensors from {args.resume}")
 
     # AMP
     use_amp = device_type in ("cuda", "mps")

@@ -405,6 +405,7 @@ def save_checkpoint(model, optimizer, scheduler, scaler, epoch, args, save_dir):
     ckpt_path = save_dir / f"moe_epoch{epoch}.pt"
     torch.save({
         "model": {k: v.cpu() for k, v in model.state_dict().items()},
+        "model_config": model.config,
         "optimizer": optimizer.state_dict(),
         "scheduler": scheduler.state_dict(),
         "scaler": scaler.state_dict(),

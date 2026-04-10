@@ -130,6 +130,13 @@ class LipiMoEEncoder(nn.Module):
     ):
         super().__init__()
         self.num_groups = num_groups
+        # Save constructor args for checkpoint reconstruction
+        self.config = {
+            "dim": dim,
+            "num_groups": num_groups,
+            "group_script_vocab_sizes": group_script_vocab_sizes,
+            "group_script_names": group_script_names,
+        }
 
         # Stem takes L+a (2ch) directly, outputs shared_dim
         shared_dim = dim // 2
