@@ -48,10 +48,11 @@ def estimate_pixel_budget(model, vram_gb: float = 32) -> int:
     model.train()
     try:
         # Two measurements to separate fixed overhead from per-pixel cost
-        small_pixels = 32 * 128   # B=32, W=128
-        large_pixels = 64 * 192   # B=64, W=192
-        small_bytes = _measure(32, 128)
-        large_bytes = _measure(64, 192)
+        # Use larger batches so expert pool overhead is properly amortized
+        small_pixels = 64 * 160   # B=64, W=160
+        large_pixels = 192 * 256  # B=192, W=256
+        small_bytes = _measure(64, 160)
+        large_bytes = _measure(192, 256)
     finally:
         if not was_training:
             model.eval()
