@@ -32,6 +32,8 @@ def main():
     parser.add_argument("--data", type=str, required=True)
     parser.add_argument("--resume", type=str, required=True)
     parser.add_argument("--dim", type=int, default=256)
+    parser.add_argument("--pool2-width", action="store_true",
+                        help="Use width pooling in pool2 (for old checkpoints with T=W/8)")
     parser.add_argument("--batch-size", type=int, default=200)
     parser.add_argument("--device", type=str, default="auto")
     args = parser.parse_args()
@@ -86,12 +88,13 @@ def main():
         print(f"Using model config from checkpoint: dim={cfg['dim']}")
         model = LipiMoEEncoder(**cfg).to(device)
     else:
-        print(f"No model config in checkpoint, using CLI args: dim={args.dim}")
+        print(f"No model config in checkpoint, using CLI args: dim={args.dim}, pool2_width={args.pool2_width}")
         model = LipiMoEEncoder(
             dim=args.dim,
             num_groups=n_groups,
             group_script_vocab_sizes=group_script_vocab_sizes,
             group_script_names=group_script_names,
+            pool2_width=args.pool2_width,
         ).to(device)
 
     model_state = ckpt["model"] if "model" in ckpt else ckpt
