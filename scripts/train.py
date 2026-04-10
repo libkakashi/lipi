@@ -85,7 +85,7 @@ def parse_args():
                         help="Number of epochs to detach shared→expert gradient. "
                              "LID-1 gets undivided shared encoder, CTC trains experts only.")
     parser.add_argument("--freeze-except", type=str, default=None,
-                        choices=["experts", "experts+ctc", "ctc", "shared"],
+                        choices=["experts", "experts+ctc", "stage2+ctc", "ctc", "shared"],
                         help="Freeze everything except: 'experts' (stage1+stage2 only), "
                              "'experts+ctc' (stage1+stage2+ctc heads+lid2), "
                              "'ctc' (ctc heads only), "
