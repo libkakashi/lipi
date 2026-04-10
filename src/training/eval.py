@@ -11,6 +11,25 @@ from torch import Tensor
 from src.encoding.decompose import decode_ids, script_vocab_size
 
 
+def _edit_distance(a: str, b: str) -> int:
+    """Levenshtein distance between two strings."""
+    if len(a) < len(b):
+        return _edit_distance(b, a)
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a):
+        curr = [i + 1]
+        for j, cb in enumerate(b):
+            curr.append(min(
+                prev[j + 1] + 1,      # deletion
+                curr[j] + 1,           # insertion
+                prev[j] + (ca != cb),  # substitution
+            ))
+        prev = curr
+    return prev[-1]
+
+
 @torch.no_grad()
 def evaluate(model, val_loader, group_tokenizers, group_script_names,
              active_groups, device, device_type, use_amp, amp_dtype,
@@ -126,11 +145,13 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
             ctc_total += 1
             g_word_total[true_g] += 1
             s_word_total[key] = s_word_total.get(key, 0) + 1
-            matched = sum(1 for a, b in zip(dec_s, ref_s) if a == b)
             if dec_s == ref_s:
                 ctc_correct += 1
                 g_word_correct[true_g] += 1
                 s_word_correct[key] = s_word_correct.get(key, 0) + 1
+            # CER via edit distance: correct_chars = ref_len - edit_dist
+            edits = _edit_distance(dec_s, ref_s)
+            matched = max(0, len(ref_s) - edits)
             total_chars += len(ref_s)
             correct_chars += matched
             g_char_total[true_g] += len(ref_s)
