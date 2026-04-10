@@ -9,11 +9,11 @@ Architecture:
     -> Expert Pool 1: height 16→8, width ÷2      (h=8, w=W/4)
     -> Project dim/2 → dim
     -> Expert SWA Stage 1: 4× 8×8, dim           (h=8, w=W/4)
-    -> Expert Pool 2: height 8→4, width ÷2       (h=4, w=W/8)
-    -> Expert SWA Stage 2: 2× 4×4 + 4× 4×16     (h=4, w=W/8)
-    -> Fold h=4 into channels → (B, W/8, dim*4)
+    -> Expert Pool 2: height 8→4 (no width pool)  (h=4, w=W/4)
+    -> Expert SWA Stage 2: 2× 4×4 + 4× 4×16     (h=4, w=W/4)
+    -> Fold h=4 into channels → (B, W/4, dim*4)
     -> LayerNorm
-    -> LID-2 + Per-script CTC heads (T=W/8)
+    -> LID-2 + Per-script CTC heads (T=W/4)
 """
 
 import torch
@@ -165,8 +165,9 @@ class LipiMoEEncoder(nn.Module):
             for i in range(4)
         ])
 
-        # Expert Pool 2: height 8→4, width ÷2
-        self.pool2 = ExpertPooling(channels=dim, h_in=8, h_out=4, num_groups=num_groups)
+        # Expert Pool 2: height 8→4, width unchanged
+        self.pool2 = ExpertPooling(channels=dim, h_in=8, h_out=4, num_groups=num_groups,
+                                   pool_width=False)
 
         # Expert SWA Stage 2: 2× 4×4 (per-char) + 4× 4×16 (wide)
         self.stage2 = nn.ModuleList()

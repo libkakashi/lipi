@@ -16,11 +16,11 @@ Word Image (32 x W x 3)
   -> LID-1 (13-group classifier)            <- which script family?
   -> Expert Pool 1 (16->8, width /2)        -> (h=8, w=W/4)
   -> Expert SWA Stage 1 (4x 8x8)           <- group-specific features
-  -> Expert Pool 2 (8->4, width /2)         -> (h=4, w=W/8)
+  -> Expert Pool 2 (8->4, height only)       -> (h=4, w=W/4)
   -> Expert SWA Stage 2 (2x 4x4 + 4x 4x16) <- deep group-specific features
-  -> Fold h=4 into channels                 -> (T=W/8, dim*4)
+  -> Fold h=4 into channels                 -> (T=W/4, dim*4)
   -> LID-2 (per-script classifier)          <- which exact script?
-  -> Per-Script CTC Head (T=W/8)            <- character sequence
+  -> Per-Script CTC Head (T=W/4)            <- character sequence
   -> Output: decoded text
 ```
 
@@ -64,8 +64,8 @@ LID-1 Classifier:   attn pool -> MLP (dim/2 -> 13 groups)
 ```
 Expert Pool 1:       per-group LearnedHeightPooling (16->8) + Conv1d width pool (stride 2)
 Expert SWA Stage 1:  4 FullyExpertSWABlock, 8x8 windows, dim     (h=8, w=W/4)
-Expert Pool 2:       per-group LearnedHeightPooling (8->4) + Conv1d width pool (stride 2)
-Expert SWA Stage 2:  2 FullyExpertSWABlock 4x4 + 4 FullyExpertSWABlock 4x16, dim  (h=4, w=W/8)
+Expert Pool 2:       per-group LearnedHeightPooling (8->4), no width pool
+Expert SWA Stage 2:  2 FullyExpertSWABlock 4x4 + 4 FullyExpertSWABlock 4x16, dim  (h=4, w=W/4)
 Fold:                h=4 into channels -> dim*4
 LayerNorm:           dim*4
 ```

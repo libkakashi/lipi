@@ -74,25 +74,30 @@ class ExpertPooling(nn.Module):
     Routes samples by group_ids, pools independently, scatters back.
     """
 
-    def __init__(self, channels: int, h_in: int, h_out: int, num_groups: int):
+    def __init__(self, channels: int, h_in: int, h_out: int, num_groups: int,
+                 pool_width: bool = True):
         super().__init__()
         self.num_groups = num_groups
         self.h_in = h_in
         self.h_out = h_out
         self.channels = channels
+        self.pool_width = pool_width
 
         self.height_pools = nn.ModuleList([
             LearnedHeightPooling(channels, h_in, h_out)
             for _ in range(num_groups)
         ])
-        self.width_pools = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv1d(channels, channels, kernel_size=3, stride=2, padding=1),
-                nn.GroupNorm(1, channels),
-                nn.GELU(),
-            )
-            for _ in range(num_groups)
-        ])
+        if pool_width:
+            self.width_pools = nn.ModuleList([
+                nn.Sequential(
+                    nn.Conv1d(channels, channels, kernel_size=3, stride=2, padding=1),
+                    nn.GroupNorm(1, channels),
+                    nn.GELU(),
+                )
+                for _ in range(num_groups)
+            ])
+        else:
+            self.width_pools = None
 
     def forward(self, x: Tensor, h: int, w: int, group_ids: Tensor
                 ) -> tuple[Tensor, int, int]:
@@ -126,27 +131,28 @@ class ExpertPooling(nn.Module):
 
         h_out = self.h_out
 
-        # Width pool: reshape to (B*h_out, C, w) for Conv1d
-        x_flat = h_pooled.reshape(B * h_out, C, w)
-        # All groups produce the same w_out (stride=2), so we can batch the reshape
-        # but need per-group Conv1d weights
-        w_pooled_flat = torch.empty(B * h_out, C, (w + 1) // 2, device=x.device, dtype=x.dtype)
+        if self.pool_width:
+            # Width pool: reshape to (B*h_out, C, w) for Conv1d
+            x_flat = h_pooled.reshape(B * h_out, C, w)
+            w_pooled_flat = torch.empty(B * h_out, C, (w + 1) // 2, device=x.device, dtype=x.dtype)
 
-        start = 0
-        for g in range(self.num_groups):
-            n = counts[g]
-            end = start + n
-            if n > 0:
-                # Each sample has h_out rows in the flattened tensor
-                flat_s = start * h_out
-                flat_e = end * h_out
-                w_pooled_flat[flat_s:flat_e] = self.width_pools[g](x_flat[flat_s:flat_e])
-            start = end
+            start = 0
+            for g in range(self.num_groups):
+                n = counts[g]
+                end = start + n
+                if n > 0:
+                    flat_s = start * h_out
+                    flat_e = end * h_out
+                    w_pooled_flat[flat_s:flat_e] = self.width_pools[g](x_flat[flat_s:flat_e])
+                start = end
 
-        w_out = w_pooled_flat.shape[2]
+            w_out = w_pooled_flat.shape[2]
+            x_out = w_pooled_flat.reshape(B, h_out, C, w_out)
+        else:
+            w_out = w
+            x_out = h_pooled
 
         # Reshape back to (B, h_out*w_out, C) and unsort
-        x_out = w_pooled_flat.reshape(B, h_out, C, w_out)
         x_out = x_out.permute(0, 1, 3, 2).reshape(B, h_out * w_out, C)
         x_out = x_out[sorted_idx.argsort()]
 
