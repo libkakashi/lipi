@@ -6,6 +6,7 @@ per-group and per-script.
 """
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 
 from src.encoding.decompose import decode_ids, script_vocab_size
@@ -37,6 +38,11 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
     model.eval()
     n_groups = len(group_tokenizers)
 
+    # Val loss accumulators
+    val_ctc_loss = 0.0
+    val_lid1_loss = 0.0
+    val_loss_samples = 0
+
     # Global stats
     lid1_correct = lid1_total = 0
     lid2_correct = lid2_total = 0
@@ -64,8 +70,42 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
         gids = gids.to(device, non_blocking=True)
         sids_dev = sids.to(device, non_blocking=True)
 
+        targets = targets.to(device, non_blocking=True)
+        tgt_lens = tgt_lens.to(device, non_blocking=True)
+
         with torch.amp.autocast(device_type, enabled=use_amp, dtype=amp_dtype):
             out = model(imgs, group_ids=None)
+            # Also run with ground truth routing to compute val loss
+            out_gt = model(imgs, group_ids=gids, script_ids=sids_dev)
+
+        # Val CTC loss (with ground truth routing, same as training)
+        B = imgs.shape[0]
+        ctc_ok = (tgt_lens <= out_gt["lengths"]) & (tgt_lens > 0)
+        if group_script_vocab_sizes and ctc_ok.any():
+            for g, script_vocabs in enumerate(group_script_vocab_sizes):
+                for s, vs in enumerate(script_vocabs):
+                    s_mask = ctc_ok & (gids == g) & (sids_dev == s)
+                    if not s_mask.any():
+                        continue
+                    s_logits = out_gt["logits"][s_mask]
+                    s_log_probs = (s_logits[:, :, :vs].float()
+                                   .log_softmax(dim=-1).permute(1, 0, 2))
+                    s_tgt_lens = tgt_lens[s_mask]
+                    s_targets_2d = targets[s_mask]
+                    col_idx = torch.arange(s_targets_2d.shape[1], device=device)
+                    s_targets_flat = s_targets_2d[col_idx < s_tgt_lens.unsqueeze(1)]
+                    ctc_l = F.ctc_loss(
+                        s_log_probs, s_targets_flat,
+                        out_gt["lengths"][s_mask], s_tgt_lens,
+                        blank=0, reduction="sum", zero_infinity=True)
+                    val_ctc_loss += ctc_l.item()
+                    val_loss_samples += s_tgt_lens.sum().item()
+
+        # Val LID-1 loss
+        val_lid1_loss += F.cross_entropy(
+            out_gt["group_logits"], gids, reduction="sum").item()
+
+        del out_gt
 
         # LID-1
         pred_gids = out["group_logits"].argmax(-1)
@@ -165,9 +205,13 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
     ctc_acc = 100 * ctc_correct / max(ctc_total, 1)
     char_acc = 100 * correct_chars / max(total_chars, 1)
 
+    avg_ctc_loss = val_ctc_loss / max(val_loss_samples, 1)
+    avg_lid1_loss = val_lid1_loss / max(lid1_total, 1)
+
     print(f"\n  ┌──────────────────────────────────────────────┐")
     print(f"  │  LID-1: {lid1_acc:5.1f}%   LID-2: {lid2_acc:5.1f}%              │")
     print(f"  │  Word:  {ctc_acc:5.1f}%   Char:  {char_acc:5.1f}%              │")
+    print(f"  │  Val loss: ctc={avg_ctc_loss:.4f}  lid1={avg_lid1_loss:.4f}     │")
     print(f"  └──────────────────────────────────────────────┘")
 
     print(f"\n  {'Group / Script':<20s} {'LID1':>6s} {'Word':>6s} {'Char':>6s} {'LID2':>6s}")
@@ -197,4 +241,5 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
     print(f"  {'─' * 50}")
 
     return {"lid1_acc": lid1_acc, "lid2_acc": lid2_acc,
-            "word_acc": ctc_acc, "char_acc": char_acc}
+            "word_acc": ctc_acc, "char_acc": char_acc,
+            "val_ctc_loss": avg_ctc_loss, "val_lid1_loss": avg_lid1_loss}
