@@ -623,7 +623,11 @@ def main():
             elif args.freeze_except == "experts+ctc":
                 # Train expert SWA + CTC heads + LID-2
                 param.requires_grad = any(k in name for k in
-                    ("stage1.", "stage2.", "ctc_modules."))
+                    ("stage1.", "stage2.", "pool1.", "pool2.", "ctc_modules."))
+            elif args.freeze_except == "stage2+ctc":
+                # Train stage2 + pool2 + CTC heads + LID-2
+                param.requires_grad = any(k in name for k in
+                    ("stage2.", "pool2.", "ctc_modules."))
             elif args.freeze_except == "ctc":
                 # Train only CTC heads + LID-2
                 param.requires_grad = "ctc_modules." in name
