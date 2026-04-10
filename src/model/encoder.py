@@ -125,35 +125,50 @@ class LipiMoEEncoder(nn.Module):
         num_groups: int = NUM_GROUPS,
         group_script_vocab_sizes: list[list[int]] | None = None,
         group_script_names: list[list[str]] | None = None,
+        # Architecture details (saved in checkpoint for reconstruction)
+        shared_blocks_8x8: int = 4,
+        shared_blocks_8x32: int = 2,
+        stage1_blocks: int = 4,
+        stage2_blocks_4x4: int = 2,
+        stage2_blocks_4x16: int = 4,
+        pool2_width: bool = False,
+        mlp_ratio: int = 4,
         # Legacy: single vocab per group (no LID-2)
         vocab_sizes: list[int] | int | None = None,
     ):
         super().__init__()
         self.num_groups = num_groups
-        # Save constructor args for checkpoint reconstruction
+        # Save all constructor args for checkpoint reconstruction
         self.config = {
             "dim": dim,
             "num_groups": num_groups,
             "group_script_vocab_sizes": group_script_vocab_sizes,
             "group_script_names": group_script_names,
+            "shared_blocks_8x8": shared_blocks_8x8,
+            "shared_blocks_8x32": shared_blocks_8x32,
+            "stage1_blocks": stage1_blocks,
+            "stage2_blocks_4x4": stage2_blocks_4x4,
+            "stage2_blocks_4x16": stage2_blocks_4x16,
+            "pool2_width": pool2_width,
+            "mlp_ratio": mlp_ratio,
         }
 
         # Stem takes L+a (2ch) directly, outputs shared_dim
         shared_dim = dim // 2
         self.stem = ResNetStem(out_channels=shared_dim)
 
-        # Shared SWA: 4× 8×8 (local) + 2× 8×32 (wide context) at shared_dim
+        # Shared SWA at shared_dim
         self.shared_swa = nn.ModuleList()
-        for i in range(4):
+        for i in range(shared_blocks_8x8):
             self.shared_swa.append(
                 SWABlock(dim=shared_dim, num_heads=shared_dim // 32,
                          window_h=8, window_w=8,
-                         shift=(i % 2 == 1), mlp_ratio=4))
-        for i in range(2):
+                         shift=(i % 2 == 1), mlp_ratio=mlp_ratio))
+        for i in range(shared_blocks_8x32):
             self.shared_swa.append(
                 SWABlock(dim=shared_dim, num_heads=shared_dim // 32,
                          window_h=8, window_w=32,
-                         shift=(i % 2 == 1), mlp_ratio=4))
+                         shift=(i % 2 == 1), mlp_ratio=mlp_ratio))
 
         # LID-1
         self.lid_coarse = LIDCoarse(in_channels=shared_dim, num_groups=num_groups)
@@ -164,30 +179,30 @@ class LipiMoEEncoder(nn.Module):
         # Project shared_dim → dim after pool1
         self.proj_up = nn.Linear(shared_dim, dim)
 
-        # Expert SWA Stage 1: 4× 8×8 at h=8
+        # Expert SWA Stage 1: 8×8 at h=8
         self.stage1 = nn.ModuleList([
             FullyExpertSWABlock(dim=dim, num_heads=dim // 32,
                                 num_groups=num_groups, window_h=8, window_w=8,
-                                shift=(i % 2 == 1), mlp_ratio=4)
-            for i in range(4)
+                                shift=(i % 2 == 1), mlp_ratio=mlp_ratio)
+            for i in range(stage1_blocks)
         ])
 
-        # Expert Pool 2: height 8→4, width unchanged
+        # Expert Pool 2: height 8→4
         self.pool2 = ExpertPooling(channels=dim, h_in=8, h_out=4, num_groups=num_groups,
-                                   pool_width=False)
+                                   pool_width=pool2_width)
 
-        # Expert SWA Stage 2: 2× 4×4 (per-char) + 4× 4×16 (wide)
+        # Expert SWA Stage 2: 4×4 (per-char) + 4×16 (wide)
         self.stage2 = nn.ModuleList()
-        for i in range(2):
+        for i in range(stage2_blocks_4x4):
             self.stage2.append(
                 FullyExpertSWABlock(dim=dim, num_heads=dim // 32,
                                     num_groups=num_groups, window_h=4, window_w=4,
-                                    shift=(i % 2 == 1), mlp_ratio=4))
-        for i in range(4):
+                                    shift=(i % 2 == 1), mlp_ratio=mlp_ratio))
+        for i in range(stage2_blocks_4x16):
             self.stage2.append(
                 FullyExpertSWABlock(dim=dim, num_heads=dim // 32,
                                     num_groups=num_groups, window_h=4, window_w=16,
-                                    shift=(i % 2 == 1), mlp_ratio=4))
+                                    shift=(i % 2 == 1), mlp_ratio=mlp_ratio))
 
         # Fold h=4 into channels
         self.enc_out_dim = dim * 4
