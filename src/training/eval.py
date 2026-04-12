@@ -67,14 +67,16 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
 
     for batch_idx, batch in enumerate(val_loader):
         if len(batch) == 8:
-            imgs, targets, tgt_lens, gids, sids, labels, group_labels, _segments = batch
+            imgs, targets, tgt_lens, gids, sids, labels, group_labels, batch_segments = batch
             group_labels = group_labels.to(device, non_blocking=True)
         elif len(batch) == 7:
             imgs, targets, tgt_lens, gids, sids, labels, group_labels = batch
             group_labels = group_labels.to(device, non_blocking=True)
+            batch_segments = None
         else:
             imgs, targets, tgt_lens, gids, sids, labels = batch
             group_labels = None
+            batch_segments = None
         imgs = imgs.to(device, non_blocking=True)
         gids = gids.to(device, non_blocking=True)
         sids_dev = sids.to(device, non_blocking=True)
@@ -170,46 +172,73 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
                         s_lid2_correct[key] = s_lid2_correct.get(key, 0) + (
                             pred_scripts[s_mask] == ls).sum().item()
 
-        # Per-frame CTC decode: segment by predicted group, decode each, concat
+        # Per-segment CTC decode and eval
         all_logits = out["logits"].float().cpu()
         gl_cpu = out["group_logits"].cpu()
         gids_cpu = gids.cpu().tolist()
         sids_cpu = sids.cpu().tolist()
 
+        # batch_segments already set from batch unpacking above
+
         for i, (label, true_g, local_sid) in enumerate(
                 zip(labels, gids_cpu, sids_cpu)):
-            key = (true_g, local_sid)
-            ref_s = str(label).strip().lower()
 
-            # Get per-frame group predictions for this image
+            # Get per-frame group predictions
             if gl_cpu.dim() == 3:
                 frame_preds = gl_cpu[i].argmax(dim=-1)  # (T,)
             else:
                 frame_preds = torch.full((all_logits.shape[1],), gl_cpu[i].argmax().item())
 
-            # Segment by contiguous group runs
-            decoded_parts = []
-            t = 0
-            T_img = frame_preds.shape[0]
-            while t < T_img:
-                g = frame_preds[t].item()
-                # Find end of this group's contiguous run
-                t_end = t + 1
-                while t_end < T_img and frame_preds[t_end].item() == g:
-                    t_end += 1
+            # Get ground truth segments for this image
+            if batch_segments is not None:
+                img_segs = batch_segments[i]
+            else:
+                img_segs = [{"group_id": true_g, "script_id": local_sid,
+                             "text": label, "width": all_logits.shape[1] * 2, "offset": 0}]
 
-                if g >= n_groups:
-                    t = t_end
+            # Decode and evaluate each segment
+            T_img = frame_preds.shape[0]
+            for seg in img_segs:
+                seg_text = seg["text"]
+                seg_g = seg["group_id"]
+                seg_s = seg.get("script_id", 0)
+                seg_offset = seg["offset"]
+                seg_width = seg["width"]
+
+                ref_s = str(seg_text).strip().lower()
+                if not ref_s:
                     continue
 
-                # Decode this segment
-                # Use first script in group (LID-2 would refine, but for eval simplicity)
-                s_idx = 0
+                key = (seg_g, seg_s)
+
+                # Frame range for this segment
+                frame_start = seg_offset // 2
+                frame_end = min((seg_offset + seg_width) // 2, T_img)
+                if frame_end <= frame_start:
+                    continue
+
+                # Check if predicted group matches for this segment's frames
+                seg_frame_preds = frame_preds[frame_start:frame_end]
+                pred_g = seg_frame_preds.mode().values.item() if len(seg_frame_preds) > 0 else -1
+
+                if pred_g != seg_g:
+                    # Wrong group — count as miss
+                    ctc_total += 1
+                    g_word_total[seg_g] += 1
+                    g_char_total[seg_g] += len(ref_s)
+                    total_chars += len(ref_s)
+                    s_word_total[key] = s_word_total.get(key, 0) + 1
+                    s_char_total[key] = s_char_total.get(key, 0) + len(ref_s)
+                    continue
+
+                # Decode this segment's frames
+                s_idx = min(seg_s, len(group_script_names[seg_g]) - 1) if seg_g < len(group_script_names) else 0
                 if group_script_vocab_sizes:
-                    vs = group_script_vocab_sizes[g][s_idx]
+                    vs = group_script_vocab_sizes[seg_g][s_idx]
                 else:
-                    vs = script_vocab_size(group_script_names[g][s_idx])
-                seg_logits = all_logits[i, t:t_end, :vs]
+                    vs = script_vocab_size(group_script_names[seg_g][s_idx])
+
+                seg_logits = all_logits[i, frame_start:frame_end, :vs]
                 seq = seg_logits.argmax(dim=-1).tolist()
                 ids = []
                 prev = -1
@@ -218,29 +247,24 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
                         ids.append(tok)
                     prev = tok
 
-                script_name = group_script_names[g][s_idx] if g < len(group_script_names) else ""
-                if script_name and ids:
-                    decoded_parts.append(decode_ids(ids, script_name))
+                script_name = group_script_names[seg_g][s_idx] if seg_g < len(group_script_names) else ""
+                dec_s = decode_ids(ids, script_name).strip().lower() if script_name and ids else ""
 
-                t = t_end
-
-            dec_s = "".join(decoded_parts).strip().lower()
-
-            ctc_total += 1
-            g_word_total[true_g] += 1
-            s_word_total[key] = s_word_total.get(key, 0) + 1
-            if dec_s == ref_s:
-                ctc_correct += 1
-                g_word_correct[true_g] += 1
-                s_word_correct[key] = s_word_correct.get(key, 0) + 1
-            edits = _edit_distance(dec_s, ref_s)
-            matched = max(0, len(ref_s) - edits)
-            total_chars += len(ref_s)
-            correct_chars += matched
-            g_char_total[true_g] += len(ref_s)
-            g_char_correct[true_g] += matched
-            s_char_total[key] = s_char_total.get(key, 0) + len(ref_s)
-            s_char_correct[key] = s_char_correct.get(key, 0) + matched
+                ctc_total += 1
+                g_word_total[seg_g] += 1
+                s_word_total[key] = s_word_total.get(key, 0) + 1
+                if dec_s == ref_s:
+                    ctc_correct += 1
+                    g_word_correct[seg_g] += 1
+                    s_word_correct[key] = s_word_correct.get(key, 0) + 1
+                edits = _edit_distance(dec_s, ref_s)
+                matched = max(0, len(ref_s) - edits)
+                total_chars += len(ref_s)
+                correct_chars += matched
+                g_char_total[seg_g] += len(ref_s)
+                g_char_correct[seg_g] += matched
+                s_char_total[key] = s_char_total.get(key, 0) + len(ref_s)
+                s_char_correct[key] = s_char_correct.get(key, 0) + matched
 
     # Print results
     lid1_frame_acc = 100 * lid1_frame_correct / max(lid1_frame_total, 1)
