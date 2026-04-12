@@ -44,16 +44,19 @@ def build_vocab_tables():
 
 def load_model(checkpoint_path: str, device: torch.device):
     """Load LipiMoEEncoder from checkpoint."""
-    vocab_sizes, script_names = build_vocab_tables()
-
-    model = LipiMoEEncoder(
-        dim=256,
-        num_groups=len(GROUPS),
-        group_script_vocab_sizes=vocab_sizes,
-        group_script_names=script_names,
-    )
-
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+
+    if "model_config" in ckpt:
+        model = LipiMoEEncoder(**ckpt["model_config"])
+    else:
+        vocab_sizes, script_names = build_vocab_tables()
+        model = LipiMoEEncoder(
+            dim=512,
+            num_groups=len(GROUPS),
+            group_script_vocab_sizes=vocab_sizes,
+            group_script_names=script_names,
+        )
+
     state = ckpt["model"] if "model" in ckpt else ckpt
     model.load_state_dict(state, strict=False)
     model.to(device).eval()

@@ -206,7 +206,7 @@ def main():
         model = LipiMoEEncoder(**cfg).to(device)
     else:
         model = LipiMoEEncoder(
-            dim=256,
+            dim=512,
             num_groups=NUM_GROUPS,
             group_script_vocab_sizes=group_script_vocab_sizes,
             group_script_names=group_script_names,

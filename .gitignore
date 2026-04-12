@@ -67,3 +67,4 @@ training_data/word_lists/raw_*/
 # Testing
 .pytest_cache/
 render_check*/
+data/

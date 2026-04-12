@@ -9,8 +9,8 @@ Usage:
         --donor-groups 0 \
         --out checkpoints/moe/moe_merged.pt
 
-This takes everything from --base, then overwrites pool1, pool2, stage1,
-stage2, and ctc_modules weights for the specified group indices from --donor.
+This takes everything from --base, then overwrites expert_blocks
+and ctc_modules weights for the specified group indices from --donor.
 Shape mismatches (e.g., CTC head after vocab change) use the donor's version.
 """
 
@@ -45,15 +45,13 @@ def main():
     base_state = base["model"]
     donor_state = donor["model"]
 
-    # Expert layer patterns: stage1, stage2, pool1, pool2, ctc_modules
+    # Expert layer patterns: expert_blocks, ctc_modules
     # Examples:
-    #   stage1.0.expert_attns.{group}.qkv.weight
-    #   stage2.0.expert_mlps.{group}.fc1.weight
-    #   pool1.height_pools.{group}.pool.weight
+    #   expert_blocks.0.expert_attns.{group}.qkv.weight
+    #   expert_blocks.0.expert_mlps.{group}.fc1.weight
     #   ctc_modules.{group}.heads.0.proj.weight
     expert_pattern = re.compile(
-        r"^(stage[12]\.\d+\.expert_(?:attns|mlps)\.(\d+)\..+|"
-        r"pool[12]\.(?:height_pools|width_pools)\.(\d+)\..+|"
+        r"^(expert_blocks\.\d+\.expert_(?:attns|mlps)\.(\d+)\..+|"
         r"ctc_modules\.(\d+)\..+)$"
     )
 
@@ -67,7 +65,7 @@ def main():
             continue
 
         # Extract group index from the key (first non-None capture group)
-        group_idx = int(next(g for g in (m.group(2), m.group(3), m.group(4)) if g is not None))
+        group_idx = int(next(g for g in (m.group(2), m.group(3)) if g is not None))
 
         if group_idx not in donor_groups:
             continue

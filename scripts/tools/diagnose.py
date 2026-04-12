@@ -134,7 +134,7 @@ def main():
     from src.model.encoder import LipiMoEEncoder
 
     model = LipiMoEEncoder(
-        dim=256,
+        dim=512,
         num_groups=n_groups,
         group_script_vocab_sizes=group_vocab_sizes,
         group_script_names=group_names,
