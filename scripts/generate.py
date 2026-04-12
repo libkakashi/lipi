@@ -453,6 +453,7 @@ def save_mds_samples(images, labels, script, train_dir, val_dir, chunk_id):
 
 def _generate_mixed_batch(args_tuple):
     """Generate mixed-script images: two words from different scripts side by side."""
+    from PIL import Image
     count, all_script_info, h, mw, do_augment, chunk_id, train_dir, val_dir = args_tuple
     aug = RandAugmentOCR(n_ops=2, p=0.5) if do_augment else None
     t0 = time.time()

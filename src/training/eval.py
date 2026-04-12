@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from src.encoding.decompose import decode_ids, script_vocab_size
+from src.training.losses import compute_lid1_loss
 
 
 def _edit_distance(a: str, b: str) -> int:
@@ -101,9 +102,10 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
                     val_ctc_loss += ctc_l.item()
                     val_loss_samples += s_tgt_lens.sum().item()
 
-        # Val LID-1 loss
-        val_lid1_loss += F.cross_entropy(
-            out_gt["group_logits"], gids, reduction="sum").item()
+        # Val LID-1 loss (handles both frame-level and per-image group_logits)
+        ce_fn = torch.nn.CrossEntropyLoss()
+        lid1_l = compute_lid1_loss(out_gt["group_logits"], gids, ce_fn)
+        val_lid1_loss += lid1_l.item() * imgs.shape[0]
 
         del out_gt
 
