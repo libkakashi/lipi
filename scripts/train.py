@@ -399,7 +399,7 @@ def save_checkpoint(model, optimizer, scheduler, scaler, epoch, args, save_dir):
 def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, scaler,
                     ce_loss_fn, device, device_type, use_amp, amp_dtype,
                     epoch, total_epochs, grad_accum, log_interval,
-                    lid1_weight, group_script_vocabs,
+                    lid1_weight, group_script_vocabs, group_script_names,
                     detach_for_experts=False, align_ce_weight=0.0,
                     save_dir=None, args=None):
     model.train()
@@ -463,7 +463,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             mi = torch.tensor(mixed_indices, device=device)
             mixed_loss = compute_ctc_loss_segments(
                 out["logits"][mi], mixed_segs, out["lengths"][mi],
-                data["group_script_names"], group_script_vocabs)
+                group_script_names, group_script_vocabs)
             ctc_loss = ctc_loss + mixed_loss
             ctc_parts += 1
 
@@ -475,6 +475,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             out["script_logits_per_group"], sids_, all_true, ce_loss_fn)
 
         if align_ce_weight > 0:
+            all_ok = (tgt_lens_ <= out["lengths"]) & (tgt_lens_ > 0)
             ace_loss = compute_regional_token_loss(
                 out["logits"], targets_, out["lengths"], tgt_lens_,
                 all_ok, gids_, sids_, group_script_vocabs)
@@ -709,6 +710,7 @@ def main():
             opt["use_amp"], opt["amp_dtype"], epoch, args.epochs, args.grad_accum,
             args.log_interval, lid1_weight=args.lid1_weight,
             group_script_vocabs=data["group_script_vocab_sizes"],
+            group_script_names=data["group_script_names"],
             detach_for_experts=detach,
             align_ce_weight=args.align_ce_weight,
             save_dir=save_dir, args=args)
