@@ -18,7 +18,7 @@ from torch import Tensor
 
 import timm
 
-from src.model.lid import NUM_GROUPS
+from src.model.lid import LIDCoarse, NUM_GROUPS
 
 
 class GlobalAttention(nn.Module):
@@ -236,13 +236,8 @@ class LipiMoEEncoder(nn.Module):
         # Get backbone output channels (last stage)
         backbone_ch = self.backbone.feature_info.channels()[-1]
 
-        # LID-1: classify directly on backbone features (richest representation)
-        self.lid1_pool = nn.AdaptiveAvgPool2d(1)
-        self.lid1_classifier = nn.Sequential(
-            nn.Linear(backbone_ch, 256),
-            nn.ReLU(),
-            nn.Linear(256, num_groups),
-        )
+        # LID-1: classify on raw backbone features
+        self.lid1 = LIDCoarse(in_channels=backbone_ch, num_groups=num_groups)
 
         # Project backbone features to expert dim
         self.proj = nn.Linear(backbone_ch, dim)
@@ -296,9 +291,8 @@ class LipiMoEEncoder(nn.Module):
         feats = self.backbone(x)
         backbone_out = feats[-1]
 
-        # LID-1: classify on raw backbone features (2048-dim)
-        group_logits = self.lid1_classifier(
-            self.lid1_pool(backbone_out).flatten(1))  # (B, num_groups)
+        # LID-1: classify on raw backbone features
+        group_logits = self.lid1(backbone_out)
         if group_ids is None:
             group_ids = group_logits.argmax(dim=-1)
 

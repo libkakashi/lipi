@@ -144,51 +144,21 @@ GROUP_SCRIPTS = {
 
 
 class LIDCoarse(nn.Module):
-    """LID-1: Coarse group classifier with learned spatial projection.
+    """LID-1: Coarse group classifier on backbone spatial features.
 
-    Learns a direct projection from T spatial positions to 1. No softmax
-    bottleneck — gradient flows directly through linear layers.
-
-    Operates on (B, C, T) via 1D convolutions with groups=C, so each
-    feature channel learns its own spatial weighting independently.
+    Takes (B, C, H, W) from backbone, pools to (B, C), classifies
+    into one of 13 script groups.
     """
 
-    def __init__(self, in_channels: int = 288, num_groups: int = NUM_GROUPS,
-                 seq_len: int = 384):
+    def __init__(self, in_channels: int, num_groups: int = NUM_GROUPS):
         super().__init__()
-        # Learned spatial reduction: T → T//6 → T//24 → 1
-        # groups=16: each group mixes 24 channels. Cross-channel mixing
-        # at every layer lets the model learn multi-feature spatial patterns.
-        g = 16
-        self.spatial_conv1 = nn.Conv1d(in_channels, in_channels, kernel_size=6,
-                                       stride=6, groups=g)
-        self.spatial_conv2 = nn.Conv1d(in_channels, in_channels, kernel_size=4,
-                                       stride=4, groups=g)
-        self.spatial_final = nn.AdaptiveAvgPool1d(1)  # handles any remaining T
-        hidden = in_channels // 2
+        self.pool = nn.AdaptiveAvgPool2d(1)
         self.classifier = nn.Sequential(
-            nn.Linear(in_channels, hidden),
+            nn.Linear(in_channels, 256),
             nn.ReLU(),
-            nn.Linear(hidden, num_groups),
+            nn.Linear(256, num_groups),
         )
 
-    def forward_seq(self, x: Tensor) -> Tensor:
-        """Classify from sequence features (B, T, C) — used by moe_encoder."""
-        x_ct = x.permute(0, 2, 1)                           # (B, C, T)
-        x_ct = torch.nn.functional.gelu(self.spatial_conv1(x_ct))
-        x_ct = torch.nn.functional.gelu(self.spatial_conv2(x_ct))
-        pooled = self.spatial_final(x_ct).squeeze(-1)        # (B, C)
-        return self.classifier(pooled)
-
     def forward(self, features: Tensor) -> Tensor:
-        """Classify from spatial features (B, C, H, W) — used by train_lid."""
-        B, C, H, W = features.shape
-        x = features.permute(0, 2, 3, 1).reshape(B, H * W, C)
-        return self.forward_seq(x)
-
-    def predict(self, features: Tensor) -> tuple[Tensor, Tensor]:
-        """Predict group with confidence."""
-        logits = self.forward(features)
-        probs = torch.softmax(logits, dim=-1)
-        confidences, group_ids = probs.max(dim=-1)
-        return group_ids, confidences
+        """(B, C, H, W) → (B, num_groups)"""
+        return self.classifier(self.pool(features).flatten(1))
