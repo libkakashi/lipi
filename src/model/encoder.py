@@ -3,11 +3,13 @@ Lipi v3 MoE Vision Encoder.
 
 Architecture:
     Input: (B, 2, 32, W) — L+a
-    -> HGNetV2 backbone (pretrained, OCR strides) → (B, 2048, 1, W/2)
-    -> Project 2048 → dim                         → (B, W/2, dim)
-    -> LID-1: 13-group classification
-    -> Expert global attention blocks (1D)         → (B, W/2, dim)
-    -> LID-2 + Per-script CTC heads (T=W/2)
+    -> HGNetV2 stages 0-2 (pretrained, no width downsample)
+       → (B, 1024, 2, W)
+    -> LID-1: 13-group classification on backbone features
+    -> Project 1024 → dim
+    -> Expert windowed attention blocks (2D, h=2, w=W)
+    -> Pool h=2→1
+    -> LID-2 + Per-script CTC heads (T=W)
 """
 
 import torch
@@ -21,31 +23,60 @@ import timm
 from src.model.lid import LIDCoarse, NUM_GROUPS
 
 
-class GlobalAttention(nn.Module):
-    """Standard multi-head self-attention on 1D sequences."""
+class WindowedAttention(nn.Module):
+    """Multi-head self-attention within fixed-size windows on flattened 2D sequences.
 
-    def __init__(self, dim: int, num_heads: int):
+    Partitions (B, h*w, C) into non-overlapping windows of size window_h × window_w,
+    applies attention within each window.
+    """
+
+    def __init__(self, dim: int, num_heads: int, window_h: int = 2, window_w: int = 32):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.scale = self.head_dim ** -0.5
+        self.window_h = window_h
+        self.window_w = window_w
         self.qkv = nn.Linear(dim, 3 * dim)
         self.proj = nn.Linear(dim, dim)
 
-    def forward(self, x: Tensor) -> Tensor:
-        B, T, C = x.shape
-        qkv = self.qkv(x).reshape(B, T, 3, self.num_heads, self.head_dim)
+    def forward(self, x: Tensor, h: int, w: int) -> Tensor:
+        B, N, C = x.shape
+        x = x.reshape(B, h, w, C)
+
+        # Pad width to be divisible by window_w
+        pad_w = (self.window_w - w % self.window_w) % self.window_w
+        if pad_w > 0:
+            x = F.pad(x, (0, 0, 0, pad_w))
+        wp = w + pad_w
+
+        # Partition into windows: (B, h/wh, wh, w/ww, ww, C)
+        nH = h // self.window_h
+        nW = wp // self.window_w
+        x = x.reshape(B, nH, self.window_h, nW, self.window_w, C)
+        x = x.permute(0, 1, 3, 2, 4, 5).reshape(B * nH * nW, self.window_h * self.window_w, C)
+
+        # Attention within windows
+        qkv = self.qkv(x).reshape(-1, self.window_h * self.window_w, 3, self.num_heads, self.head_dim)
         qkv = qkv.permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
-
         attn = (q @ k.transpose(-2, -1)) * self.scale
         attn = F.softmax(attn, dim=-1)
-        out = (attn @ v).transpose(1, 2).reshape(B, T, C)
-        return self.proj(out)
+        out = (attn @ v).transpose(1, 2).reshape(B * nH * nW, self.window_h * self.window_w, C)
+
+        # Output projection
+        out = self.proj(out)
+
+        # Merge windows back
+        out = out.reshape(B, nH, nW, self.window_h, self.window_w, C)
+        out = out.permute(0, 1, 3, 2, 4, 5).reshape(B, nH * self.window_h, wp, C)
+        out = out[:, :h, :w, :].reshape(B, h * w, C)
+
+        return out
 
 
 class MLP(nn.Module):
-    def __init__(self, dim: int, mlp_ratio: int = 4):
+    def __init__(self, dim: int, mlp_ratio: int = 2):
         super().__init__()
         hidden = dim * mlp_ratio
         self.fc1 = nn.Linear(dim, hidden)
@@ -57,25 +88,27 @@ class MLP(nn.Module):
 
 
 class ExpertBlock(nn.Module):
-    """Per-group expert block with global attention + MLP.
+    """Per-group expert block with 2D windowed attention + MLP.
 
     Each group has its own attention and MLP. Routes by group_ids,
     sorts for contiguous access, scatters back.
     """
 
-    def __init__(self, dim: int, num_heads: int, num_groups: int, mlp_ratio: int = 4):
+    def __init__(self, dim: int, num_heads: int, num_groups: int,
+                 window_h: int = 2, window_w: int = 32, mlp_ratio: int = 2):
         super().__init__()
         self.num_groups = num_groups
         self.norm1 = nn.LayerNorm(dim)
         self.expert_attns = nn.ModuleList([
-            GlobalAttention(dim, num_heads) for _ in range(num_groups)
+            WindowedAttention(dim, num_heads, window_h, window_w)
+            for _ in range(num_groups)
         ])
         self.norm2 = nn.LayerNorm(dim)
         self.expert_mlps = nn.ModuleList([
             MLP(dim, mlp_ratio) for _ in range(num_groups)
         ])
 
-    def forward(self, x: Tensor, group_ids: Tensor) -> Tensor:
+    def forward(self, x: Tensor, h: int, w: int, group_ids: Tensor) -> Tensor:
         B = x.shape[0]
         sorted_idx = group_ids.argsort()
         counts = torch.bincount(group_ids, minlength=self.num_groups).tolist()
@@ -90,9 +123,10 @@ class ExpertBlock(nn.Module):
             if start < end:
                 if self.training and torch.is_grad_enabled():
                     result = ckpt_util.checkpoint(
-                        self.expert_attns[g], normed[start:end], use_reentrant=True)
+                        self.expert_attns[g], normed[start:end], h, w,
+                        use_reentrant=True)
                 else:
-                    result = self.expert_attns[g](normed[start:end])
+                    result = self.expert_attns[g](normed[start:end], h, w)
                 attn_out[start:end] = result.to(attn_out.dtype)
             start = end
         x_sorted = x_sorted + attn_out
@@ -106,7 +140,8 @@ class ExpertBlock(nn.Module):
             if start < end:
                 if self.training and torch.is_grad_enabled():
                     result = ckpt_util.checkpoint(
-                        self.expert_mlps[g], normed[start:end], use_reentrant=True)
+                        self.expert_mlps[g], normed[start:end],
+                        use_reentrant=True)
                 else:
                     result = self.expert_mlps[g](normed[start:end])
                 mlp_out[start:end] = result.to(mlp_out.dtype)
@@ -182,26 +217,28 @@ class GroupCTCModule(nn.Module):
 
 
 class LipiMoEEncoder(nn.Module):
-    """Lipi v3: HGNetV2 backbone + expert global attention + CTC.
+    """Lipi v3: HGNetV2 backbone (stages 0-2) + 2D expert windowed attention.
 
-    Replaces the v2 stem + shared SWA with a pretrained CNN backbone.
-    Expert blocks use 1D global attention (no windows needed at h=1).
+    Backbone uses height-only downsampling (no width reduction).
+    Stages 0-2 output h=2, w=W, 1024ch — stage 3 skipped.
+    Expert blocks operate on 2D tokens (h=2 × W) with windowed attention.
+    Height pooled to 1 after experts for CTC at T=W.
     """
 
-    # OCR stride overrides: height-aggressive, width-conservative
+    # OCR strides: height-only, no width downsample
     _OCR_STRIDES = {
-        'stem.stem1.conv': (2, 1),      # h/2
-        'stem.stem3.conv': (2, 1),       # h/4
-        'stages_1.downsample.conv': (2, 2),  # h/8, w/2
-        'stages_2.downsample.conv': (2, 1),  # h/16
-        'stages_3.downsample.conv': (2, 1),  # h/32 = 1
+        'stem.stem1.conv': (2, 1),              # h/2
+        'stem.stem3.conv': (2, 1),              # h/4
+        'stages_1.downsample.conv': (2, 1),     # h/8
+        'stages_2.downsample.conv': (2, 1),     # h/16
     }
 
     def __init__(
         self,
         dim: int = 512,
         backbone: str = 'hgnetv2_b3',
-        num_expert_blocks: int = 2,
+        num_expert_blocks: int = 4,
+        window_w: int = 32,
         mlp_ratio: int = 2,
         num_groups: int = NUM_GROUPS,
         group_script_vocab_sizes: list[list[int]] | None = None,
@@ -214,6 +251,7 @@ class LipiMoEEncoder(nn.Module):
             "dim": dim,
             "backbone": backbone,
             "num_expert_blocks": num_expert_blocks,
+            "window_w": window_w,
             "mlp_ratio": mlp_ratio,
             "num_groups": num_groups,
             "group_script_vocab_sizes": group_script_vocab_sizes,
@@ -228,26 +266,30 @@ class LipiMoEEncoder(nn.Module):
             f'{backbone}.ssld_stage1_in22k_in1k' if 'ssld' not in backbone else backbone,
             pretrained=True,
             features_only=True,
+            out_indices=[2],  # Only use up to stage 2 (skip stage 3)
         )
         for name, mod in self.backbone.named_modules():
             if name in self._OCR_STRIDES:
                 mod.stride = self._OCR_STRIDES[name]
 
-        # Get backbone output channels (last stage)
-        backbone_ch = self.backbone.feature_info.channels()[-1]
+        # Stage 2 output channels (out_indices=[2] gives single output)
+        backbone_ch = self.backbone.feature_info.channels()[0]
 
-        # LID-1: classify on raw backbone features
+        # LID-1: classify on backbone spatial features (h=2, w=W, 1024ch)
         self.lid1 = LIDCoarse(in_channels=backbone_ch, num_groups=num_groups)
 
         # Project backbone features to expert dim
         self.proj = nn.Linear(backbone_ch, dim)
 
-        # Expert global attention blocks (1D)
+        # Expert 2D windowed attention blocks (h=2, w=W)
         self.expert_blocks = nn.ModuleList([
             ExpertBlock(dim=dim, num_heads=dim // 64, num_groups=num_groups,
-                        mlp_ratio=mlp_ratio)
+                        window_h=2, window_w=window_w, mlp_ratio=mlp_ratio)
             for _ in range(num_expert_blocks)
         ])
+
+        # Pool height after experts
+        self.h_pool = nn.AdaptiveAvgPool2d((1, None))  # h→1, keep w
 
         # Output
         self.enc_out_dim = dim
@@ -287,25 +329,30 @@ class LipiMoEEncoder(nn.Module):
         x = images.float() / 255.0 if images.dtype == torch.uint8 else images
         x = self.input_proj(x)
 
-        # Backbone → last stage: (B, backbone_ch, 1, W/2)
+        # Backbone stages 0-2: (B, 1024, 2, W)
         feats = self.backbone(x)
-        backbone_out = feats[-1]
+        backbone_out = feats[0]  # out_indices=[2] → first (only) output
+        _, C, h, w = backbone_out.shape
 
-        # LID-1: classify on raw backbone features
+        # LID-1: classify on backbone spatial features
         group_logits = self.lid1(backbone_out)
         if group_ids is None:
             group_ids = group_logits.argmax(dim=-1)
 
-        # Project to expert dim: (B, W/2, dim)
-        x = backbone_out.squeeze(2).permute(0, 2, 1)  # (B, W/2, backbone_ch)
+        # Flatten to sequence and project: (B, h*w, dim)
+        x = backbone_out.permute(0, 2, 3, 1).reshape(B, h * w, C)
         x = self.proj(x)
 
         if detach_for_experts:
             x = x.detach()
 
-        # Expert global attention blocks
+        # Expert 2D windowed attention (h=2, w=W)
         for block in self.expert_blocks:
-            x = block(x, group_ids)
+            x = block(x, h, w, group_ids)
+
+        # Pool height: (B, h, w, dim) → (B, w, dim)
+        x = x.reshape(B, h, w, -1).permute(0, 3, 1, 2)  # (B, dim, h, w)
+        x = self.h_pool(x).squeeze(2).permute(0, 2, 1)   # (B, w, dim)
 
         x = self.norm(x)
         T = x.shape[1]
