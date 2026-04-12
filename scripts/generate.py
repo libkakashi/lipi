@@ -765,7 +765,16 @@ def run_generation_pool(chunks, worker_fn, n_workers, label):
 
     Returns (total_done, all_train_widths, all_val_widths).
     """
-    total_est = sum(c[1] if isinstance(c[1], int) else len(c[1]) * c[2] for c in chunks)
+    # Estimate total: word chunks have count at c[1], char chunks at len(c[1])*c[2],
+    # mixed chunks have count at c[0]
+    def _est(c):
+        if isinstance(c[0], int) and not isinstance(c[1], int):
+            return c[0]  # mixed: (count, script_info, ...)
+        elif isinstance(c[1], int):
+            return c[1]  # word: (script, count, ...)
+        else:
+            return len(c[1]) * c[2]  # char: (script, chars, reps, ...)
+    total_est = sum(_est(c) for c in chunks)
     print(f"\nGenerating {total_est} {label} images, {len(chunks)} chunks, "
           f"{min(n_workers, len(chunks))} workers\n")
 
