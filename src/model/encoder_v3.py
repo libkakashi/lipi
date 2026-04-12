@@ -202,7 +202,7 @@ class LipiV3Encoder(nn.Module):
         dim: int = 512,
         backbone: str = 'hgnetv2_b3',
         num_expert_blocks: int = 2,
-        mlp_ratio: int = 4,
+        mlp_ratio: int = 2,
         num_groups: int = NUM_GROUPS,
         group_script_vocab_sizes: list[list[int]] | None = None,
         group_script_names: list[list[str]] | None = None,
