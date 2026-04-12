@@ -44,7 +44,9 @@ def blur(img: Image.Image) -> Image.Image:
         return img.filter(ImageFilter.GaussianBlur(radius=sigma))
     elif random.random() < 0.7:
         # Motion blur (horizontal or vertical)
-        size = random.choice([3, 5, 7])
+        w, h = img.size
+        max_k = min(w, h) - 1 if min(w, h) > 3 else 3
+        size = random.choice([k for k in [3, 5, 7] if k <= max_k]) if max_k >= 3 else 3
         kernel = [0] * (size * size)
         mid = size // 2
         horizontal = random.random() < 0.7
@@ -53,7 +55,10 @@ def blur(img: Image.Image) -> Image.Image:
                 kernel[mid * size + i] = 1
             else:
                 kernel[i * size + mid] = 1
-        return img.filter(ImageFilter.Kernel(size=(size, size), kernel=kernel, scale=size, offset=0))
+        try:
+            return img.filter(ImageFilter.Kernel(size=(size, size), kernel=kernel, scale=size, offset=0))
+        except ValueError:
+            return img  # image too small for kernel
     else:
         # Defocus blur — circular bokeh, common on phone cameras
         sigma = random.uniform(1.0, 2.5)
@@ -1016,11 +1021,71 @@ except ImportError:
     pass
 
 
-class RandAugmentOCR:
-    """RandAugment-style augmentation for OCR.
+# =========================================================================
+# Scenario chains — realistic multi-degradation combinations
+# =========================================================================
 
-    Randomly applies N ops per image. Each op degrades
-    realistically but preserves text readability.
+SCENARIO_CHAINS: list[tuple[str, list[Callable], float]] = [
+    # (name, ops_in_order, probability_weight)
+    ("phone_document", [
+        perspective_warp, uneven_lighting, camera_noise, blur,
+    ], 3.0),
+    ("phone_sign", [
+        colored_background, perspective_warp, glare, camera_noise,
+    ], 2.0),
+    ("outdoor_sign", [
+        textured_background, weather_damage, perspective_warp, exposure_jitter,
+    ], 2.0),
+    ("old_scan", [
+        aged_document, scanner_edge, low_resolution, photocopy,
+    ], 2.0),
+    ("screenshot", [
+        screen_artifacts, jpeg_compress, partial_crop,
+    ], 1.5),
+    ("photocopy_fax", [
+        photocopy, noise, low_resolution, to_grayscale,
+    ], 1.5),
+    ("book_page", [
+        uneven_lighting, fold_crease, blur, camera_noise,
+    ], 1.5),
+    ("quick_snap", [
+        blur, perspective_warp, exposure_jitter, partial_crop,
+    ], 2.0),
+    ("worn_label", [
+        weather_damage, water_stain, low_resolution, noise,
+    ], 1.0),
+    ("flash_photo", [
+        glare, camera_noise, striped_shadow, exposure_jitter,
+    ], 1.0),
+    ("occluded", [
+        occlusion, perspective_warp, camera_noise,
+    ], 1.0),
+    ("distant_photo", [
+        low_resolution, blur, camera_noise, perspective_warp,
+    ], 1.5),
+]
+
+# Precompute scenario weights for weighted random selection
+_SCENARIO_WEIGHTS = [w for _, _, w in SCENARIO_CHAINS]
+_SCENARIO_TOTAL = sum(_SCENARIO_WEIGHTS)
+
+
+def _pick_scenario() -> list[Callable]:
+    """Weighted random selection of a scenario chain."""
+    r = random.random() * _SCENARIO_TOTAL
+    cumulative = 0
+    for _, ops, weight in SCENARIO_CHAINS:
+        cumulative += weight
+        if r <= cumulative:
+            return ops
+    return SCENARIO_CHAINS[-1][1]
+
+
+class RandAugmentOCR:
+    """Augmentation for OCR: mix of random ops and realistic scenario chains.
+
+    50% of the time applies a scenario chain (realistic multi-degradation).
+    50% of the time applies N random independent ops (diversity).
     """
 
     def __init__(self, n_ops: int = 2, p: float = 0.5, ops: list[Callable] | None = None):
@@ -1031,7 +1096,15 @@ class RandAugmentOCR:
     def __call__(self, img: Image.Image) -> Image.Image:
         if random.random() > self.p:
             return img
-        ops = random.sample(self.ops, min(self.n_ops, len(self.ops)))
-        for op in ops:
-            img = op(img)
+
+        if random.random() < 0.5:
+            # Scenario chain: apply all ops in a realistic combination
+            chain = _pick_scenario()
+            for op in chain:
+                img = op(img)
+        else:
+            # Random ops: original RandAugment behavior
+            ops = random.sample(self.ops, min(self.n_ops, len(self.ops)))
+            for op in ops:
+                img = op(img)
         return img
