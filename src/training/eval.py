@@ -45,13 +45,16 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
     val_loss_samples = 0
 
     # Global stats
-    lid1_correct = lid1_total = 0
+    lid1_correct = lid1_total = 0           # per-image
+    lid1_frame_correct = lid1_frame_total = 0  # per-frame
     lid2_correct = lid2_total = 0
     ctc_correct = ctc_total = total_chars = correct_chars = 0
 
     # Per-group stats
-    g_lid_correct = [0] * n_groups
+    g_lid_correct = [0] * n_groups          # per-image
     g_lid_total = [0] * n_groups
+    g_lid_frame_correct = [0] * n_groups    # per-frame
+    g_lid_frame_total = [0] * n_groups
     g_word_correct = [0] * n_groups
     g_word_total = [0] * n_groups
     g_char_correct = [0] * n_groups
@@ -119,16 +122,38 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
 
         del out_gt
 
-        # LID-1
+        # LID-1 accuracy
         gl = out["group_logits"]
         if gl.dim() == 3:
-            # Frame-level: most common prediction per image
-            pred_gids = gl.argmax(dim=-1).mode(dim=-1).values
+            # Frame-level predictions
+            frame_preds = gl.argmax(dim=-1)  # (B, T)
+            T = frame_preds.shape[1]
+
+            # Per-image: most common frame prediction
+            pred_gids = frame_preds.mode(dim=-1).values
+            lid1_correct += (pred_gids == gids).sum().item()
+            lid1_total += gids.shape[0]
+
+            # Per-frame: compare each frame against its label
+            if group_labels is not None:
+                gl_frames = group_labels[:, ::2][:, :T]
+            else:
+                gl_frames = gids.unsqueeze(1).expand(-1, T)
+            lid1_frame_correct += (frame_preds == gl_frames).sum().item()
+            lid1_frame_total += gl_frames.numel()
+
+            # Per-group frame accuracy
+            for g in range(n_groups):
+                g_frame_mask = (gl_frames == g)
+                if g_frame_mask.any():
+                    g_lid_frame_total[g] += g_frame_mask.sum().item()
+                    g_lid_frame_correct[g] += (frame_preds[g_frame_mask] == g).sum().item()
         else:
             pred_gids = gl.argmax(-1)
-        lid1_correct += (pred_gids == gids).sum().item()
-        lid1_total += gids.shape[0]
+            lid1_correct += (pred_gids == gids).sum().item()
+            lid1_total += gids.shape[0]
 
+        # Per-group image accuracy
         for g in range(n_groups):
             mask = (gids == g)
             if mask.any():
@@ -218,6 +243,7 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
 
     # Print results
     lid1_acc = 100 * lid1_correct / max(lid1_total, 1)
+    lid1_frame_acc = 100 * lid1_frame_correct / max(lid1_frame_total, 1)
     lid2_acc = 100 * lid2_correct / max(lid2_total, 1)
     ctc_acc = 100 * ctc_correct / max(ctc_total, 1)
     char_acc = 100 * correct_chars / max(total_chars, 1)
@@ -225,21 +251,22 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
     avg_ctc_loss = val_ctc_loss / max(val_loss_samples, 1)
     avg_lid1_loss = val_lid1_loss / max(lid1_total, 1)
 
-    print(f"\n  ┌──────────────────────────────────────────────┐")
-    print(f"  │  LID-1: {lid1_acc:5.1f}%   LID-2: {lid2_acc:5.1f}%              │")
-    print(f"  │  Word:  {ctc_acc:5.1f}%   Char:  {char_acc:5.1f}%              │")
-    print(f"  │  Val loss: ctc={avg_ctc_loss:.4f}  lid1={avg_lid1_loss:.4f}     │")
-    print(f"  └──────────────────────────────────────────────┘")
+    print(f"\n  ┌──────────────────────────────────────────────────────┐")
+    print(f"  │  LID-1: {lid1_acc:5.1f}% (img)  {lid1_frame_acc:5.1f}% (frame)  LID-2: {lid2_acc:5.1f}%  │")
+    print(f"  │  Word:  {ctc_acc:5.1f}%   Char:  {char_acc:5.1f}%                     │")
+    print(f"  │  Val loss: ctc={avg_ctc_loss:.4f}  lid1={avg_lid1_loss:.4f}            │")
+    print(f"  └──────────────────────────────────────────────────────┘")
 
-    print(f"\n  {'Group / Script':<20s} {'LID1':>6s} {'Word':>6s} {'Char':>6s} {'LID2':>6s}")
-    print(f"  {'─' * 50}")
+    print(f"\n  {'Group / Script':<20s} {'LID1':>6s} {'Frame':>6s} {'Word':>6s} {'Char':>6s} {'LID2':>6s}")
+    print(f"  {'─' * 56}")
 
     for g in range(n_groups):
         lid_g = 100 * g_lid_correct[g] / max(g_lid_total[g], 1)
+        frame_g = 100 * g_lid_frame_correct[g] / max(g_lid_frame_total[g], 1)
         word_g = 100 * g_word_correct[g] / max(g_word_total[g], 1)
         char_g = 100 * g_char_correct[g] / max(g_char_total[g], 1)
         name = active_groups[g] if g < len(active_groups) else f"group{g}"
-        print(f"  {name:<20s} {lid_g:5.1f}% {word_g:5.1f}% {char_g:5.1f}%")
+        print(f"  {name:<20s} {lid_g:5.1f}% {frame_g:5.1f}% {word_g:5.1f}% {char_g:5.1f}%")
 
         scripts = group_script_names[g] if g < len(group_script_names) else []
         for ls, sname in enumerate(scripts):
@@ -253,10 +280,10 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
             if key in s_lid2_total:
                 lid2_s = 100 * s_lid2_correct.get(key, 0) / max(s_lid2_total[key], 1)
                 lid2_str = f"{lid2_s:5.1f}%"
-            print(f"    {sname:<18s} {'':>6s} {word_s:5.1f}% {char_s:5.1f}% {lid2_str}")
+            print(f"    {sname:<18s} {'':>6s} {'':>6s} {word_s:5.1f}% {char_s:5.1f}% {lid2_str}")
 
-    print(f"  {'─' * 50}")
+    print(f"  {'─' * 56}")
 
-    return {"lid1_acc": lid1_acc, "lid2_acc": lid2_acc,
-            "word_acc": ctc_acc, "char_acc": char_acc,
+    return {"lid1_acc": lid1_acc, "lid1_frame_acc": lid1_frame_acc,
+            "lid2_acc": lid2_acc, "word_acc": ctc_acc, "char_acc": char_acc,
             "val_ctc_loss": avg_ctc_loss, "val_lid1_loss": avg_lid1_loss}
