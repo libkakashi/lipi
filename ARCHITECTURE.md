@@ -107,8 +107,7 @@ amp:          bf16
 ```
 src/
   model/
-    encoder.py          Re-exports from encoder_v3
-    encoder_v3.py       LipiMoEEncoder (HGNetV2 + expert attention)
+    encoder.py          LipiMoEEncoder (HGNetV2 backbone + expert attention)
     memory.py           VRAM budget estimation
     lid.py              SCRIPTS, GROUPS, LIDCoarse
   encoding/

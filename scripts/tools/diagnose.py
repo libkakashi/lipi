@@ -197,11 +197,11 @@ def main():
         # Check gradient norms
         shared_norm = torch.nn.utils.clip_grad_norm_(
             [p for n, p in model.named_parameters()
-             if not any(k in n for k in ("stage1.", "stage2.", "ctc_modules."))],
+             if not any(k in n for k in ("expert_blocks.", "ctc_modules."))],
             max_norm=25.0)
         expert_norm = torch.nn.utils.clip_grad_norm_(
             [p for n, p in model.named_parameters()
-             if any(k in n for k in ("stage1.", "stage2.", "ctc_modules."))],
+             if any(k in n for k in ("expert_blocks.", "ctc_modules."))],
             max_norm=25.0)
 
         optimizer.step()

@@ -1,20 +1,19 @@
-"""Smoke test: model instantiation, forward pass, loss computation."""
+"""Smoke test: model instantiation, forward pass, output checks."""
 
 import torch
 
 
 def test_model_forward_pass():
-    """Smoke test: model instantiation, forward pass, basic output checks."""
+    """Smoke test: v3 encoder with HGNetV2 backbone."""
     from src.model.encoder import LipiMoEEncoder
 
     model = LipiMoEEncoder(
-        dim=64,
+        dim=128,
         num_groups=2,
         group_script_vocab_sizes=[[100], [100]],
         group_script_names=[["test1"], ["test2"]],
     )
 
-    # Forward pass — model expects (B, 2, H, W) input (L+a channels)
     B, H, W = 2, 32, 64
     images = torch.randn(B, 2, H, W)
     group_ids = torch.tensor([0, 1])
@@ -26,5 +25,10 @@ def test_model_forward_pass():
     assert "logits" in out
     assert "lengths" in out
     assert "group_logits" in out
+    assert "group_ids" in out
+    assert "script_logits_per_group" in out
     assert out["logits"].shape[0] == B
     assert out["lengths"].shape[0] == B
+    # T = W/2 for v3 architecture
+    assert out["lengths"][0].item() == W // 2
+    assert out["group_logits"].shape == (B, 2)

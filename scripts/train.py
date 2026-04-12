@@ -411,7 +411,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
     shared_params = []
     expert_params = []
     for name, p in model.named_parameters():
-        if any(k in name for k in ("stage1.", "stage2.", "ctc_modules.")):
+        if any(k in name for k in ("expert_blocks.", "ctc_modules.")):
             expert_params.append(p)
         else:
             shared_params.append(p)
