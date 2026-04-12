@@ -959,7 +959,10 @@ def text_shadow(img: Image.Image) -> Image.Image:
 
 
 # =========================================================================
-# Op registry — 34 ops
+# Op registry — 28 ops
+# Removed: wave_distortion (slow, redundant with elastic_distortion),
+# bleed_through (niche), variable_baseline, slant, ink_fade,
+# variable_stroke, lined_paper (all handwriting-specific)
 # =========================================================================
 
 AUGMENT_OPS: list[Callable] = [
@@ -973,12 +976,10 @@ AUGMENT_OPS: list[Callable] = [
     uneven_lighting,
     glare,
     striped_shadow,
-    # Geometric (3)
+    # Geometric (2)
     rotation,
     perspective_warp,
-    wave_distortion,
-    # Document (5)
-    bleed_through,
+    # Document (4)
     fold_crease,
     aged_document,
     scanner_edge,
@@ -986,12 +987,6 @@ AUGMENT_OPS: list[Callable] = [
     # Ink (2)
     stroke_variation,
     smudge,
-    # Handwriting (5)
-    variable_baseline,
-    slant,
-    ink_fade,
-    variable_stroke,
-    lined_paper,
     # Noise & color (3)
     noise,
     color_jitter,
@@ -1000,17 +995,16 @@ AUGMENT_OPS: list[Callable] = [
     occlusion,
     # Outdoor (1)
     weather_damage,
-    # Scene text / background (2) — NEW
+    # Scene text / background (2)
     textured_background,
     colored_background,
-    # Crop / boundary (2) — NEW
+    # Crop / boundary (2)
     partial_crop,
     pad_with_border,
-    # Screen / display (1) — NEW
+    # Screen / display (1)
     screen_artifacts,
-    # Camera noise (1) — NEW
+    # Camera (2)
     camera_noise,
-    # 3D text (1) — NEW
     text_shadow,
 ]
 
