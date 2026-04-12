@@ -32,7 +32,7 @@ from src.training.dataloader import (
 )
 from src.training.losses import (
     compute_lid1_loss, compute_lid2_loss, compute_ctc_loss,
-    compute_regional_token_loss,
+    compute_ctc_loss_segments, compute_regional_token_loss,
 )
 from src.training.eval import evaluate
 
@@ -431,7 +431,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
     expert_norm = 0.0
 
     def _forward_backward(imgs_, targets_, tgt_lens_, gids_, sids_, scale,
-                          group_labels_=None):
+                          group_labels_=None, segments_=None):
         """Run forward + backward on a (sub-)batch. scale adjusts loss."""
         with torch.amp.autocast(device_type, enabled=use_amp, dtype=amp_dtype):
             out = model(imgs_, group_ids=gids_, script_ids=sids_,
@@ -440,16 +440,21 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         # Frame-level group labels: downsample pixel-level (W) to frame-level (W/2)
         if group_labels_ is not None and out["group_logits"].dim() == 3:
             T = out["group_logits"].shape[1]
-            # Downsample by taking every other pixel (matches stride-2 width downsample)
-            gl_frames = group_labels_[:, ::2][:, :T]  # (B, T)
+            gl_frames = group_labels_[:, ::2][:, :T]
             lid1_loss = compute_lid1_loss(out["group_logits"], gl_frames, ce_loss_fn)
         else:
             lid1_loss = compute_lid1_loss(out["group_logits"], gids_, ce_loss_fn)
 
-        all_ok = (tgt_lens_ <= out["lengths"]) & (tgt_lens_ > 0)
-        ctc_loss = compute_ctc_loss(
-            out["logits"], targets_, out["lengths"], tgt_lens_,
-            all_ok, gids_, sids_, group_script_vocabs)
+        # CTC loss: per-segment if segments available, else per-image
+        if segments_ is not None and any(len(s) > 1 for s in segments_):
+            ctc_loss = compute_ctc_loss_segments(
+                out["logits"], segments_, out["lengths"],
+                data["group_script_names"], group_script_vocabs)
+        else:
+            all_ok = (tgt_lens_ <= out["lengths"]) & (tgt_lens_ > 0)
+            ctc_loss = compute_ctc_loss(
+                out["logits"], targets_, out["lengths"], tgt_lens_,
+                all_ok, gids_, sids_, group_script_vocabs)
 
         all_true = torch.ones(imgs_.shape[0], dtype=torch.bool, device=device)
         lid2_loss = compute_lid2_loss(
@@ -481,11 +486,15 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                 out["group_logits"].detach(), detached_script_logits)
 
     for batch_idx, batch in enumerate(train_loader):
-        if len(batch) == 7:
+        if len(batch) == 8:
+            imgs, targets, tgt_lens, gids, sids, _labels, group_labels, segments = batch
+        elif len(batch) == 7:
             imgs, targets, tgt_lens, gids, sids, _labels, group_labels = batch
+            segments = None
         else:
             imgs, targets, tgt_lens, gids, sids, _labels = batch
             group_labels = None
+            segments = None
         if batch_idx < 5:
             print(f"    [shape] batch {batch_idx}: imgs={list(imgs.shape)} "
                   f"B={imgs.shape[0]} W={imgs.shape[3]}", flush=True)
@@ -501,9 +510,9 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         try:
             ctc_loss, lid1_loss, lid2_loss, ace_loss, loss, group_logits, script_logits = \
                 _forward_backward(imgs, targets, tgt_lens, gids, sids, scale=1.0,
-                                  group_labels_=group_labels)
+                                  group_labels_=group_labels, segments_=segments)
         except torch.cuda.OutOfMemoryError:
-            del imgs, targets, tgt_lens, gids, sids, group_labels
+            del imgs, targets, tgt_lens, gids, sids, group_labels, segments
             optimizer.zero_grad(set_to_none=True)
             torch.cuda.empty_cache()
             oom_skipped += 1

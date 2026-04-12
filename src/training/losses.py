@@ -16,6 +16,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
+from src.encoding.decompose import encode_text, script_vocab_size
+
 
 def compute_lid1_loss(
     group_logits: Tensor,
@@ -117,6 +119,77 @@ def compute_ctc_loss(
 
     if ctc_samples > 0:
         ctc_loss = ctc_loss / ctc_samples
+    return ctc_loss
+
+
+def compute_ctc_loss_segments(
+    logits: Tensor,
+    segments_batch: list[list[dict]],
+    enc_lengths: Tensor,
+    group_script_names: list[list[str]],
+    group_script_vocabs: list[list[int]],
+) -> Tensor:
+    """Per-segment CTC loss for mixed-script support.
+
+    Each image has segments: [{group_id, script_id, text, width, offset}, ...]
+    Each segment's text is encoded with its script, and CTC loss is computed
+    on the corresponding frame slice using the correct group's vocab.
+    """
+    device = logits.device
+    B, T, _ = logits.shape
+    ctc_loss = torch.zeros(1, device=device)
+    ctc_chars = 0
+
+    for b in range(B):
+        segs = segments_batch[b]
+        img_w = sum(seg["width"] for seg in segs)
+        if img_w == 0:
+            continue
+
+        for seg in segs:
+            text = seg["text"]
+            g = seg["group_id"]
+            s = seg["script_id"]
+            offset_px = seg["offset"]
+            width_px = seg["width"]
+
+            if not text or width_px == 0:
+                continue
+
+            # Pixel range → frame range (W → W/2 downsampling)
+            frame_start = offset_px // 2
+            frame_end = min((offset_px + width_px) // 2, T)
+            seg_len = frame_end - frame_start
+            if seg_len < 1:
+                continue
+
+            # Encode text with correct script
+            script_name = group_script_names[g][s] if g < len(group_script_names) and s < len(group_script_names[g]) else ""
+            if not script_name:
+                continue
+            ids = encode_text(text, script_name)
+            if not ids or len(ids) > seg_len:
+                continue  # target longer than frames — CTC can't align
+
+            vs = group_script_vocabs[g][s] if g < len(group_script_vocabs) and s < len(group_script_vocabs[g]) else 0
+            if vs == 0:
+                continue
+
+            # CTC on this segment's frames
+            seg_logits = logits[b, frame_start:frame_end, :vs]  # (seg_len, vs)
+            seg_log_probs = seg_logits.float().log_softmax(dim=-1).unsqueeze(1)  # (seg_len, 1, vs)
+            seg_targets = torch.tensor(ids, dtype=torch.long, device=device)
+            seg_input_len = torch.tensor([seg_len], dtype=torch.long, device=device)
+            seg_target_len = torch.tensor([len(ids)], dtype=torch.long, device=device)
+
+            seg_ctc = F.ctc_loss(
+                seg_log_probs, seg_targets, seg_input_len, seg_target_len,
+                blank=0, reduction="sum", zero_infinity=True)
+            ctc_loss = ctc_loss + seg_ctc
+            ctc_chars += len(ids)
+
+    if ctc_chars > 0:
+        ctc_loss = ctc_loss / ctc_chars
     return ctc_loss
 
 
