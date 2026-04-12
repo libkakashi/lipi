@@ -66,7 +66,10 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
     s_lid2_total: dict[tuple[int, int], int] = {}
 
     for batch_idx, batch in enumerate(val_loader):
-        imgs, targets, tgt_lens, gids, sids, labels = batch
+        if len(batch) == 7:
+            imgs, targets, tgt_lens, gids, sids, labels, _group_labels = batch
+        else:
+            imgs, targets, tgt_lens, gids, sids, labels = batch
         imgs = imgs.to(device, non_blocking=True)
         gids = gids.to(device, non_blocking=True)
         sids_dev = sids.to(device, non_blocking=True)

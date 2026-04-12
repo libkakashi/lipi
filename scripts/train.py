@@ -430,13 +430,21 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
     shared_norm = 0.0
     expert_norm = 0.0
 
-    def _forward_backward(imgs_, targets_, tgt_lens_, gids_, sids_, scale):
+    def _forward_backward(imgs_, targets_, tgt_lens_, gids_, sids_, scale,
+                          group_labels_=None):
         """Run forward + backward on a (sub-)batch. scale adjusts loss."""
         with torch.amp.autocast(device_type, enabled=use_amp, dtype=amp_dtype):
             out = model(imgs_, group_ids=gids_, script_ids=sids_,
                         detach_for_experts=detach_for_experts)
 
-        lid1_loss = compute_lid1_loss(out["group_logits"], gids_, ce_loss_fn)
+        # Frame-level group labels: downsample pixel-level (W) to frame-level (W/2)
+        if group_labels_ is not None and out["group_logits"].dim() == 3:
+            T = out["group_logits"].shape[1]
+            # Downsample by taking every other pixel (matches stride-2 width downsample)
+            gl_frames = group_labels_[:, ::2][:, :T]  # (B, T)
+            lid1_loss = compute_lid1_loss(out["group_logits"], gl_frames, ce_loss_fn)
+        else:
+            lid1_loss = compute_lid1_loss(out["group_logits"], gids_, ce_loss_fn)
 
         all_ok = (tgt_lens_ <= out["lengths"]) & (tgt_lens_ > 0)
         ctc_loss = compute_ctc_loss(
@@ -472,7 +480,12 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         return (ctc_loss, lid1_loss, lid2_loss, ace_loss, loss,
                 out["group_logits"].detach(), detached_script_logits)
 
-    for batch_idx, (imgs, targets, tgt_lens, gids, sids, _labels) in enumerate(train_loader):
+    for batch_idx, batch in enumerate(train_loader):
+        if len(batch) == 7:
+            imgs, targets, tgt_lens, gids, sids, _labels, group_labels = batch
+        else:
+            imgs, targets, tgt_lens, gids, sids, _labels = batch
+            group_labels = None
         if batch_idx < 5:
             print(f"    [shape] batch {batch_idx}: imgs={list(imgs.shape)} "
                   f"B={imgs.shape[0]} W={imgs.shape[3]}", flush=True)
@@ -482,10 +495,13 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         tgt_lens = tgt_lens.to(device, non_blocking=True)
         gids = gids.to(device, non_blocking=True)
         sids = sids.to(device, non_blocking=True)
+        if group_labels is not None:
+            group_labels = group_labels.to(device, non_blocking=True)
 
         try:
             ctc_loss, lid1_loss, lid2_loss, ace_loss, loss, group_logits, script_logits = \
-                _forward_backward(imgs, targets, tgt_lens, gids, sids, scale=1.0)
+                _forward_backward(imgs, targets, tgt_lens, gids, sids, scale=1.0,
+                                  group_labels_=group_labels)
         except torch.cuda.OutOfMemoryError:
             del imgs, targets, tgt_lens, gids, sids
             optimizer.zero_grad(set_to_none=True)

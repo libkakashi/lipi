@@ -394,6 +394,7 @@ MDS_COLUMNS = {
     "target_ids": "ndarray:int64",
     "target_len": "int",
     "width": "int",
+    "group_labels": "ndarray:int32",  # per-pixel group IDs (W,), -1 = same as group_id
 }
 
 
@@ -426,6 +427,9 @@ def save_mds_samples(images, labels, script, train_dir, val_dir, chunk_id):
         for idx, (img_tensor, label, ids) in enumerate(zip(images, labels, encoded)):
             img_np = img_tensor.numpy()
             tids = np.array(ids, dtype=np.int64) if ids else np.zeros(1, dtype=np.int64)
+            w = img_np.shape[2]
+            # Single-script: all pixels have same group
+            gl = np.full(w, group_id, dtype=np.int32)
             sample = {
                 "image": img_np,
                 "label": label,
@@ -433,7 +437,8 @@ def save_mds_samples(images, labels, script, train_dir, val_dir, chunk_id):
                 "group_id": group_id,
                 "target_ids": tids,
                 "target_len": len(ids),
-                "width": img_np.shape[2],
+                "width": w,
+                "group_labels": gl,
             }
             h = int(hashlib.md5(f"{chunk_id}_{idx}_{label}".encode()).hexdigest(), 16)
             if h % 1000 < 100 and val_count < _MAX_VAL_PER_SCRIPT:  # 10% val, capped
@@ -458,7 +463,7 @@ def _generate_mixed_batch(args_tuple):
     aug = RandAugmentOCR(n_ops=2, p=0.5) if do_augment else None
     t0 = time.time()
 
-    images, labels, script_ids_list, group_ids_list = [], [], [], []
+    images, labels, script_ids_list, group_ids_list, group_labels_list = [], [], [], [], []
     attempts = 0
 
     # all_script_info: list of (script, fonts, words, script_id, group_id)
@@ -512,11 +517,18 @@ def _generate_mixed_batch(args_tuple):
         # Label: concatenated text
         label = word1 + word2
 
-        # Store as primary script (first word) — frame CTC handles the rest
+        # Per-pixel group labels based on render widths
+        import numpy as np
+        final_w = combined.width
+        boundary = int(img1.width / w_total * final_w)  # scale to final size
+        gl = np.full(final_w, gid2, dtype=np.int32)
+        gl[:boundary] = gid1
+
         images.append(rgb_to_input(combined))
         labels.append(label)
         script_ids_list.append(sid1)
         group_ids_list.append(gid1)
+        group_labels_list.append(gl)
 
     # Write to MDS
     if not images:
@@ -536,8 +548,8 @@ def _generate_mixed_batch(args_tuple):
     val_count = 0
     with MDSWriter(out=t_dir, columns=MDS_COLUMNS, size_limit=1 << 26) as tw, \
          MDSWriter(out=v_dir, columns=MDS_COLUMNS, size_limit=1 << 26) as vw:
-        for idx, (img_tensor, label, sid, gid) in enumerate(
-                zip(images, labels, script_ids_list, group_ids_list)):
+        for idx, (img_tensor, label, sid, gid, gl) in enumerate(
+                zip(images, labels, script_ids_list, group_ids_list, group_labels_list)):
             # Encode using primary script
             script_name = SCRIPTS[sid]
             ids = encode_text(label, script_name)
@@ -551,6 +563,7 @@ def _generate_mixed_batch(args_tuple):
                 "target_ids": tids,
                 "target_len": len(ids),
                 "width": img_np.shape[2],
+                "group_labels": gl,
             }
             h_val = int(hashlib.md5(f"{chunk_id}_{idx}_{label}".encode()).hexdigest(), 16)
             if h_val % 1000 < 100 and val_count < _MAX_VAL_PER_SCRIPT:

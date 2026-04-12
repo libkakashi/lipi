@@ -123,10 +123,22 @@ class LipiStreamingDataset(Dataset):
         tids = torch.from_numpy(sample["target_ids"].copy())  # (L,) int64
         tlen = torch.tensor(sample["target_len"], dtype=torch.long)
 
+        # Per-pixel group labels → remap to local group IDs
+        if "group_labels" in sample:
+            gl = sample["group_labels"].copy()
+            # Remap global group IDs to local
+            remapped = np.zeros_like(gl)
+            for gid_global, gid_local in self._global_to_local_group.items():
+                remapped[gl == gid_global] = gid_local
+            group_labels = torch.from_numpy(remapped).to(torch.long)  # (W,)
+        else:
+            # Legacy: all pixels same group
+            group_labels = torch.full((img.shape[2],), local_gid, dtype=torch.long)
+
         return (img, tids, tlen,
                 torch.tensor(local_gid, dtype=torch.long),
                 torch.tensor(local_sid, dtype=torch.long),
-                label)
+                label, group_labels)
 
 
 # ---------------------------------------------------------------------------
@@ -193,12 +205,9 @@ class WidthSortedBatchSampler(Sampler):
 # Collate
 # ---------------------------------------------------------------------------
 
-def collate_moe(batch) -> tuple[
-    torch.Tensor, torch.Tensor, torch.Tensor,
-    torch.Tensor, torch.Tensor, list[str]
-]:
-    """Stack batch, padding images and targets to max size in batch."""
-    imgs, targets, tgt_lens, gids, sids, labels = zip(*batch)
+def collate_moe(batch):
+    """Stack batch, padding images, targets, and group_labels to max size."""
+    imgs, targets, tgt_lens, gids, sids, labels, group_labels = zip(*batch)
 
     # Pad images to max width in batch, rounded up to multiple of 4
     max_w = max(img.shape[2] for img in imgs)
@@ -221,5 +230,15 @@ def collate_moe(batch) -> tuple[
         else:
             padded_tgt.append(t)
 
+    # Pad group_labels to max_w (pixel-level, same padding as images)
+    padded_gl = []
+    for gl in group_labels:
+        if gl.shape[0] < max_w:
+            # Pad with the last group label (or first — doesn't matter for padded region)
+            padded_gl.append(torch.cat([gl, gl[-1:].expand(max_w - gl.shape[0])]))
+        else:
+            padded_gl.append(gl[:max_w])
+
     return (torch.stack(padded), torch.stack(padded_tgt), torch.stack(tgt_lens),
-            torch.stack(gids), torch.stack(sids), list(labels))
+            torch.stack(gids), torch.stack(sids), list(labels),
+            torch.stack(padded_gl))
