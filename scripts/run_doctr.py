@@ -123,13 +123,13 @@ def detect_words(page_images: list[Image.Image]):
 
 
 def prepare_crop(crop_img: Image.Image) -> torch.Tensor:
-    """Resize crop to height=32 preserving aspect ratio, then convert to L+a."""
+    """Resize crop to height=32 preserving aspect ratio, convert to RGB tensor."""
     w, h = crop_img.size
     new_w = max(4, int(w * IMG_HEIGHT / h))
     # Width must be multiple of 4 (two 2x downsamples)
     new_w = (new_w + 3) // 4 * 4
     resized = crop_img.resize((new_w, IMG_HEIGHT), Image.BILINEAR)
-    return rgb_to_input(resized)  # (2, 32, new_w)
+    return rgb_to_input(resized)  # (3, 32, new_w)
 
 
 def ctc_decode(logits: torch.Tensor, vocab_size: int) -> list[int]:
@@ -394,7 +394,7 @@ def recognize_crops(model, crops: list[dict], script_names: list[list[str]],
             else:
                 padded.append(t)
 
-        batch_tensor = torch.stack(padded).to(device)  # (B, 2, 32, max_w)
+        batch_tensor = torch.stack(padded).to(device)  # (B, 3, 32, max_w)
 
         # Two-pass strategy for forced routing:
         # Pass 1 (cheap): run just through shared encoder to get group_logits,

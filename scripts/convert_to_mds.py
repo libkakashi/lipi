@@ -25,7 +25,7 @@ from src.model.lid import SCRIPTS
 
 # MDS column schema
 MDS_COLUMNS = {
-    "image": "ndarray:uint8",       # (2, 32, W) — variable width
+    "image": "ndarray:uint8",       # (3, 32, W) — variable width
     "label": "str",                  # text label
     "script_id": "int",             # global script ID (0-25)
     "group_id": "int",              # global group ID (0-12)

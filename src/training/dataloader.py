@@ -111,7 +111,7 @@ class LipiStreamingDataset(Dataset):
     def __getitem__(self, idx):
         sample = self._ds[idx]
 
-        img = torch.from_numpy(sample["image"].copy())     # (2, 32, W) uint8
+        img = torch.from_numpy(sample["image"].copy())     # (3, 32, W) uint8
         label = sample["label"]                             # str
         global_sid = sample["script_id"]                    # int
         global_gid = sample["group_id"]                     # int

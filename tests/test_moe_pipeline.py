@@ -857,7 +857,7 @@ class TestModelConstruction:
     def test_forward_runs_without_error(self, model_and_vocabs):
         model, _, _, _ = model_and_vocabs
         model.eval()
-        x = torch.randn(2, 2, 32, 192)
+        x = torch.randn(2, 3, 32, 192)
         with torch.no_grad():
             out = model(x)
         assert "logits" in out
@@ -870,7 +870,7 @@ class TestModelConstruction:
     def test_forward_with_gt_routing(self, model_and_vocabs):
         model, _, _, active_groups = model_and_vocabs
         model.eval()
-        x = torch.randn(4, 2, 32, 192)
+        x = torch.randn(4, 3, 32, 192)
         gids = torch.tensor([0, 1, 2, 0])
         sids = torch.tensor([0, 0, 0, 0])
         with torch.no_grad():
@@ -945,7 +945,7 @@ class TestModelConstruction:
         model.eval()
         B, W = 3, 192
         T = W // 4
-        x = torch.randn(B, 2, 32, W)
+        x = torch.randn(B, 3, 32, W)
         with torch.no_grad():
             out = model(x)
         assert out["logits"].shape[1] == T

@@ -29,7 +29,7 @@ def estimate_pixel_budget(model, vram_gb: float = 32) -> int:
         torch.cuda.empty_cache()
         baseline = torch.cuda.memory_allocated(device)
 
-        imgs = torch.randn(B, 2, 32, W, device=device, dtype=torch.float32)
+        imgs = torch.randn(B, 3, 32, W, device=device, dtype=torch.float32)
         gids = torch.randint(0, num_groups, (B,), device=device)
         sids = torch.zeros(B, dtype=torch.long, device=device)
 

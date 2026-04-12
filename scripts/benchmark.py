@@ -154,7 +154,7 @@ def evaluate_benchmark(model, samples, device, device_type, group_script_vocab_s
 
         # Pad to same width
         max_w = max(img.shape[2] for img in imgs)
-        padded = torch.zeros(len(imgs), 2, 32, max_w, dtype=torch.uint8)
+        padded = torch.zeros(len(imgs), 3, 32, max_w, dtype=torch.uint8)
         for i, img in enumerate(imgs):
             padded[i, :, :, :img.shape[2]] = img
 
