@@ -336,13 +336,23 @@ class LipiMoEEncoder(nn.Module):
         self.proj = nn.Linear(backbone_ch, dim)
 
         # Expert 2D shifted window attention blocks (h=2, w=W)
-        # Alternating shift/no-shift so information crosses window boundaries
-        self.expert_blocks = nn.ModuleList([
-            ExpertBlock(dim=dim, num_heads=dim // 64, num_groups=num_groups,
-                        window_h=2, window_w=window_w, shift=(i % 2 == 1),
-                        mlp_ratio=mlp_ratio)
-            for i in range(num_expert_blocks)
-        ])
+        # First half: local windows (per-character)
+        # Second half: wide windows (word-level context)
+        # Alternating shift/no-shift within each half
+        wide_window_w = window_w * 4  # 128 default
+        n_local = num_expert_blocks // 2
+        n_wide = num_expert_blocks - n_local
+        self.expert_blocks = nn.ModuleList()
+        for i in range(n_local):
+            self.expert_blocks.append(
+                ExpertBlock(dim=dim, num_heads=dim // 64, num_groups=num_groups,
+                            window_h=2, window_w=window_w, shift=(i % 2 == 1),
+                            mlp_ratio=mlp_ratio))
+        for i in range(n_wide):
+            self.expert_blocks.append(
+                ExpertBlock(dim=dim, num_heads=dim // 64, num_groups=num_groups,
+                            window_h=2, window_w=wide_window_w, shift=(i % 2 == 1),
+                            mlp_ratio=mlp_ratio))
 
         # Pool height after experts
         self.h_pool = nn.AdaptiveAvgPool2d((1, None))  # h→1, keep w
