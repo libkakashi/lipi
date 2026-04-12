@@ -579,21 +579,37 @@ class LipiMoEEncoder(nn.Module):
             if not sample_mask.any():
                 continue
 
-            # Get logits from this group's CTC head for all frames
-            local_script_ids = None
-            if script_ids is not None:
-                local_script_ids = script_ids[sample_mask]
-            g_logits, g_script_logits, _ = self.ctc_modules[g](
-                x[sample_mask], script_ids=local_script_ids)
-            # g_logits: (N, T, group_vocab)
+            # Check if all samples with this group are fully this group (single-script)
+            all_single = (frame_mask[sample_mask].all(dim=1)).all().item()
 
-            # Write only at frames belonging to this group
-            for i, b_idx in enumerate(sample_mask.nonzero(as_tuple=True)[0]):
-                f_mask = frame_mask[b_idx]  # (T,)
-                logits[b_idx, f_mask, :g_logits.shape[-1]] = g_logits[i, f_mask].to(logits.dtype)
-
-            if g_script_logits is not None:
-                all_script_logits.append((g, g_script_logits, sample_mask))
+            if all_single:
+                # Fast path: pass full sequences (all frames belong to this group)
+                local_script_ids = None
+                if script_ids is not None:
+                    local_script_ids = script_ids[sample_mask]
+                g_logits, g_script_logits, _ = self.ctc_modules[g](
+                    x[sample_mask], script_ids=local_script_ids)
+                for i, b_idx in enumerate(sample_mask.nonzero(as_tuple=True)[0]):
+                    f_mask = frame_mask[b_idx]
+                    logits[b_idx, f_mask, :g_logits.shape[-1]] = g_logits[i, f_mask].to(logits.dtype)
+                if g_script_logits is not None:
+                    all_script_logits.append((g, g_script_logits, sample_mask))
+            else:
+                # Mixed path: extract each sample's segment for this group
+                for b_idx in sample_mask.nonzero(as_tuple=True)[0]:
+                    f_mask = frame_mask[b_idx]  # (T,)
+                    seg_len = f_mask.sum().item()
+                    if seg_len == 0:
+                        continue
+                    seg_features = x[b_idx, f_mask].unsqueeze(0)  # (1, seg_len, dim)
+                    local_sid = script_ids[b_idx:b_idx+1] if script_ids is not None else None
+                    seg_logits, seg_script_logits, _ = self.ctc_modules[g](
+                        seg_features, script_ids=local_sid)
+                    logits[b_idx, f_mask, :seg_logits.shape[-1]] = seg_logits.squeeze(0).to(logits.dtype)
+                    if seg_script_logits is not None:
+                        seg_mask = torch.zeros(B, dtype=torch.bool, device=x.device)
+                        seg_mask[b_idx] = True
+                        all_script_logits.append((g, seg_script_logits, seg_mask))
 
         lengths = torch.full((B,), T, dtype=torch.long, device=x.device)
 
