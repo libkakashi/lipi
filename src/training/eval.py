@@ -170,51 +170,61 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
                         s_lid2_correct[key] = s_lid2_correct.get(key, 0) + (
                             pred_scripts[s_mask] == ls).sum().item()
 
-        # Build predicted script ID per sample (from LID-2)
-        pred_sids = sids.clone()
-        for g_idx, script_logits, group_mask in out["script_logits_per_group"]:
-            if script_logits is not None:
-                pred_sids[group_mask.cpu()] = script_logits.argmax(-1).cpu()
-
-        # CTC decode — slice to per-script vocab size before argmax
-        # (positions beyond vocab_size are zero-padded and would win argmax
-        # once real logits go negative during training)
+        # Per-frame CTC decode: segment by predicted group, decode each, concat
         all_logits = out["logits"].float().cpu()
-        pred_gids_cpu = pred_gids.cpu().tolist()
+        gl_cpu = out["group_logits"].cpu()
         gids_cpu = gids.cpu().tolist()
         sids_cpu = sids.cpu().tolist()
-        pred_sids_cpu = pred_sids.cpu().tolist()
-        for i, (label, pred_g, true_g, local_sid, pred_sid) in enumerate(
-                zip(labels, pred_gids_cpu, gids_cpu, sids_cpu, pred_sids_cpu)):
-            if pred_g >= n_groups:
-                continue
+
+        for i, (label, true_g, local_sid) in enumerate(
+                zip(labels, gids_cpu, sids_cpu)):
             key = (true_g, local_sid)
             ref_s = str(label).strip().lower()
 
-            # Only decode when LID-1 correct
-            if pred_g != true_g:
-                ctc_total += 1
-                g_word_total[true_g] += 1
-                g_char_total[true_g] += len(ref_s)
-                total_chars += len(ref_s)
-                s_word_total[key] = s_word_total.get(key, 0) + 1
-                s_char_total[key] = s_char_total.get(key, 0) + len(ref_s)
-                continue
+            # Get per-frame group predictions for this image
+            if gl_cpu.dim() == 3:
+                frame_preds = gl_cpu[i].argmax(dim=-1)  # (T,)
+            else:
+                frame_preds = torch.full((all_logits.shape[1],), gl_cpu[i].argmax().item())
 
-            # CTC greedy decode: argmax → collapse repeats → remove blanks
-            pred_sid_safe = min(pred_sid, len(group_script_names[pred_g]) - 1)
-            vs = group_script_vocab_sizes[pred_g][pred_sid_safe] if group_script_vocab_sizes else script_vocab_size(group_script_names[pred_g][pred_sid_safe])
-            seq = all_logits[i, :, :vs].argmax(dim=-1).tolist()
-            ids = []
-            prev = -1
-            for t in seq:
-                if t != prev and t != 0:
-                    ids.append(t)
-                prev = t
+            # Segment by contiguous group runs
+            decoded_parts = []
+            t = 0
+            T_img = frame_preds.shape[0]
+            while t < T_img:
+                g = frame_preds[t].item()
+                # Find end of this group's contiguous run
+                t_end = t + 1
+                while t_end < T_img and frame_preds[t_end].item() == g:
+                    t_end += 1
 
-            script_name = group_script_names[pred_g][pred_sid_safe] if pred_g < len(group_script_names) else ""
-            raw_decoded = decode_ids(ids, script_name) if script_name else ""
-            dec_s = raw_decoded.strip().lower()
+                if g >= n_groups:
+                    t = t_end
+                    continue
+
+                # Decode this segment
+                # Use first script in group (LID-2 would refine, but for eval simplicity)
+                s_idx = 0
+                if group_script_vocab_sizes:
+                    vs = group_script_vocab_sizes[g][s_idx]
+                else:
+                    vs = script_vocab_size(group_script_names[g][s_idx])
+                seg_logits = all_logits[i, t:t_end, :vs]
+                seq = seg_logits.argmax(dim=-1).tolist()
+                ids = []
+                prev = -1
+                for tok in seq:
+                    if tok != prev and tok != 0:
+                        ids.append(tok)
+                    prev = tok
+
+                script_name = group_script_names[g][s_idx] if g < len(group_script_names) else ""
+                if script_name and ids:
+                    decoded_parts.append(decode_ids(ids, script_name))
+
+                t = t_end
+
+            dec_s = "".join(decoded_parts).strip().lower()
 
             ctc_total += 1
             g_word_total[true_g] += 1
@@ -223,7 +233,6 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
                 ctc_correct += 1
                 g_word_correct[true_g] += 1
                 s_word_correct[key] = s_word_correct.get(key, 0) + 1
-            # CER via edit distance: correct_chars = ref_len - edit_dist
             edits = _edit_distance(dec_s, ref_s)
             matched = max(0, len(ref_s) - edits)
             total_chars += len(ref_s)
