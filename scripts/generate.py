@@ -394,7 +394,8 @@ MDS_COLUMNS = {
     "target_ids": "ndarray:int64",
     "target_len": "int",
     "width": "int",
-    "group_labels": "ndarray:int32",  # per-pixel group IDs (W,), -1 = same as group_id
+    "group_labels": "ndarray:int32",  # per-pixel group IDs (W,)
+    "segments": "str",  # JSON: [{"group_id", "script_id", "text", "width", "offset"}]
 }
 
 
@@ -427,9 +428,13 @@ def save_mds_samples(images, labels, script, train_dir, val_dir, chunk_id):
         for idx, (img_tensor, label, ids) in enumerate(zip(images, labels, encoded)):
             img_np = img_tensor.numpy()
             tids = np.array(ids, dtype=np.int64) if ids else np.zeros(1, dtype=np.int64)
+            import json
             w = img_np.shape[2]
-            # Single-script: all pixels have same group
             gl = np.full(w, group_id, dtype=np.int32)
+            segs = json.dumps([{
+                "group_id": group_id, "script_id": script_id,
+                "text": label, "width": w, "offset": 0,
+            }])
             sample = {
                 "image": img_np,
                 "label": label,
@@ -439,6 +444,7 @@ def save_mds_samples(images, labels, script, train_dir, val_dir, chunk_id):
                 "target_len": len(ids),
                 "width": w,
                 "group_labels": gl,
+                "segments": segs,
             }
             h = int(hashlib.md5(f"{chunk_id}_{idx}_{label}".encode()).hexdigest(), 16)
             if h % 1000 < 100 and val_count < _MAX_VAL_PER_SCRIPT:  # 10% val, capped
@@ -463,7 +469,7 @@ def _generate_mixed_batch(args_tuple):
     aug = RandAugmentOCR(n_ops=2, p=0.5) if do_augment else None
     t0 = time.time()
 
-    images, labels, script_ids_list, group_ids_list, group_labels_list = [], [], [], [], []
+    images, labels, script_ids_list, group_ids_list, group_labels_list, segments_list = [], [], [], [], [], []
     attempts = 0
 
     # all_script_info: list of (script, fonts, words, script_id, group_id)
@@ -517,17 +523,26 @@ def _generate_mixed_batch(args_tuple):
         # Label: concatenated text
         label = word1 + word2
 
-        # Per-pixel group labels based on render widths
+        # Per-pixel group labels and segments based on render widths
+        import json
         final_w = combined.width
-        boundary = int(img1.width / w_total * final_w)  # scale proportionally
+        boundary = int(img1.width / w_total * final_w)
         gl = np.full(final_w, gid2, dtype=np.int32)
         gl[:boundary] = gid1
+
+        segs = json.dumps([
+            {"group_id": gid1, "script_id": sid1, "text": word1,
+             "width": boundary, "offset": 0},
+            {"group_id": gid2, "script_id": sid2, "text": word2,
+             "width": final_w - boundary, "offset": boundary},
+        ])
 
         images.append(rgb_to_input(combined))
         labels.append(label)
         script_ids_list.append(sid1)
         group_ids_list.append(gid1)
         group_labels_list.append(gl)
+        segments_list.append(segs)
 
     # Write to MDS
     if not images:
@@ -547,9 +562,10 @@ def _generate_mixed_batch(args_tuple):
     val_count = 0
     with MDSWriter(out=t_dir, columns=MDS_COLUMNS, size_limit=1 << 26) as tw, \
          MDSWriter(out=v_dir, columns=MDS_COLUMNS, size_limit=1 << 26) as vw:
-        for idx, (img_tensor, label, sid, gid, gl) in enumerate(
-                zip(images, labels, script_ids_list, group_ids_list, group_labels_list)):
-            # Encode using primary script
+        for idx, (img_tensor, label, sid, gid, gl, segs) in enumerate(
+                zip(images, labels, script_ids_list, group_ids_list,
+                    group_labels_list, segments_list)):
+            # Encode using primary script (for legacy target_ids)
             script_name = SCRIPTS[sid]
             ids = encode_text(label, script_name)
             img_np = img_tensor.numpy()
@@ -563,6 +579,7 @@ def _generate_mixed_batch(args_tuple):
                 "target_len": len(ids),
                 "width": img_np.shape[2],
                 "group_labels": gl,
+                "segments": segs,
             }
             h_val = int(hashlib.md5(f"{chunk_id}_{idx}_{label}".encode()).hexdigest(), 16)
             if h_val % 1000 < 100 and val_count < _MAX_VAL_PER_SCRIPT:

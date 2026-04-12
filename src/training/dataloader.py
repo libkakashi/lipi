@@ -126,19 +126,29 @@ class LipiStreamingDataset(Dataset):
         # Per-pixel group labels → remap to local group IDs
         if "group_labels" in sample:
             gl = sample["group_labels"].copy()
-            # Remap global group IDs to local
             remapped = np.zeros_like(gl)
             for gid_global, gid_local in self._global_to_local_group.items():
                 remapped[gl == gid_global] = gid_local
-            group_labels = torch.from_numpy(remapped).to(torch.long)  # (W,)
+            group_labels = torch.from_numpy(remapped).to(torch.long)
         else:
-            # Legacy: all pixels same group
             group_labels = torch.full((img.shape[2],), local_gid, dtype=torch.long)
+
+        # Segments: per-word metadata for mixed-script CTC loss
+        import json
+        if "segments" in sample:
+            segments = json.loads(sample["segments"])
+            # Remap group/script IDs to local
+            for seg in segments:
+                seg["group_id"] = self._global_to_local_group.get(seg["group_id"], 0)
+                seg["script_id"] = self._global_sid_to_local.get(seg["script_id"], 0)
+        else:
+            segments = [{"group_id": local_gid, "script_id": local_sid,
+                         "text": label, "width": img.shape[2], "offset": 0}]
 
         return (img, tids, tlen,
                 torch.tensor(local_gid, dtype=torch.long),
                 torch.tensor(local_sid, dtype=torch.long),
-                label, group_labels)
+                label, group_labels, segments)
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +217,7 @@ class WidthSortedBatchSampler(Sampler):
 
 def collate_moe(batch):
     """Stack batch, padding images, targets, and group_labels to max size."""
-    imgs, targets, tgt_lens, gids, sids, labels, group_labels = zip(*batch)
+    imgs, targets, tgt_lens, gids, sids, labels, group_labels, segments = zip(*batch)
 
     # Pad images to max width in batch, rounded up to multiple of 4
     max_w = max(img.shape[2] for img in imgs)
@@ -241,4 +251,4 @@ def collate_moe(batch):
 
     return (torch.stack(padded), torch.stack(padded_tgt), torch.stack(tgt_lens),
             torch.stack(gids), torch.stack(sids), list(labels),
-            torch.stack(padded_gl))
+            torch.stack(padded_gl), list(segments))
