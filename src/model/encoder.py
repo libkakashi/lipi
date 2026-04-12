@@ -3,15 +3,15 @@ Lipi v3 MoE Vision Encoder.
 
 Architecture:
     Input: (B, 3, 32, W) — RGB
-    -> HGNetV2 backbone (pretrained, no width downsample, 1024ch)
-       → (B, 1024, 2, W)
+    -> HGNetV2 backbone (pretrained, 1024ch)
+       → (B, 1024, 2, W/2)
     -> LID-1: 13-group classification
     -> Project 1024 → dim
     -> Local expert blocks (h=2, 2×32 windows, per-character)
     -> Pool h=2→1
     -> Wide expert blocks (h=1, 1×128 windows, word-context)
     -> Aggregate local + wide features
-    -> LID-2 + Per-script CTC heads (T=W)
+    -> LID-2 + Per-script CTC heads (T=W/2)
 """
 
 import torch
@@ -249,11 +249,11 @@ class LipiMoEEncoder(nn.Module):
     """
 
     _OCR_STRIDES = {
-        'stem.stem1.conv': (2, 1),
-        'stem.stem3.conv': (2, 1),
-        'stages_1.downsample.conv': (2, 1),
-        'stages_2.downsample.conv': (2, 1),
-        'stages_3.downsample.conv': (1, 1),
+        'stem.stem1.conv': (2, 1),              # h/2
+        'stem.stem3.conv': (2, 1),              # h/4
+        'stages_1.downsample.conv': (2, 2),     # h/8, w/2  ← one width downsample
+        'stages_2.downsample.conv': (2, 1),     # h/16
+        'stages_3.downsample.conv': (1, 1),     # keep h=2
     }
 
     def __init__(

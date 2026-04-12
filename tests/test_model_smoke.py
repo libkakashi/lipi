@@ -29,6 +29,6 @@ def test_model_forward_pass():
     assert "script_logits_per_group" in out
     assert out["logits"].shape[0] == B
     assert out["lengths"].shape[0] == B
-    # T = W (no width downsampling)
-    assert out["lengths"][0].item() == W
+    # T = W/2
+    assert out["lengths"][0].item() == W // 2
     assert out["group_logits"].shape == (B, 2)
