@@ -24,19 +24,24 @@ from src.model.lid import LIDCoarse, NUM_GROUPS
 
 
 class WindowedAttention(nn.Module):
-    """Multi-head self-attention within fixed-size windows on flattened 2D sequences.
+    """Shifted window attention on flattened 2D sequences (Swin-style).
 
-    Partitions (B, h*w, C) into non-overlapping windows of size window_h × window_w,
-    applies attention within each window.
+    Partitions (B, h*w, C) into non-overlapping windows of size window_h × window_w.
+    Alternating blocks shift by half the window size so information crosses
+    window boundaries. After 2 blocks, every position has attended to
+    positions 1.5× the window size away.
     """
 
-    def __init__(self, dim: int, num_heads: int, window_h: int = 2, window_w: int = 32):
+    def __init__(self, dim: int, num_heads: int,
+                 window_h: int = 2, window_w: int = 32, shift: bool = False):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.scale = self.head_dim ** -0.5
         self.window_h = window_h
         self.window_w = window_w
+        self.shift = shift
+        self.shift_w = window_w // 2 if shift else 0
         self.qkv = nn.Linear(dim, 3 * dim)
         self.proj = nn.Linear(dim, dim)
 
@@ -44,13 +49,17 @@ class WindowedAttention(nn.Module):
         B, N, C = x.shape
         x = x.reshape(B, h, w, C)
 
+        # Cyclic shift (Swin-style)
+        if self.shift_w > 0:
+            x = torch.roll(x, shifts=-self.shift_w, dims=2)
+
         # Pad width to be divisible by window_w
         pad_w = (self.window_w - w % self.window_w) % self.window_w
         if pad_w > 0:
             x = F.pad(x, (0, 0, 0, pad_w))
         wp = w + pad_w
 
-        # Partition into windows: (B, h/wh, wh, w/ww, ww, C)
+        # Partition into windows
         nH = h // self.window_h
         nW = wp // self.window_w
         x = x.reshape(B, nH, self.window_h, nW, self.window_w, C)
@@ -61,18 +70,57 @@ class WindowedAttention(nn.Module):
         qkv = qkv.permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
         attn = (q @ k.transpose(-2, -1)) * self.scale
+
+        # Attention mask for shifted windows (prevent cross-region attention)
+        if self.shift_w > 0:
+            mask = self._build_shift_mask(h, wp, x.device)  # (nwin, ws, ws)
+            # attn is (B*nwin, heads, ws, ws) — reshape to apply per-window mask
+            num_windows = nH * nW
+            attn = attn.reshape(B, num_windows, self.num_heads, -1, attn.shape[-1])
+            attn = attn + mask.unsqueeze(0).unsqueeze(2)  # broadcast over B and heads
+            attn = attn.reshape(-1, self.num_heads, attn.shape[-2], attn.shape[-1])
+
         attn = F.softmax(attn, dim=-1)
         out = (attn @ v).transpose(1, 2).reshape(B * nH * nW, self.window_h * self.window_w, C)
-
-        # Output projection
         out = self.proj(out)
 
         # Merge windows back
         out = out.reshape(B, nH, nW, self.window_h, self.window_w, C)
         out = out.permute(0, 1, 3, 2, 4, 5).reshape(B, nH * self.window_h, wp, C)
-        out = out[:, :h, :w, :].reshape(B, h * w, C)
+        out = out[:, :h, :w, :].reshape(B, h, w, C)
 
-        return out
+        # Reverse shift
+        if self.shift_w > 0:
+            out = torch.roll(out, shifts=self.shift_w, dims=2)
+
+        return out.reshape(B, h * w, C)
+
+    def _build_shift_mask(self, h: int, wp: int, device: torch.device) -> Tensor:
+        """Build attention mask for shifted windows.
+
+        Tokens from different original regions in the same shifted window
+        must not attend to each other.
+        """
+        mask = torch.zeros(1, h, wp, 1, device=device)
+        # Mark regions: before shift boundary vs after
+        w_slices = [
+            slice(0, -self.window_w),
+            slice(-self.window_w, -self.shift_w),
+            slice(-self.shift_w, None),
+        ]
+        region_id = 0
+        for ws in w_slices:
+            mask[:, :, ws, :] = region_id
+            region_id += 1
+
+        # Partition mask into windows
+        nH = h // self.window_h
+        nW = wp // self.window_w
+        mask = mask.reshape(1, nH, self.window_h, nW, self.window_w, 1)
+        mask = mask.permute(0, 1, 3, 2, 4, 5).reshape(nH * nW, self.window_h * self.window_w)
+        attn_mask = mask.unsqueeze(2) - mask.unsqueeze(1)
+        attn_mask = attn_mask.masked_fill(attn_mask != 0, -100.0).masked_fill(attn_mask == 0, 0.0)
+        return attn_mask
 
 
 class MLP(nn.Module):
@@ -95,12 +143,13 @@ class ExpertBlock(nn.Module):
     """
 
     def __init__(self, dim: int, num_heads: int, num_groups: int,
-                 window_h: int = 2, window_w: int = 32, mlp_ratio: int = 2):
+                 window_h: int = 2, window_w: int = 32, shift: bool = False,
+                 mlp_ratio: int = 2):
         super().__init__()
         self.num_groups = num_groups
         self.norm1 = nn.LayerNorm(dim)
         self.expert_attns = nn.ModuleList([
-            WindowedAttention(dim, num_heads, window_h, window_w)
+            WindowedAttention(dim, num_heads, window_h, window_w, shift=shift)
             for _ in range(num_groups)
         ])
         self.norm2 = nn.LayerNorm(dim)
@@ -286,11 +335,13 @@ class LipiMoEEncoder(nn.Module):
         # Project backbone features to expert dim
         self.proj = nn.Linear(backbone_ch, dim)
 
-        # Expert 2D windowed attention blocks (h=2, w=W)
+        # Expert 2D shifted window attention blocks (h=2, w=W)
+        # Alternating shift/no-shift so information crosses window boundaries
         self.expert_blocks = nn.ModuleList([
             ExpertBlock(dim=dim, num_heads=dim // 64, num_groups=num_groups,
-                        window_h=2, window_w=window_w, mlp_ratio=mlp_ratio)
-            for _ in range(num_expert_blocks)
+                        window_h=2, window_w=window_w, shift=(i % 2 == 1),
+                        mlp_ratio=mlp_ratio)
+            for i in range(num_expert_blocks)
         ])
 
         # Pool height after experts
