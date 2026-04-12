@@ -148,7 +148,7 @@ def compute_ctc_loss_segments(
 
             # Pixel range → frame range (W → W/2 downsampling)
             frame_start = offset_px // 2
-            frame_end = min((offset_px + width_px) // 2, T)
+            frame_end = min((offset_px + width_px + 1) // 2, T)
             seg_len = frame_end - frame_start
             if seg_len < 1:
                 continue

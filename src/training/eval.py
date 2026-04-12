@@ -132,7 +132,7 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
                 continue
             pred_scripts = script_logits.argmax(-1)
             true_scripts = sids_dev[group_mask]
-            lid1_ok = (pred_gids[group_mask] == gids[group_mask])
+            lid1_ok = (out["group_ids"][group_mask] == gids[group_mask])
             if lid1_ok.any():
                 lid2_correct += (pred_scripts[lid1_ok] == true_scripts[lid1_ok]).sum().item()
                 lid2_total += lid1_ok.sum().item()
@@ -181,7 +181,7 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
 
                 # Frame range for this segment
                 frame_start = seg_offset // 2
-                frame_end = min((seg_offset + seg_width) // 2, T_img)
+                frame_end = min((seg_offset + seg_width + 1) // 2, T_img)
                 if frame_end <= frame_start:
                     continue
 
