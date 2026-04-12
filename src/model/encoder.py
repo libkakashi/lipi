@@ -3,12 +3,14 @@ Lipi v3 MoE Vision Encoder.
 
 Architecture:
     Input: (B, 3, 32, W) — RGB
-    -> HGNetV2 all stages (pretrained, no width downsample, 1024ch output)
+    -> HGNetV2 backbone (pretrained, no width downsample, 1024ch)
        → (B, 1024, 2, W)
-    -> LID-1: 13-group classification on backbone features
+    -> LID-1: 13-group classification
     -> Project 1024 → dim
-    -> Expert windowed attention blocks (2D, h=2, w=W)
+    -> Local expert blocks (h=2, 2×32 windows, per-character)
     -> Pool h=2→1
+    -> Wide expert blocks (h=1, 1×128 windows, word-context)
+    -> Aggregate local + wide features
     -> LID-2 + Per-script CTC heads (T=W)
 """
 
@@ -24,13 +26,7 @@ from src.model.lid import LIDCoarse, NUM_GROUPS
 
 
 class WindowedAttention(nn.Module):
-    """Shifted window attention on flattened 2D sequences (Swin-style).
-
-    Partitions (B, h*w, C) into non-overlapping windows of size window_h × window_w.
-    Alternating blocks shift by half the window size so information crosses
-    window boundaries. After 2 blocks, every position has attended to
-    positions 1.5× the window size away.
-    """
+    """Shifted window attention on flattened 2D sequences (Swin-style)."""
 
     def __init__(self, dim: int, num_heads: int,
                  window_h: int = 2, window_w: int = 32, shift: bool = False):
@@ -49,60 +45,46 @@ class WindowedAttention(nn.Module):
         B, N, C = x.shape
         x = x.reshape(B, h, w, C)
 
-        # Cyclic shift (Swin-style)
         if self.shift_w > 0:
             x = torch.roll(x, shifts=-self.shift_w, dims=2)
 
-        # Pad width to be divisible by window_w
         pad_w = (self.window_w - w % self.window_w) % self.window_w
         if pad_w > 0:
             x = F.pad(x, (0, 0, 0, pad_w))
         wp = w + pad_w
 
-        # Partition into windows
         nH = h // self.window_h
         nW = wp // self.window_w
         x = x.reshape(B, nH, self.window_h, nW, self.window_w, C)
         x = x.permute(0, 1, 3, 2, 4, 5).reshape(B * nH * nW, self.window_h * self.window_w, C)
 
-        # Attention within windows
         qkv = self.qkv(x).reshape(-1, self.window_h * self.window_w, 3, self.num_heads, self.head_dim)
         qkv = qkv.permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
         attn = (q @ k.transpose(-2, -1)) * self.scale
 
-        # Attention mask for shifted windows (prevent cross-region attention)
         if self.shift_w > 0:
-            mask = self._build_shift_mask(h, wp, x.device)  # (nwin, ws, ws)
-            # attn is (B*nwin, heads, ws, ws) — reshape to apply per-window mask
+            mask = self._build_shift_mask(h, wp, x.device)
             num_windows = nH * nW
             attn = attn.reshape(B, num_windows, self.num_heads, -1, attn.shape[-1])
-            attn = attn + mask.unsqueeze(0).unsqueeze(2)  # broadcast over B and heads
+            attn = attn + mask.unsqueeze(0).unsqueeze(2)
             attn = attn.reshape(-1, self.num_heads, attn.shape[-2], attn.shape[-1])
 
         attn = F.softmax(attn, dim=-1)
         out = (attn @ v).transpose(1, 2).reshape(B * nH * nW, self.window_h * self.window_w, C)
         out = self.proj(out)
 
-        # Merge windows back
         out = out.reshape(B, nH, nW, self.window_h, self.window_w, C)
         out = out.permute(0, 1, 3, 2, 4, 5).reshape(B, nH * self.window_h, wp, C)
         out = out[:, :h, :w, :].reshape(B, h, w, C)
 
-        # Reverse shift
         if self.shift_w > 0:
             out = torch.roll(out, shifts=self.shift_w, dims=2)
 
         return out.reshape(B, h * w, C)
 
     def _build_shift_mask(self, h: int, wp: int, device: torch.device) -> Tensor:
-        """Build attention mask for shifted windows.
-
-        Tokens from different original regions in the same shifted window
-        must not attend to each other.
-        """
         mask = torch.zeros(1, h, wp, 1, device=device)
-        # Mark regions: before shift boundary vs after
         w_slices = [
             slice(0, -self.window_w),
             slice(-self.window_w, -self.shift_w),
@@ -113,7 +95,6 @@ class WindowedAttention(nn.Module):
             mask[:, :, ws, :] = region_id
             region_id += 1
 
-        # Partition mask into windows
         nH = h // self.window_h
         nW = wp // self.window_w
         mask = mask.reshape(1, nH, self.window_h, nW, self.window_w, 1)
@@ -136,11 +117,7 @@ class MLP(nn.Module):
 
 
 class ExpertBlock(nn.Module):
-    """Per-group expert block with 2D windowed attention + MLP.
-
-    Each group has its own attention and MLP. Routes by group_ids,
-    sorts for contiguous access, scatters back.
-    """
+    """Per-group expert block with shifted windowed attention + MLP."""
 
     def __init__(self, dim: int, num_heads: int, num_groups: int,
                  window_h: int = 2, window_w: int = 32, shift: bool = False,
@@ -163,7 +140,6 @@ class ExpertBlock(nn.Module):
         counts = torch.bincount(group_ids, minlength=self.num_groups).tolist()
         x_sorted = x[sorted_idx]
 
-        # Expert attention
         normed = self.norm1(x_sorted)
         attn_out = torch.empty_like(x_sorted)
         start = 0
@@ -180,7 +156,6 @@ class ExpertBlock(nn.Module):
             start = end
         x_sorted = x_sorted + attn_out
 
-        # Expert MLP
         normed = self.norm2(x_sorted)
         mlp_out = torch.empty_like(x_sorted)
         start = 0
@@ -266,30 +241,29 @@ class GroupCTCModule(nn.Module):
 
 
 class LipiMoEEncoder(nn.Module):
-    """Lipi v3: HGNetV2 backbone (all stages) + 2D expert windowed attention.
+    """Lipi v3: HGNetV2 backbone + dual-stream expert attention.
 
-    Backbone uses height-only downsampling (no width reduction).
-    All 4 stages run, stage 3 keeps h=2 (stride 1×1) and outputs 1024ch
-    (final 1024→2048 expansion removed — no wasteful channel doubling).
-    Expert blocks operate on 2D tokens (h=2 × W) with windowed attention.
-    Height pooled to 1 after experts for CTC at T=W.
+    Local stream: h=2, 2×32 windows — per-character features with vertical detail.
+    Wide stream: h=1, 1×128 windows — word-level context after height pooling.
+    Aggregation: concat local + wide, project back to dim.
     """
 
-    # OCR strides: height-only, no width downsample
     _OCR_STRIDES = {
-        'stem.stem1.conv': (2, 1),              # h/2
-        'stem.stem3.conv': (2, 1),              # h/4
-        'stages_1.downsample.conv': (2, 1),     # h/8
-        'stages_2.downsample.conv': (2, 1),     # h/16
-        'stages_3.downsample.conv': (1, 1),     # keep h=2 for expert 2D attention
+        'stem.stem1.conv': (2, 1),
+        'stem.stem3.conv': (2, 1),
+        'stages_1.downsample.conv': (2, 1),
+        'stages_2.downsample.conv': (2, 1),
+        'stages_3.downsample.conv': (1, 1),
     }
 
     def __init__(
         self,
-        dim: int = 512,
+        dim: int = 256,
         backbone: str = 'hgnetv2_b3',
-        num_expert_blocks: int = 6,
-        window_w: int = 32,
+        num_local_blocks: int = 3,
+        num_wide_blocks: int = 3,
+        local_window_w: int = 32,
+        wide_window_w: int = 128,
         mlp_ratio: int = 2,
         num_groups: int = NUM_GROUPS,
         group_script_vocab_sizes: list[list[int]] | None = None,
@@ -301,15 +275,15 @@ class LipiMoEEncoder(nn.Module):
         self.config = {
             "dim": dim,
             "backbone": backbone,
-            "num_expert_blocks": num_expert_blocks,
-            "window_w": window_w,
+            "num_local_blocks": num_local_blocks,
+            "num_wide_blocks": num_wide_blocks,
+            "local_window_w": local_window_w,
+            "wide_window_w": wide_window_w,
             "mlp_ratio": mlp_ratio,
             "num_groups": num_groups,
             "group_script_vocab_sizes": group_script_vocab_sizes,
             "group_script_names": group_script_names,
         }
-
-        # Backbone expects RGB input directly (pretrained on ImageNet RGB)
 
         # Pretrained backbone with OCR strides
         self.backbone = timm.create_model(
@@ -321,41 +295,39 @@ class LipiMoEEncoder(nn.Module):
             if name in self._OCR_STRIDES:
                 mod.stride = self._OCR_STRIDES[name]
 
-        # Remove stage 3's final 1024→2048 expansion — keep output at 1024ch
-        # The aggregation has 2 convs: [2304→1024, 1024→2048]
-        # Replace the second with identity to stay at 1024ch
+        # Remove stage 3's 1024→2048 expansion
         for block in self.backbone.stages_3.blocks:
-            block.aggregation = block.aggregation[:1]  # keep only 2304→1024
+            block.aggregation = block.aggregation[:1]
 
         backbone_ch = 1024
 
-        # LID-1: classify on backbone spatial features (h=2, w=W, 1024ch)
+        # LID-1
         self.lid1 = LIDCoarse(in_channels=backbone_ch, num_groups=num_groups)
 
-        # Project backbone features to expert dim
+        # Project backbone → expert dim
         self.proj = nn.Linear(backbone_ch, dim)
 
-        # Expert 2D shifted window attention blocks (h=2, w=W)
-        # First half: local windows (per-character)
-        # Second half: wide windows (word-level context)
-        # Alternating shift/no-shift within each half
-        wide_window_w = window_w * 4  # 128 default
-        n_local = num_expert_blocks // 2
-        n_wide = num_expert_blocks - n_local
-        self.expert_blocks = nn.ModuleList()
-        for i in range(n_local):
-            self.expert_blocks.append(
-                ExpertBlock(dim=dim, num_heads=dim // 64, num_groups=num_groups,
-                            window_h=2, window_w=window_w, shift=(i % 2 == 1),
-                            mlp_ratio=mlp_ratio))
-        for i in range(n_wide):
-            self.expert_blocks.append(
-                ExpertBlock(dim=dim, num_heads=dim // 64, num_groups=num_groups,
-                            window_h=2, window_w=wide_window_w, shift=(i % 2 == 1),
-                            mlp_ratio=mlp_ratio))
+        # Local expert blocks: h=2, 2×local_window_w windows
+        self.local_blocks = nn.ModuleList([
+            ExpertBlock(dim=dim, num_heads=dim // 64, num_groups=num_groups,
+                        window_h=2, window_w=local_window_w, shift=(i % 2 == 1),
+                        mlp_ratio=mlp_ratio)
+            for i in range(num_local_blocks)
+        ])
 
-        # Pool height after experts
-        self.h_pool = nn.AdaptiveAvgPool2d((1, None))  # h→1, keep w
+        # Pool h=2→1 between local and wide streams
+        self.h_pool = nn.AdaptiveAvgPool2d((1, None))
+
+        # Wide expert blocks: h=1, 1×wide_window_w windows
+        self.wide_blocks = nn.ModuleList([
+            ExpertBlock(dim=dim, num_heads=dim // 64, num_groups=num_groups,
+                        window_h=1, window_w=wide_window_w, shift=(i % 2 == 1),
+                        mlp_ratio=mlp_ratio)
+            for i in range(num_wide_blocks)
+        ])
+
+        # Aggregate local + wide: concat → project
+        self.aggregate = nn.Linear(dim * 2, dim)
 
         # Output
         self.enc_out_dim = dim
@@ -391,33 +363,41 @@ class LipiMoEEncoder(nn.Module):
     ) -> dict:
         B = images.shape[0]
 
-        # Dequantize RGB input
         x = images.float() / 255.0 if images.dtype == torch.uint8 else images
 
-        # Backbone all stages: (B, 1024, 2, W)
+        # Backbone: (B, 1024, 2, W)
         feats = self.backbone(x)
         backbone_out = feats[-1]
         _, C, h, w = backbone_out.shape
 
-        # LID-1: classify on backbone spatial features
+        # LID-1
         group_logits = self.lid1(backbone_out)
         if group_ids is None:
             group_ids = group_logits.argmax(dim=-1)
 
-        # Flatten to sequence and project: (B, h*w, dim)
+        # Project: (B, 2W, dim)
         x = backbone_out.permute(0, 2, 3, 1).reshape(B, h * w, C)
         x = self.proj(x)
 
         if detach_for_experts:
             x = x.detach()
 
-        # Expert 2D windowed attention (h=2, w=W)
-        for block in self.expert_blocks:
+        # Local expert blocks at h=2
+        for block in self.local_blocks:
             x = block(x, h, w, group_ids)
 
-        # Pool height: (B, h, w, dim) → (B, w, dim)
-        x = x.reshape(B, h, w, -1).permute(0, 3, 1, 2)  # (B, dim, h, w)
-        x = self.h_pool(x).squeeze(2).permute(0, 2, 1)   # (B, w, dim)
+        # Pool h=2→1 for local features: (B, W, dim)
+        dim = x.shape[-1]
+        local_out = x.reshape(B, h, w, dim).permute(0, 3, 1, 2)  # (B, dim, h, w)
+        local_out = self.h_pool(local_out).squeeze(2).permute(0, 2, 1)  # (B, W, dim)
+
+        # Wide expert blocks at h=1
+        x_wide = local_out
+        for block in self.wide_blocks:
+            x_wide = block(x_wide, 1, w, group_ids)
+
+        # Aggregate: concat local + wide, project
+        x = self.aggregate(torch.cat([local_out, x_wide], dim=-1))  # (B, W, dim)
 
         x = self.norm(x)
         T = x.shape[1]
