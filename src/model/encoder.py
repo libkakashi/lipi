@@ -1,16 +1,18 @@
 """
-Lipi v3 MoE Vision Encoder.
+Lipi v4 MoE Vision Encoder.
 
 Architecture:
     Input: (B, 3, 32, W) — RGB
     -> HGNetV2 backbone (pretrained, 1024ch)
        → (B, 1024, 2, W/2)
-    -> LID-1: 13-group classification
-    -> Project 1024 → dim
-    -> Local expert blocks (h=2, 2×32 windows, per-character)
+    -> Project 1024 → dim, keep h=2
+    -> 1 shared global attention block (h=2, cross-frame context)
+    -> Frame-level group CTC: per-frame script group prediction
+    -> Route frames to expert blocks by group
+    -> Local expert blocks (h=2, 2×16 windows)
     -> Pool h=2→1
-    -> Wide expert blocks (h=1, 1×128 windows, word-context)
-    -> Aggregate local + wide features
+    -> Wide expert blocks (h=1, 1×64 windows)
+    -> Per-group aggregation
     -> LID-2 + Per-script CTC heads (T=W/2)
 """
 
@@ -22,14 +24,54 @@ from torch import Tensor
 
 import timm
 
-from src.model.lid import LIDCoarse, NUM_GROUPS
+from src.model.lid import NUM_GROUPS
+
+
+class GlobalAttention(nn.Module):
+    """Standard multi-head self-attention on flattened 2D sequences."""
+
+    def __init__(self, dim: int, num_heads: int):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.scale = self.head_dim ** -0.5
+        self.qkv = nn.Linear(dim, 3 * dim)
+        self.proj = nn.Linear(dim, dim)
+
+    def forward(self, x: Tensor) -> Tensor:
+        B, T, C = x.shape
+        qkv = self.qkv(x).reshape(B, T, 3, self.num_heads, self.head_dim)
+        qkv = qkv.permute(2, 0, 3, 1, 4)
+        q, k, v = qkv.unbind(0)
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = F.softmax(attn, dim=-1)
+        out = (attn @ v).transpose(1, 2).reshape(B, T, C)
+        return self.proj(out)
+
+
+class SharedBlock(nn.Module):
+    """Shared (non-expert) attention + MLP block."""
+
+    def __init__(self, dim: int, num_heads: int, mlp_ratio: int = 2):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim)
+        self.attn = GlobalAttention(dim, num_heads)
+        self.norm2 = nn.LayerNorm(dim)
+        hidden = dim * mlp_ratio
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, hidden), nn.GELU(), nn.Linear(hidden, dim))
+
+    def forward(self, x: Tensor) -> Tensor:
+        x = x + self.attn(self.norm1(x))
+        x = x + self.mlp(self.norm2(x))
+        return x
 
 
 class WindowedAttention(nn.Module):
     """Shifted window attention on flattened 2D sequences (Swin-style)."""
 
     def __init__(self, dim: int, num_heads: int,
-                 window_h: int = 2, window_w: int = 32, shift: bool = False):
+                 window_h: int = 2, window_w: int = 16, shift: bool = False):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
@@ -117,10 +159,14 @@ class MLP(nn.Module):
 
 
 class ExpertBlock(nn.Module):
-    """Per-group expert block with shifted windowed attention + MLP."""
+    """Per-group expert block with shifted windowed attention + MLP.
+
+    Routes frames by group_ids — supports per-frame routing where
+    different frames in the same image can go to different experts.
+    """
 
     def __init__(self, dim: int, num_heads: int, num_groups: int,
-                 window_h: int = 2, window_w: int = 32, shift: bool = False,
+                 window_h: int = 2, window_w: int = 16, shift: bool = False,
                  mlp_ratio: int = 2):
         super().__init__()
         self.num_groups = num_groups
@@ -135,6 +181,7 @@ class ExpertBlock(nn.Module):
         ])
 
     def forward(self, x: Tensor, h: int, w: int, group_ids: Tensor) -> Tensor:
+        """group_ids: (B,) — per-sample group routing."""
         B = x.shape[0]
         sorted_idx = group_ids.argsort()
         counts = torch.bincount(group_ids, minlength=self.num_groups).tolist()
@@ -241,18 +288,19 @@ class GroupCTCModule(nn.Module):
 
 
 class LipiMoEEncoder(nn.Module):
-    """Lipi v3: HGNetV2 backbone + dual-stream expert attention.
+    """Lipi v4: HGNetV2 backbone + frame-level group CTC + dual-stream experts.
 
-    Local stream: h=2, 2×32 windows — per-character features with vertical detail.
-    Wide stream: h=1, 1×128 windows — word-level context after height pooling.
-    Aggregation: concat local + wide, project back to dim.
+    Frame-level group CTC replaces per-image LID-1 classification.
+    One shared global attention block provides cross-frame context
+    before group prediction. Expert routing is per-sample (training)
+    with future support for per-frame routing (mixed-script inference).
     """
 
     _OCR_STRIDES = {
-        'stem.stem1.conv': (2, 1),              # h/2
-        'stem.stem3.conv': (2, 1),              # h/4
-        'stages_1.downsample.conv': (2, 2),     # h/8, w/2  ← one width downsample
-        'stages_2.downsample.conv': (2, 1),     # h/16
+        'stem.stem1.conv': (2, 1),
+        'stem.stem3.conv': (2, 1),
+        'stages_1.downsample.conv': (2, 2),     # one width downsample
+        'stages_2.downsample.conv': (2, 1),
         'stages_3.downsample.conv': (1, 1),     # keep h=2
     }
 
@@ -296,19 +344,22 @@ class LipiMoEEncoder(nn.Module):
                 mod.stride = self._OCR_STRIDES[name]
 
         # Remove stage 3's 1024→2048 expansion
-        # aggregation is a Sequential with 2 ConvBNAct modules: [2304→1024, 1024→2048]
-        # Keep only the first one so output stays at 1024ch
         for block in self.backbone.stages_3.blocks:
             agg_list = list(block.aggregation.children())
             block.aggregation = nn.Sequential(agg_list[0])
 
         backbone_ch = 1024
 
-        # LID-1
-        self.lid1 = LIDCoarse(in_channels=backbone_ch, num_groups=num_groups)
-
-        # Project backbone → expert dim
+        # Project backbone → dim (keep h=2)
         self.proj = nn.Linear(backbone_ch, dim)
+
+        # Shared global attention block (h=2, sees all frames for group context)
+        self.shared_attn = SharedBlock(dim=dim, num_heads=dim // 64, mlp_ratio=mlp_ratio)
+
+        # Frame-level group CTC head: predicts group per frame
+        # Pool h=2→1 for CTC, then Linear to num_groups+1 (blank=0)
+        self.group_h_pool = nn.AdaptiveAvgPool2d((1, None))
+        self.group_ctc_head = nn.Linear(dim, num_groups + 1)  # +1 for CTC blank
 
         # Local expert blocks: h=2, 2×local_window_w windows
         self.local_blocks = nn.ModuleList([
@@ -338,7 +389,7 @@ class LipiMoEEncoder(nn.Module):
         self.enc_out_dim = dim
         self.norm = nn.LayerNorm(dim)
 
-        # CTC heads
+        # Character CTC heads
         if group_script_vocab_sizes is None:
             if isinstance(vocab_sizes, int):
                 vocab_sizes = [vocab_sizes] * num_groups
@@ -370,43 +421,54 @@ class LipiMoEEncoder(nn.Module):
 
         x = images.float() / 255.0 if images.dtype == torch.uint8 else images
 
-        # Backbone: (B, 1024, 2, W)
+        # Backbone: (B, 1024, 2, W/2)
         feats = self.backbone(x)
         backbone_out = feats[-1]
         _, C, h, w = backbone_out.shape
 
-        # LID-1
-        group_logits = self.lid1(backbone_out)
-        if group_ids is None:
-            group_ids = group_logits.argmax(dim=-1)
-
-        # Project: (B, 2W, dim)
+        # Project to dim, keep h=2: (B, 2*W/2, dim)
         x = backbone_out.permute(0, 2, 3, 1).reshape(B, h * w, C)
         x = self.proj(x)
+
+        # Shared global attention at h=2 (cross-frame context for group CTC)
+        x = self.shared_attn(x)
+
+        # Frame-level group CTC: pool h→1, predict group per frame
+        d = x.shape[-1]
+        x_for_group = x.reshape(B, h, w, d).permute(0, 3, 1, 2)  # (B, dim, h, w)
+        x_for_group = self.group_h_pool(x_for_group).squeeze(2).permute(0, 2, 1)  # (B, W/2, dim)
+        group_logits = self.group_ctc_head(x_for_group)  # (B, W/2, num_groups+1)
+
+        # For training: use ground truth per-image group_ids
+        # For inference: CTC decode group_logits to get per-image group
+        if group_ids is None:
+            # Simple: take most common non-blank prediction per image
+            frame_preds = group_logits[:, :, 1:].argmax(dim=-1)  # (B, W/2), exclude blank
+            group_ids = frame_preds.mode(dim=-1).values  # (B,) most frequent group
 
         if detach_for_experts:
             x = x.detach()
 
+        # Expert routing (per-sample for now, per-frame in future)
         # Local expert blocks at h=2
         for block in self.local_blocks:
             x = block(x, h, w, group_ids)
 
-        # Pool h=2→1 for local features: (B, W, dim)
-        dim = x.shape[-1]
-        local_out = x.reshape(B, h, w, dim).permute(0, 3, 1, 2)  # (B, dim, h, w)
-        local_out = self.h_pool(local_out).squeeze(2).permute(0, 2, 1)  # (B, W, dim)
+        # Pool h=2→1 for local features: (B, W/2, dim)
+        local_out = x.reshape(B, h, w, d).permute(0, 3, 1, 2)
+        local_out = self.h_pool(local_out).squeeze(2).permute(0, 2, 1)
 
         # Wide expert blocks at h=1
         x_wide = local_out
         for block in self.wide_blocks:
             x_wide = block(x_wide, 1, w, group_ids)
 
-        # Per-group aggregation: concat local + wide, project
+        # Per-group aggregation
         group_counts = torch.bincount(group_ids, minlength=self.num_groups)
         active_groups = group_counts.nonzero(as_tuple=True)[0].tolist()
 
-        combined = torch.cat([local_out, x_wide], dim=-1)  # (B, W, dim*2)
-        x = torch.empty_like(local_out)  # (B, W, dim)
+        combined = torch.cat([local_out, x_wide], dim=-1)
+        x = torch.empty_like(local_out)
         for g in active_groups:
             mask = (group_ids == g)
             x[mask] = self.expert_aggregates[g](combined[mask])
@@ -414,7 +476,7 @@ class LipiMoEEncoder(nn.Module):
         x = self.norm(x)
         T = x.shape[1]
 
-        # Per-group CTC with LID-2
+        # Per-group character CTC with LID-2
         max_vocab = max(m.max_vocab for m in self.ctc_modules)
         logits = torch.zeros(B, T, max_vocab, device=x.device, dtype=x.dtype)
         all_script_logits = []
@@ -435,7 +497,7 @@ class LipiMoEEncoder(nn.Module):
         return {
             "logits": logits,
             "lengths": lengths,
-            "group_logits": group_logits,
+            "group_logits": group_logits,  # (B, W/2, num_groups+1) — frame-level
             "group_ids": group_ids,
             "script_logits_per_group": all_script_logits,
         }

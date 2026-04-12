@@ -108,7 +108,11 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
         del out_gt
 
         # LID-1
-        pred_gids = out["group_logits"].argmax(-1)
+        gl = out["group_logits"]
+        if gl.dim() == 3:
+            pred_gids = gl[:, :, 1:].argmax(dim=-1).mode(dim=-1).values
+        else:
+            pred_gids = gl.argmax(-1)
         lid1_correct += (pred_gids == gids).sum().item()
         lid1_total += gids.shape[0]
 

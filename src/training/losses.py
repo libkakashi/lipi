@@ -22,8 +22,24 @@ def compute_lid1_loss(
     true_group_ids: Tensor,
     ce_loss_fn: nn.CrossEntropyLoss,
 ) -> Tensor:
-    """LID-1 group classification loss. Computed on ALL samples."""
-    return ce_loss_fn(group_logits, true_group_ids)
+    """LID-1 group loss. Supports both per-image (B, G) and frame-level (B, T, G+1).
+
+    Frame-level: CTC loss where target is a single group_id per image.
+    Per-image: standard cross-entropy (v3 compatibility).
+    """
+    if group_logits.dim() == 3:
+        # Frame-level group CTC: (B, T, num_groups+1)
+        B, T, G1 = group_logits.shape
+        log_probs = group_logits.float().log_softmax(dim=-1).permute(1, 0, 2)  # (T, B, G+1)
+        # Target: group_id + 1 (since blank=0 in CTC)
+        targets = (true_group_ids + 1).to(torch.long)  # (B,)
+        input_lengths = torch.full((B,), T, dtype=torch.long, device=group_logits.device)
+        target_lengths = torch.ones(B, dtype=torch.long, device=group_logits.device)
+        return F.ctc_loss(log_probs, targets, input_lengths, target_lengths,
+                          blank=0, reduction="mean", zero_infinity=True)
+    else:
+        # Per-image classification: (B, num_groups)
+        return ce_loss_fn(group_logits, true_group_ids)
 
 
 def compute_lid2_loss(

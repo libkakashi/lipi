@@ -530,7 +530,11 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             avg_ace = log_ace.item() / log_count
             avg_total = log_total.item() / log_count
             # LID-1 accuracy (predicted vs ground truth, last batch only)
-            pred_gids = group_logits.argmax(-1)
+            if group_logits.dim() == 3:
+                # Frame-level: most common non-blank prediction per image
+                pred_gids = group_logits[:, :, 1:].argmax(dim=-1).mode(dim=-1).values
+            else:
+                pred_gids = group_logits.argmax(-1)
             lid1_acc = (pred_gids == gids).float().mean().item() * 100
             # LID-2 accuracy (all samples in multi-script groups)
             lid2_correct = 0
