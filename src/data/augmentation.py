@@ -4,8 +4,11 @@ Training Augmentations for OCR.
 Simulates real-world conditions for text in the wild:
   - Documents: scans, photocopies, aged paper, folds
   - Phone captures: perspective, blur, shadows, fingers
-  - Signs & banners: outdoor lighting, weather
+  - Signs & banners: outdoor lighting, weather, textured backgrounds
   - Handwriting: ink variation, smudges
+  - Scene text: colored/textured backgrounds, 3D shadows, screen artifacts
+  - Detection artifacts: imperfect crops, loose/tight bounding boxes
+  - Camera sensor: shot noise, read noise, aggressive blur
 
 RandAugment-style: randomly applies N transforms per image.
 Each op is designed to degrade but never destroy readability.
@@ -35,13 +38,13 @@ def jpeg_compress(img: Image.Image) -> Image.Image:
 
 def blur(img: Image.Image) -> Image.Image:
     """Gaussian or motion blur — out of focus, camera shake."""
-    if random.random() < 0.6:
-        # Gaussian
-        sigma = random.uniform(0.3, 1.8)
+    if random.random() < 0.5:
+        # Gaussian — wider range for real phone cameras
+        sigma = random.uniform(0.3, 3.5)
         return img.filter(ImageFilter.GaussianBlur(radius=sigma))
-    else:
+    elif random.random() < 0.7:
         # Motion blur (horizontal or vertical)
-        size = random.choice([3, 5])
+        size = random.choice([3, 5, 7])
         kernel = [0] * (size * size)
         mid = size // 2
         horizontal = random.random() < 0.7
@@ -51,14 +54,22 @@ def blur(img: Image.Image) -> Image.Image:
             else:
                 kernel[i * size + mid] = 1
         return img.filter(ImageFilter.Kernel(size=(size, size), kernel=kernel, scale=size, offset=0))
+    else:
+        # Defocus blur — circular bokeh, common on phone cameras
+        sigma = random.uniform(1.0, 2.5)
+        # Two-pass Gaussian approximates disk blur
+        blurred = img.filter(ImageFilter.GaussianBlur(radius=sigma))
+        return blurred
 
 
 def low_resolution(img: Image.Image) -> Image.Image:
     """Low res — distant photo, thumbnail, cheap camera."""
     w, h = img.size
-    scale = random.uniform(0.4, 0.75)
+    scale = random.uniform(0.2, 0.75)
     small = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.BILINEAR)
-    return small.resize((w, h), Image.BILINEAR)
+    # Use nearest for very aggressive downscale to simulate pixelation
+    upsample = Image.NEAREST if scale < 0.35 else Image.BILINEAR
+    return small.resize((w, h), upsample)
 
 
 def photocopy(img: Image.Image) -> Image.Image:
@@ -162,15 +173,25 @@ def rotation(img: Image.Image) -> Image.Image:
 
 
 def perspective_warp(img: Image.Image) -> Image.Image:
-    """Camera angle — phone held at angle to surface."""
+    """Camera angle — phone held at angle to surface.
+
+    More aggressive than before: real phone photos can have 15-20% warp
+    when capturing text from steep angles (menus, signs, whiteboards).
+    """
     w, h = img.size
-    s = random.uniform(0.03, 0.07)
+    # 70% mild (3-10%), 30% aggressive (10-20%) for real phone angles
+    if random.random() < 0.7:
+        s = random.uniform(0.03, 0.10)
+    else:
+        s = random.uniform(0.10, 0.20)
     tl = (random.uniform(0, s * w), random.uniform(0, s * h))
     tr = (w - random.uniform(0, s * w), random.uniform(0, s * h))
     br = (w - random.uniform(0, s * w), h - random.uniform(0, s * h))
     bl = (random.uniform(0, s * w), h - random.uniform(0, s * h))
     coeffs = _find_perspective_coeffs([(0, 0), (w, 0), (w, h), (0, h)], [tl, tr, br, bl])
-    return img.transform((w, h), Image.PERSPECTIVE, coeffs, Image.BILINEAR)
+    bg = tuple(random.randint(200, 255) for _ in range(3))
+    result = img.transform((w, h), Image.PERSPECTIVE, coeffs, Image.BILINEAR, fillcolor=bg)
+    return result
 
 
 def _find_perspective_coeffs(src, dst):
@@ -631,7 +652,314 @@ def lined_paper(img: Image.Image) -> Image.Image:
 
 
 # =========================================================================
-# Op registry — 25 ops
+# Background & texture (scene text simulation)
+# =========================================================================
+
+def textured_background(img: Image.Image) -> Image.Image:
+    """Random textured background — simulate text on walls, signs, surfaces.
+
+    Replaces near-white background pixels with a procedural texture,
+    keeping the text (dark pixels) intact. This bridges the domain gap
+    between clean synthetic renders and real scene text.
+    """
+    arr = np.array(img, dtype=np.float32)
+    h, w = arr.shape[:2]
+
+    # Detect which pixels are "background" (bright) vs "text" (dark)
+    gray = 0.299 * arr[:, :, 0] + 0.587 * arr[:, :, 1] + 0.114 * arr[:, :, 2]
+    # Adaptive threshold: background is top 60% brightness
+    threshold = np.percentile(gray, 40)
+    bg_mask = (gray >= threshold).astype(np.float32)
+    # Soften the mask edges to blend naturally
+    from PIL import ImageFilter as _IF
+    mask_img = Image.fromarray((bg_mask * 255).astype(np.uint8))
+    mask_img = mask_img.filter(_IF.GaussianBlur(radius=1.5))
+    bg_mask = np.array(mask_img, dtype=np.float32) / 255.0
+
+    texture_type = random.choice([
+        "solid_color", "gradient", "perlin_noise", "stripe", "checker"
+    ])
+
+    if texture_type == "solid_color":
+        # Random solid color background
+        color = np.array([random.randint(60, 240) for _ in range(3)], dtype=np.float32)
+        texture = np.full_like(arr, color)
+
+    elif texture_type == "gradient":
+        # Color gradient background
+        c1 = np.array([random.randint(40, 220) for _ in range(3)], dtype=np.float32)
+        c2 = np.array([random.randint(40, 220) for _ in range(3)], dtype=np.float32)
+        if random.random() < 0.5:
+            # Horizontal gradient
+            t = np.linspace(0, 1, w)[np.newaxis, :, np.newaxis]
+        else:
+            # Vertical gradient
+            t = np.linspace(0, 1, h)[:, np.newaxis, np.newaxis]
+        texture = c1 * (1 - t) + c2 * t
+
+    elif texture_type == "perlin_noise":
+        # Procedural noise texture (multi-octave for realism)
+        base_color = np.array([random.randint(80, 200) for _ in range(3)], dtype=np.float32)
+        noise_amp = random.uniform(20, 60)
+        # Low-frequency smooth noise via upscaled random
+        small_h, small_w = max(2, h // 8), max(2, w // 8)
+        noise_small = np.random.randn(small_h, small_w, 3).astype(np.float32)
+        noise_img = Image.fromarray(((noise_small * 127 + 128).clip(0, 255)).astype(np.uint8))
+        noise_img = noise_img.resize((w, h), Image.BILINEAR)
+        noise_arr = np.array(noise_img, dtype=np.float32) - 128
+        texture = base_color + noise_arr * (noise_amp / 127.0)
+
+    elif texture_type == "stripe":
+        # Striped pattern (signs, awnings, fabric)
+        c1 = np.array([random.randint(60, 220) for _ in range(3)], dtype=np.float32)
+        c2 = np.array([random.randint(60, 220) for _ in range(3)], dtype=np.float32)
+        freq = random.uniform(0.05, 0.2)
+        if random.random() < 0.5:
+            pattern = (np.sin(np.arange(w) * freq * 2 * math.pi) > 0).astype(np.float32)
+            pattern = pattern[np.newaxis, :, np.newaxis]
+        else:
+            pattern = (np.sin(np.arange(h) * freq * 2 * math.pi) > 0).astype(np.float32)
+            pattern = pattern[:, np.newaxis, np.newaxis]
+        texture = c1 * pattern + c2 * (1 - pattern)
+
+    else:  # checker
+        c1 = np.array([random.randint(80, 220) for _ in range(3)], dtype=np.float32)
+        c2 = np.array([random.randint(80, 220) for _ in range(3)], dtype=np.float32)
+        cell = random.randint(4, 12)
+        yy, xx = np.mgrid[0:h, 0:w]
+        checker = ((yy // cell + xx // cell) % 2).astype(np.float32)
+        texture = c1 * checker[:, :, np.newaxis] + c2 * (1 - checker[:, :, np.newaxis])
+
+    texture = np.clip(texture, 0, 255)
+    # Composite: background pixels get texture, text pixels stay
+    result = arr * (1 - bg_mask[:, :, np.newaxis]) + texture * bg_mask[:, :, np.newaxis]
+    return Image.fromarray(np.clip(result, 0, 255).astype(np.uint8))
+
+
+def colored_background(img: Image.Image) -> Image.Image:
+    """Colored or gradient background — text on colored paper, signs, labels.
+
+    Simpler and faster than textured_background; just tints the background
+    a random color without pattern.
+    """
+    arr = np.array(img, dtype=np.float32)
+    h, w = arr.shape[:2]
+
+    gray = 0.299 * arr[:, :, 0] + 0.587 * arr[:, :, 1] + 0.114 * arr[:, :, 2]
+    threshold = np.percentile(gray, 40)
+    bg_mask = (gray >= threshold).astype(np.float32)
+    # Soften mask
+    mask_img = Image.fromarray((bg_mask * 255).astype(np.uint8))
+    mask_img = mask_img.filter(ImageFilter.GaussianBlur(radius=1.0))
+    bg_mask = np.array(mask_img, dtype=np.float32) / 255.0
+
+    # Random background color — biased toward realistic sign/label colors
+    palette = [
+        (255, 255, 0),    # yellow sign
+        (0, 120, 200),    # blue sign
+        (200, 50, 50),    # red sign
+        (50, 160, 50),    # green sign
+        (240, 200, 150),  # beige/cardboard
+        (180, 180, 180),  # gray metal
+        (100, 80, 60),    # brown/wood
+        (255, 200, 200),  # pink
+        (200, 220, 255),  # light blue
+    ]
+    color = np.array(random.choice(palette), dtype=np.float32)
+    # Add slight variation
+    color = color + np.random.uniform(-20, 20, 3)
+    color = np.clip(color, 0, 255)
+
+    bg = np.full_like(arr, color)
+    result = arr * (1 - bg_mask[:, :, np.newaxis]) + bg * bg_mask[:, :, np.newaxis]
+    return Image.fromarray(np.clip(result, 0, 255).astype(np.uint8))
+
+
+# =========================================================================
+# Crop & boundary (imperfect text detection)
+# =========================================================================
+
+def partial_crop(img: Image.Image) -> Image.Image:
+    """Partial character cropping — real text detectors give imperfect crops.
+
+    Simulates bounding boxes that are slightly too tight, cutting off
+    parts of characters at the edges. Common in IIIT5K, IC13, IC15.
+    """
+    w, h = img.size
+    if w < 8 or h < 8:
+        return img
+
+    # Crop 5-15% from 1-2 random edges
+    n_edges = random.choices([1, 2], weights=[0.6, 0.4])[0]
+    edges = random.sample(["left", "right", "top", "bottom"], n_edges)
+
+    left, top, right, bottom = 0, 0, w, h
+    for edge in edges:
+        if edge == "left":
+            left = int(w * random.uniform(0.03, 0.12))
+        elif edge == "right":
+            right = w - int(w * random.uniform(0.03, 0.12))
+        elif edge == "top":
+            top = int(h * random.uniform(0.03, 0.15))
+        elif edge == "bottom":
+            bottom = h - int(h * random.uniform(0.03, 0.15))
+
+    cropped = img.crop((left, top, right, bottom))
+    # Resize back to original dimensions
+    return cropped.resize((w, h), Image.BILINEAR)
+
+
+def pad_with_border(img: Image.Image) -> Image.Image:
+    """Add irregular padding/border — detector bbox larger than text.
+
+    Opposite of partial_crop: simulates loose bounding boxes that include
+    extra background around the text. Common in real detection pipelines.
+    """
+    w, h = img.size
+    pad_frac = random.uniform(0.03, 0.12)
+
+    # Random padding amounts per side
+    pad_l = int(w * random.uniform(0, pad_frac))
+    pad_r = int(w * random.uniform(0, pad_frac))
+    pad_t = int(h * random.uniform(0, pad_frac))
+    pad_b = int(h * random.uniform(0, pad_frac))
+
+    # Background color from image corners
+    arr = np.array(img)
+    bg = tuple(int(v) for v in np.median([arr[0, 0], arr[0, -1], arr[-1, 0], arr[-1, -1]], axis=0))
+
+    new_w = w + pad_l + pad_r
+    new_h = h + pad_t + pad_b
+    padded = Image.new("RGB", (new_w, new_h), bg)
+    padded.paste(img, (pad_l, pad_t))
+    # Resize back to original
+    return padded.resize((w, h), Image.BILINEAR)
+
+
+# =========================================================================
+# Screen & display artifacts
+# =========================================================================
+
+def screen_artifacts(img: Image.Image) -> Image.Image:
+    """Screen/display artifacts — moire patterns, LCD pixel grid, scanlines.
+
+    Simulates text photographed from a screen (common in real-world OCR).
+    """
+    arr = np.array(img, dtype=np.float32)
+    h, w = arr.shape[:2]
+
+    effect = random.choice(["moire", "scanline", "pixel_grid"])
+
+    if effect == "moire":
+        # Moire pattern from screen interference
+        freq1 = random.uniform(0.2, 0.6)
+        freq2 = random.uniform(0.2, 0.6)
+        angle = random.uniform(0, math.pi)
+        yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+        pattern = np.sin(freq1 * (xx * math.cos(angle) + yy * math.sin(angle)))
+        pattern += np.sin(freq2 * (xx * math.cos(angle + 0.5) + yy * math.sin(angle + 0.5)))
+        intensity = random.uniform(3, 12)
+        arr = arr + pattern[:, :, np.newaxis] * intensity
+
+    elif effect == "scanline":
+        # Horizontal scanlines (CRT/interlaced display)
+        spacing = random.choice([2, 3])
+        darkness = random.uniform(0.85, 0.95)
+        for y in range(0, h, spacing):
+            arr[y, :] *= darkness
+
+    else:  # pixel_grid
+        # LCD sub-pixel grid (visible on phone photos of screens)
+        spacing = random.choice([2, 3])
+        darkness = random.uniform(0.90, 0.97)
+        arr[::spacing, :] *= darkness
+        arr[:, ::spacing] *= darkness
+
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+
+
+# =========================================================================
+# Camera noise models
+# =========================================================================
+
+def camera_noise(img: Image.Image) -> Image.Image:
+    """Realistic camera sensor noise — shot noise + read noise.
+
+    More realistic than simple Gaussian noise. Shot noise (Poisson)
+    is signal-dependent, read noise (Gaussian) is constant.
+    Common in low-light phone photos of text.
+    """
+    arr = np.array(img, dtype=np.float32)
+
+    style = random.choice(["shot", "read", "combined"])
+
+    if style in ("shot", "combined"):
+        # Shot noise (Poisson) — brighter pixels get more noise
+        # Scale down, apply Poisson, scale back up
+        gain = random.uniform(0.02, 0.08)
+        scaled = arr * gain
+        noisy = np.random.poisson(np.clip(scaled, 0, 255).astype(np.float64))
+        arr = noisy.astype(np.float32) / gain
+
+    if style in ("read", "combined"):
+        # Read noise (Gaussian, signal-independent)
+        sigma = random.uniform(3, 15)
+        arr = arr + np.random.normal(0, sigma, arr.shape)
+
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+
+
+# =========================================================================
+# 3D text / embossed shadow
+# =========================================================================
+
+def text_shadow(img: Image.Image) -> Image.Image:
+    """Shadow from 3D/embossed text — raised letters cast shadows.
+
+    Common on signs, plaques, building text, car plates.
+    Shifts a darkened copy of the text slightly to simulate cast shadow.
+    """
+    arr = np.array(img, dtype=np.float32)
+    h, w = arr.shape[:2]
+
+    # Detect text regions (dark areas)
+    gray = 0.299 * arr[:, :, 0] + 0.587 * arr[:, :, 1] + 0.114 * arr[:, :, 2]
+    threshold = np.percentile(gray, 30)
+    text_mask = (gray < threshold).astype(np.float32)
+
+    # Shadow parameters
+    dx = random.choice([-2, -1, 1, 2])
+    dy = random.choice([1, 2])
+    shadow_intensity = random.uniform(0.15, 0.35)
+
+    # Shift mask to create shadow
+    shadow = np.zeros_like(text_mask)
+    src_y_start = max(0, -dy)
+    src_y_end = min(h, h - dy)
+    dst_y_start = max(0, dy)
+    dst_y_end = min(h, h + dy)
+    src_x_start = max(0, -dx)
+    src_x_end = min(w, w - dx)
+    dst_x_start = max(0, dx)
+    dst_x_end = min(w, w + dx)
+    shadow[dst_y_start:dst_y_end, dst_x_start:dst_x_end] = \
+        text_mask[src_y_start:src_y_end, src_x_start:src_x_end]
+
+    # Remove shadow where text already is (shadow only visible around text)
+    shadow = shadow * (1 - text_mask)
+
+    # Blur the shadow for softness
+    shadow_img = Image.fromarray((shadow * 255).astype(np.uint8))
+    shadow_img = shadow_img.filter(ImageFilter.GaussianBlur(radius=1.0))
+    shadow = np.array(shadow_img, dtype=np.float32) / 255.0
+
+    # Apply shadow (darken)
+    arr = arr * (1 - shadow[:, :, np.newaxis] * shadow_intensity)
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+
+
+# =========================================================================
+# Op registry — 34 ops
 # =========================================================================
 
 AUGMENT_OPS: list[Callable] = [
@@ -672,6 +1000,18 @@ AUGMENT_OPS: list[Callable] = [
     occlusion,
     # Outdoor (1)
     weather_damage,
+    # Scene text / background (2) — NEW
+    textured_background,
+    colored_background,
+    # Crop / boundary (2) — NEW
+    partial_crop,
+    pad_with_border,
+    # Screen / display (1) — NEW
+    screen_artifacts,
+    # Camera noise (1) — NEW
+    camera_noise,
+    # 3D text (1) — NEW
+    text_shadow,
 ]
 
 # elastic_distortion needs scipy
