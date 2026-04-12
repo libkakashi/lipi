@@ -3,8 +3,8 @@ Lipi v3 MoE Vision Encoder.
 
 Architecture:
     Input: (B, 3, 32, W) — RGB
-    -> HGNetV2 all stages (pretrained, no width downsample)
-       → (B, 2048, 2, W)
+    -> HGNetV2 all stages (pretrained, no width downsample, 1024ch output)
+       → (B, 1024, 2, W)
     -> LID-1: 13-group classification on backbone features
     -> Project 1024 → dim
     -> Expert windowed attention blocks (2D, h=2, w=W)
@@ -220,8 +220,8 @@ class LipiMoEEncoder(nn.Module):
     """Lipi v3: HGNetV2 backbone (all stages) + 2D expert windowed attention.
 
     Backbone uses height-only downsampling (no width reduction).
-    All 4 stages run, stage 3 keeps h=2 (stride 1×1 instead of 2×1).
-    Output: h=2, w=W, 2048ch. Projected to dim for expert blocks.
+    All 4 stages run, stage 3 keeps h=2 (stride 1×1) and outputs 1024ch
+    (final 1024→2048 expansion removed — no wasteful channel doubling).
     Expert blocks operate on 2D tokens (h=2 × W) with windowed attention.
     Height pooled to 1 after experts for CTC at T=W.
     """
@@ -272,8 +272,13 @@ class LipiMoEEncoder(nn.Module):
             if name in self._OCR_STRIDES:
                 mod.stride = self._OCR_STRIDES[name]
 
-        # Last stage output channels
-        backbone_ch = self.backbone.feature_info.channels()[-1]
+        # Remove stage 3's final 1024→2048 expansion — keep output at 1024ch
+        # The aggregation has 2 convs: [2304→1024, 1024→2048]
+        # Replace the second with identity to stay at 1024ch
+        for block in self.backbone.stages_3.blocks:
+            block.aggregation = block.aggregation[:1]  # keep only 2304→1024
+
+        backbone_ch = 1024
 
         # LID-1: classify on backbone spatial features (h=2, w=W, 1024ch)
         self.lid1 = LIDCoarse(in_channels=backbone_ch, num_groups=num_groups)
