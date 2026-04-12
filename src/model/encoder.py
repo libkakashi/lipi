@@ -326,8 +326,10 @@ class LipiMoEEncoder(nn.Module):
             for i in range(num_wide_blocks)
         ])
 
-        # Aggregate local + wide: concat → project
-        self.aggregate = nn.Linear(dim * 2, dim)
+        # Per-group aggregation: concat local + wide → project
+        self.expert_aggregates = nn.ModuleList([
+            nn.Linear(dim * 2, dim) for _ in range(num_groups)
+        ])
 
         # Output
         self.enc_out_dim = dim
@@ -396,8 +398,15 @@ class LipiMoEEncoder(nn.Module):
         for block in self.wide_blocks:
             x_wide = block(x_wide, 1, w, group_ids)
 
-        # Aggregate: concat local + wide, project
-        x = self.aggregate(torch.cat([local_out, x_wide], dim=-1))  # (B, W, dim)
+        # Per-group aggregation: concat local + wide, project
+        group_counts = torch.bincount(group_ids, minlength=self.num_groups)
+        active_groups = group_counts.nonzero(as_tuple=True)[0].tolist()
+
+        combined = torch.cat([local_out, x_wide], dim=-1)  # (B, W, dim*2)
+        x = torch.empty_like(local_out)  # (B, W, dim)
+        for g in active_groups:
+            mask = (group_ids == g)
+            x[mask] = self.expert_aggregates[g](combined[mask])
 
         x = self.norm(x)
         T = x.shape[1]
@@ -406,9 +415,6 @@ class LipiMoEEncoder(nn.Module):
         max_vocab = max(m.max_vocab for m in self.ctc_modules)
         logits = torch.zeros(B, T, max_vocab, device=x.device, dtype=x.dtype)
         all_script_logits = []
-
-        group_counts = torch.bincount(group_ids, minlength=self.num_groups)
-        active_groups = group_counts.nonzero(as_tuple=True)[0].tolist()
 
         for g in active_groups:
             mask = (group_ids == g)
