@@ -3,8 +3,8 @@ Lipi v3 MoE Vision Encoder.
 
 Architecture:
     Input: (B, 3, 32, W) — RGB
-    -> HGNetV2 stages 0-2 (pretrained, no width downsample)
-       → (B, 1024, 2, W)
+    -> HGNetV2 all stages (pretrained, no width downsample)
+       → (B, 2048, 2, W)
     -> LID-1: 13-group classification on backbone features
     -> Project 1024 → dim
     -> Expert windowed attention blocks (2D, h=2, w=W)
@@ -217,10 +217,11 @@ class GroupCTCModule(nn.Module):
 
 
 class LipiMoEEncoder(nn.Module):
-    """Lipi v3: HGNetV2 backbone (stages 0-2) + 2D expert windowed attention.
+    """Lipi v3: HGNetV2 backbone (all stages) + 2D expert windowed attention.
 
     Backbone uses height-only downsampling (no width reduction).
-    Stages 0-2 output h=2, w=W, 1024ch — stage 3 skipped.
+    All 4 stages run, stage 3 keeps h=2 (stride 1×1 instead of 2×1).
+    Output: h=2, w=W, 2048ch. Projected to dim for expert blocks.
     Expert blocks operate on 2D tokens (h=2 × W) with windowed attention.
     Height pooled to 1 after experts for CTC at T=W.
     """
@@ -231,6 +232,7 @@ class LipiMoEEncoder(nn.Module):
         'stem.stem3.conv': (2, 1),              # h/4
         'stages_1.downsample.conv': (2, 1),     # h/8
         'stages_2.downsample.conv': (2, 1),     # h/16
+        'stages_3.downsample.conv': (1, 1),     # keep h=2 for expert 2D attention
     }
 
     def __init__(
@@ -265,14 +267,13 @@ class LipiMoEEncoder(nn.Module):
             f'{backbone}.ssld_stage1_in22k_in1k' if 'ssld' not in backbone else backbone,
             pretrained=True,
             features_only=True,
-            out_indices=[2],  # Only use up to stage 2 (skip stage 3)
         )
         for name, mod in self.backbone.named_modules():
             if name in self._OCR_STRIDES:
                 mod.stride = self._OCR_STRIDES[name]
 
-        # Stage 2 output channels (out_indices=[2] gives single output)
-        backbone_ch = self.backbone.feature_info.channels()[0]
+        # Last stage output channels
+        backbone_ch = self.backbone.feature_info.channels()[-1]
 
         # LID-1: classify on backbone spatial features (h=2, w=W, 1024ch)
         self.lid1 = LIDCoarse(in_channels=backbone_ch, num_groups=num_groups)
@@ -327,9 +328,9 @@ class LipiMoEEncoder(nn.Module):
         # Dequantize RGB input
         x = images.float() / 255.0 if images.dtype == torch.uint8 else images
 
-        # Backbone stages 0-2: (B, 1024, 2, W)
+        # Backbone all stages: (B, 2048, 1, W)
         feats = self.backbone(x)
-        backbone_out = feats[0]  # out_indices=[2] → first (only) output
+        backbone_out = feats[-1]
         _, C, h, w = backbone_out.shape
 
         # LID-1: classify on backbone spatial features
