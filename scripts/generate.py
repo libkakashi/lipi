@@ -518,9 +518,8 @@ def _generate_mixed_batch(args_tuple):
         label = word1 + word2
 
         # Per-pixel group labels based on render widths
-        import numpy as np
         final_w = combined.width
-        boundary = int(img1.width / w_total * final_w)  # scale to final size
+        boundary = int(img1.width / w_total * final_w)  # scale proportionally
         gl = np.full(final_w, gid2, dtype=np.int32)
         gl[:boundary] = gid1
 
