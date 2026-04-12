@@ -67,9 +67,11 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
 
     for batch_idx, batch in enumerate(val_loader):
         if len(batch) == 7:
-            imgs, targets, tgt_lens, gids, sids, labels, _group_labels = batch
+            imgs, targets, tgt_lens, gids, sids, labels, group_labels = batch
+            group_labels = group_labels.to(device, non_blocking=True)
         else:
             imgs, targets, tgt_lens, gids, sids, labels = batch
+            group_labels = None
         imgs = imgs.to(device, non_blocking=True)
         gids = gids.to(device, non_blocking=True)
         sids_dev = sids.to(device, non_blocking=True)
@@ -105,9 +107,14 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
                     val_ctc_loss += ctc_l.item()
                     val_loss_samples += s_tgt_lens.sum().item()
 
-        # Val LID-1 loss (handles both frame-level and per-image group_logits)
+        # Val LID-1 loss (use per-frame labels if available)
         ce_fn = torch.nn.CrossEntropyLoss()
-        lid1_l = compute_lid1_loss(out_gt["group_logits"], gids, ce_fn)
+        if group_labels is not None and out_gt["group_logits"].dim() == 3:
+            T = out_gt["group_logits"].shape[1]
+            gl_frames = group_labels[:, ::2][:, :T]
+            lid1_l = compute_lid1_loss(out_gt["group_logits"], gl_frames, ce_fn)
+        else:
+            lid1_l = compute_lid1_loss(out_gt["group_logits"], gids, ce_fn)
         val_lid1_loss += lid1_l.item() * imgs.shape[0]
 
         del out_gt
