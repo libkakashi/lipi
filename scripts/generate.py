@@ -8,6 +8,7 @@ Usage:
 """
 
 import argparse
+import json
 import random
 import sys
 import time
@@ -428,7 +429,7 @@ def save_mds_samples(images, labels, script, train_dir, val_dir, chunk_id):
         for idx, (img_tensor, label, ids) in enumerate(zip(images, labels, encoded)):
             img_np = img_tensor.numpy()
             tids = np.array(ids, dtype=np.int64) if ids else np.zeros(1, dtype=np.int64)
-            import json
+
             w = img_np.shape[2]
             gl = np.full(w, group_id, dtype=np.int32)
             segs = json.dumps([{

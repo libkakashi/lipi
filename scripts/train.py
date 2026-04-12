@@ -442,16 +442,33 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         gl_frames = group_labels_[:, ::2][:, :T]
         lid1_loss = compute_lid1_loss(out["group_logits"], gl_frames, ce_loss_fn)
 
-        # CTC loss: per-segment for mixed-script, per-image for single-script
-        if any(len(s) > 1 for s in segments_):
-            ctc_loss = compute_ctc_loss_segments(
-                out["logits"], segments_, out["lengths"],
+        # CTC loss: batch single-script, per-segment for mixed
+        mixed_indices = [i for i, s in enumerate(segments_) if len(s) > 1]
+        single_indices = [i for i, s in enumerate(segments_) if len(s) == 1]
+
+        ctc_loss = torch.zeros(1, device=device)
+        ctc_parts = 0
+
+        if single_indices:
+            si = torch.tensor(single_indices, device=device)
+            all_ok = (tgt_lens_[si] <= out["lengths"][si]) & (tgt_lens_[si] > 0)
+            single_loss = compute_ctc_loss(
+                out["logits"][si], targets_[si], out["lengths"][si], tgt_lens_[si],
+                all_ok, gids_[si], sids_[si], group_script_vocabs)
+            ctc_loss = ctc_loss + single_loss
+            ctc_parts += 1
+
+        if mixed_indices:
+            mixed_segs = [segments_[i] for i in mixed_indices]
+            mi = torch.tensor(mixed_indices, device=device)
+            mixed_loss = compute_ctc_loss_segments(
+                out["logits"][mi], mixed_segs, out["lengths"][mi],
                 data["group_script_names"], group_script_vocabs)
-        else:
-            all_ok = (tgt_lens_ <= out["lengths"]) & (tgt_lens_ > 0)
-            ctc_loss = compute_ctc_loss(
-                out["logits"], targets_, out["lengths"], tgt_lens_,
-                all_ok, gids_, sids_, group_script_vocabs)
+            ctc_loss = ctc_loss + mixed_loss
+            ctc_parts += 1
+
+        if ctc_parts > 1:
+            ctc_loss = ctc_loss / ctc_parts
 
         all_true = torch.ones(imgs_.shape[0], dtype=torch.bool, device=device)
         lid2_loss = compute_lid2_loss(
