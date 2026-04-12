@@ -296,8 +296,11 @@ class LipiMoEEncoder(nn.Module):
                 mod.stride = self._OCR_STRIDES[name]
 
         # Remove stage 3's 1024→2048 expansion
+        # aggregation is a Sequential with 2 ConvBNAct modules: [2304→1024, 1024→2048]
+        # Keep only the first one so output stays at 1024ch
         for block in self.backbone.stages_3.blocks:
-            block.aggregation = block.aggregation[:1]
+            agg_list = list(block.aggregation.children())
+            block.aggregation = nn.Sequential(agg_list[0])
 
         backbone_ch = 1024
 
