@@ -132,17 +132,17 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
                 continue
             pred_scripts = script_logits.argmax(-1)
             true_scripts = sids_dev[group_mask]
-            lid1_ok = (out["group_ids"][group_mask] == gids[group_mask])
-            if lid1_ok.any():
-                lid2_correct += (pred_scripts[lid1_ok] == true_scripts[lid1_ok]).sum().item()
-                lid2_total += lid1_ok.sum().item()
-                for ls in range(script_logits.shape[-1]):
-                    s_mask = (true_scripts == ls) & lid1_ok
-                    if s_mask.any():
-                        key = (g_idx, ls)
-                        s_lid2_total[key] = s_lid2_total.get(key, 0) + s_mask.sum().item()
-                        s_lid2_correct[key] = s_lid2_correct.get(key, 0) + (
-                            pred_scripts[s_mask] == ls).sum().item()
+            # All samples in this group were routed here by frame predictions —
+            # evaluate LID-2 on all of them
+            lid2_correct += (pred_scripts == true_scripts).sum().item()
+            lid2_total += true_scripts.shape[0]
+            for ls in range(script_logits.shape[-1]):
+                s_mask = (true_scripts == ls)
+                if s_mask.any():
+                    key = (g_idx, ls)
+                    s_lid2_total[key] = s_lid2_total.get(key, 0) + s_mask.sum().item()
+                    s_lid2_correct[key] = s_lid2_correct.get(key, 0) + (
+                        pred_scripts[s_mask] == ls).sum().item()
 
         # Per-segment CTC decode and eval
         all_logits = out["logits"].float().cpu()
@@ -185,21 +185,9 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
                 if frame_end <= frame_start:
                     continue
 
-                # Check if predicted group matches for this segment's frames
-                seg_frame_preds = frame_preds[frame_start:frame_end]
-                pred_g = seg_frame_preds.mode().values.item() if len(seg_frame_preds) > 0 else -1
-
-                if pred_g != seg_g:
-                    # Wrong group — count as miss
-                    ctc_total += 1
-                    g_word_total[seg_g] += 1
-                    g_char_total[seg_g] += len(ref_s)
-                    total_chars += len(ref_s)
-                    s_word_total[key] = s_word_total.get(key, 0) + 1
-                    s_char_total[key] = s_char_total.get(key, 0) + len(ref_s)
-                    continue
-
-                # Decode this segment's frames
+                # Decode this segment's frames using its group's vocab
+                # (no mode/rounding — per-frame CTC logits already come from
+                # the correct group's head, so just decode directly)
                 s_idx = min(seg_s, len(group_script_names[seg_g]) - 1) if seg_g < len(group_script_names) else 0
                 if group_script_vocab_sizes:
                     vs = group_script_vocab_sizes[seg_g][s_idx]

@@ -439,120 +439,79 @@ class LipiMoEEncoder(nn.Module):
                 frame_groups = group_ids.unsqueeze(1).expand(B, w)  # (B, W/2)
             else:
                 frame_groups = group_ids  # already per-frame (B, W/2)
-            # Per-image group for expert block routing (majority)
-            sample_groups = group_ids if group_ids.dim() == 1 else group_ids.mode(dim=-1).values
         else:
             # Inference: use per-frame predictions
             frame_groups = group_logits.argmax(dim=-1)  # (B, W/2)
-            sample_groups = frame_groups.mode(dim=-1).values  # (B,)
 
         if detach_for_experts:
             x = x.detach()
 
-        # Check if any image has mixed groups (multiple groups in one image)
-        is_mixed = (frame_groups != frame_groups[:, :1]).any(dim=1)  # (B,)
-        has_mixed = is_mixed.any().item()
+        # Process each image per-segment: extract frames by group,
+        # run through correct expert, stitch back
+        x_out = torch.zeros(B, w, d, device=x.device, dtype=x.dtype)
 
-        if not has_mixed:
-            # Fast path: all images are single-script, route per-sample
-            for block in self.local_blocks:
-                x = block(x, h, w, sample_groups)
+        for b in range(B):
+            fg = frame_groups[b]  # (W/2,)
+            unique_groups = fg.unique().tolist()
 
-            local_out = x.reshape(B, h, w, d).permute(0, 3, 1, 2)
-            local_out = self.h_pool(local_out).squeeze(2).permute(0, 2, 1)
+            for g in unique_groups:
+                seg_mask = (fg == g)
+                seg_len = seg_mask.sum().item()
+                if seg_len == 0:
+                    continue
 
-            x_wide = local_out
-            for block in self.wide_blocks:
-                x_wide = block(x_wide, 1, w, sample_groups)
+                # Extract segment frames at h=2
+                x_2d = x[b].reshape(h, w, d)
+                seg_2d = x_2d[:, seg_mask, :]  # (h, seg_len, dim)
+                x_seg = seg_2d.reshape(1, h * seg_len, d)
 
-            combined = torch.cat([local_out, x_wide], dim=-1)
-            x_out = torch.empty_like(local_out)
-            for g in torch.bincount(sample_groups, minlength=self.num_groups).nonzero(as_tuple=True)[0].tolist():
-                mask = (sample_groups == g)
-                x_out[mask] = self.expert_aggregates[g](combined[mask])
-        else:
-            # Mixed path: process each image's segments through correct experts
-            T_out = w
-            x_out = torch.zeros(B, T_out, d, device=x.device, dtype=x.dtype)
+                # Local expert blocks
+                for block in self.local_blocks:
+                    normed = block.norm1(x_seg)
+                    attn_g = block.expert_attns[g]
+                    if self.training and torch.is_grad_enabled():
+                        attn_out = ckpt_util.checkpoint(
+                            attn_g, normed, h, seg_len, use_reentrant=True)
+                    else:
+                        attn_out = attn_g(normed, h, seg_len)
+                    x_seg = x_seg + attn_out.to(x_seg.dtype)
+                    normed = block.norm2(x_seg)
+                    mlp_g = block.expert_mlps[g]
+                    if self.training and torch.is_grad_enabled():
+                        mlp_out = ckpt_util.checkpoint(mlp_g, normed, use_reentrant=True)
+                    else:
+                        mlp_out = mlp_g(normed)
+                    x_seg = x_seg + mlp_out.to(x_seg.dtype)
 
-            for b in range(B):
-                if not is_mixed[b]:
-                    # Single-script image — process whole thing
-                    g = sample_groups[b].item()
-                    x_b = x[b:b+1]  # (1, h*w, dim)
-                    for block in self.local_blocks:
-                        x_b = block(x_b, h, w, sample_groups[b:b+1])
-                    local_b = x_b.reshape(1, h, w, d).permute(0, 3, 1, 2)
-                    local_b = self.h_pool(local_b).squeeze(2).permute(0, 2, 1)
-                    wide_b = local_b
-                    for block in self.wide_blocks:
-                        wide_b = block(wide_b, 1, w, sample_groups[b:b+1])
-                    comb_b = torch.cat([local_b, wide_b], dim=-1)
-                    x_out[b] = self.expert_aggregates[g](comb_b.squeeze(0))
-                else:
-                    # Mixed-script: segment by group, process each through its expert
-                    fg = frame_groups[b]  # (W/2,)
-                    unique_groups = fg.unique().tolist()
+                # Pool h→1
+                local_seg = x_seg.reshape(1, h, seg_len, d).permute(0, 3, 1, 2)
+                local_seg = self.h_pool(local_seg).squeeze(2).permute(0, 2, 1)
 
-                    for g in unique_groups:
-                        seg_mask = (fg == g)  # (W/2,) bool for 1D frames
-                        seg_len = seg_mask.sum().item()
-                        if seg_len == 0:
-                            continue
+                # Wide expert blocks
+                wide_seg = local_seg
+                for block in self.wide_blocks:
+                    normed = block.norm1(wide_seg)
+                    attn_g = block.expert_attns[g]
+                    if self.training and torch.is_grad_enabled():
+                        attn_out = ckpt_util.checkpoint(
+                            attn_g, normed, 1, seg_len, use_reentrant=True)
+                    else:
+                        attn_out = attn_g(normed, 1, seg_len)
+                    wide_seg = wide_seg + attn_out.to(wide_seg.dtype)
+                    normed = block.norm2(wide_seg)
+                    mlp_g = block.expert_mlps[g]
+                    if self.training and torch.is_grad_enabled():
+                        mlp_out = ckpt_util.checkpoint(mlp_g, normed, use_reentrant=True)
+                    else:
+                        mlp_out = mlp_g(normed)
+                    wide_seg = wide_seg + mlp_out.to(wide_seg.dtype)
 
-                        # Extract segment frames at h=2
-                        # x[b] is (h*w, dim), reshape to (h, w, dim)
-                        x_2d = x[b].reshape(h, w, d)
-                        seg_2d = x_2d[:, seg_mask, :]  # (h, seg_len, dim)
-                        x_seg = seg_2d.reshape(1, h * seg_len, d)
+                # Aggregate
+                comb_seg = torch.cat([local_seg, wide_seg], dim=-1)
+                agg_seg = self.expert_aggregates[g](comb_seg.squeeze(0))
 
-                        for block_idx, block in enumerate(self.local_blocks):
-                            # Run through this group's expert attention
-                            normed = block.norm1(x_seg)
-                            attn_g = block.expert_attns[g]
-                            if self.training and torch.is_grad_enabled():
-                                attn_out = ckpt_util.checkpoint(
-                                    attn_g, normed, h, seg_len, use_reentrant=True)
-                            else:
-                                attn_out = attn_g(normed, h, seg_len)
-                            x_seg = x_seg + attn_out.to(x_seg.dtype)
-                            normed = block.norm2(x_seg)
-                            mlp_g = block.expert_mlps[g]
-                            if self.training and torch.is_grad_enabled():
-                                mlp_out = ckpt_util.checkpoint(mlp_g, normed, use_reentrant=True)
-                            else:
-                                mlp_out = mlp_g(normed)
-                            x_seg = x_seg + mlp_out.to(x_seg.dtype)
-
-                        # Pool h→1
-                        local_seg = x_seg.reshape(1, h, seg_len, d).permute(0, 3, 1, 2)
-                        local_seg = self.h_pool(local_seg).squeeze(2).permute(0, 2, 1)  # (1, seg_len, dim)
-
-                        # Wide blocks
-                        wide_seg = local_seg
-                        for block_idx, block in enumerate(self.wide_blocks):
-                            normed = block.norm1(wide_seg)
-                            attn_g = block.expert_attns[g]
-                            if self.training and torch.is_grad_enabled():
-                                attn_out = ckpt_util.checkpoint(
-                                    attn_g, normed, 1, seg_len, use_reentrant=True)
-                            else:
-                                attn_out = attn_g(normed, 1, seg_len)
-                            wide_seg = wide_seg + attn_out.to(wide_seg.dtype)
-                            normed = block.norm2(wide_seg)
-                            mlp_g = block.expert_mlps[g]
-                            if self.training and torch.is_grad_enabled():
-                                mlp_out = ckpt_util.checkpoint(mlp_g, normed, use_reentrant=True)
-                            else:
-                                mlp_out = mlp_g(normed)
-                            wide_seg = wide_seg + mlp_out.to(wide_seg.dtype)
-
-                        # Aggregate
-                        comb_seg = torch.cat([local_seg, wide_seg], dim=-1)
-                        agg_seg = self.expert_aggregates[g](comb_seg.squeeze(0))
-
-                        # Place back into output
-                        x_out[b, seg_mask] = agg_seg
+                # Place back
+                x_out[b, seg_mask] = agg_seg
 
         x = self.norm(x_out)
         T = x.shape[1]
@@ -609,6 +568,6 @@ class LipiMoEEncoder(nn.Module):
             "logits": logits,
             "lengths": lengths,
             "group_logits": group_logits,  # (B, W/2, num_groups) — frame-level
-            "group_ids": sample_groups,   # (B,) per-image group (majority of frames)
+            "group_ids": frame_groups,    # (B, T) per-frame group assignments
             "script_logits_per_group": all_script_logits,
         }
