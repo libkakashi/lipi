@@ -181,7 +181,7 @@ class GroupCTCModule(nn.Module):
         return logits, script_logits, script_ids
 
 
-class LipiV3Encoder(nn.Module):
+class LipiMoEEncoder(nn.Module):
     """Lipi v3: HGNetV2 backbone + expert global attention + CTC.
 
     Replaces the v2 stem + shared SWA with a pretrained CNN backbone.

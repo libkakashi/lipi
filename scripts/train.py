@@ -70,7 +70,7 @@ def parse_args():
     parser.add_argument("--val-split", type=float, default=0.1)
     parser.add_argument("--log-interval", type=int, default=20)
     # Model
-    parser.add_argument("--dim", type=int, default=256)
+    parser.add_argument("--dim", type=int, default=512)
     parser.add_argument("--no-compile", action="store_true")
     parser.add_argument("--lid1-weight", type=float, default=1.0)
     parser.add_argument("--align-ce-weight", type=float, default=0.0,
@@ -85,11 +85,8 @@ def parse_args():
                         help="Number of epochs to detach shared→expert gradient. "
                              "LID-1 gets undivided shared encoder, CTC trains experts only.")
     parser.add_argument("--freeze-except", type=str, default=None,
-                        choices=["experts", "experts+ctc", "stage2+ctc", "ctc", "shared"],
-                        help="Freeze everything except: 'experts' (stage1+stage2 only), "
-                             "'experts+ctc' (stage1+stage2+ctc heads+lid2), "
-                             "'ctc' (ctc heads only), "
-                             "or 'shared' (shared SWA + LID-1 only)")
+                        choices=["experts", "experts+ctc", "ctc", "backbone"],
+                        help="Freeze everything except specified components")
     args = parser.parse_args()
 
     # Validation
@@ -251,9 +248,9 @@ def build_optimizer_and_scheduler(args, model, device_type, steps_per_epoch):
     expert_lr = args.expert_lr or args.lr
     if expert_lr != args.lr:
         shared_params = [p for n, p in model.named_parameters()
-                         if not any(k in n for k in ("stage1.", "stage2.", "ctc_modules."))]
+                         if not any(k in n for k in ("expert_blocks.", "ctc_modules."))]
         expert_params = [p for n, p in model.named_parameters()
-                         if any(k in n for k in ("stage1.", "stage2.", "ctc_modules."))]
+                         if any(k in n for k in ("expert_blocks.", "ctc_modules."))]
         base_optimizer = torch.optim.AdamW([
             {"params": shared_params, "lr": args.lr},
             {"params": expert_params, "lr": expert_lr},
@@ -304,27 +301,6 @@ def resume_from_checkpoint(args, model, optimizer, base_optimizer, scaler, sched
     ckpt = torch.load(args.resume, map_location="cpu", weights_only=False)
     # Partial load: skip mismatched layers (e.g., CTC proj after vocab change)
     model_state = ckpt["model"]
-
-    # Remap legacy key names from old architecture
-    n_4x4 = len(set(k.split(".")[1] for k in model_state if k.startswith("shared_swa_4x4.")))
-    remapped = 0
-    for k in list(model_state.keys()):
-        if k.startswith("shared_swa_4x4."):
-            new_k = k.replace("shared_swa_4x4.", "shared_swa.", 1)
-            model_state[new_k] = model_state.pop(k)
-            remapped += 1
-        elif k.startswith("shared_swa_4x16."):
-            idx = int(k.split(".")[1])
-            rest = ".".join(k.split(".")[2:])
-            new_k = f"shared_swa.{idx + n_4x4}.{rest}"
-            model_state[new_k] = model_state.pop(k)
-            remapped += 1
-        elif k.startswith(("proj_shared.", "proj_stem.")):
-            # proj_stem removed — stem outputs shared_dim directly
-            model_state.pop(k)
-            remapped += 1
-    if remapped:
-        print(f"  Remapped {remapped} legacy checkpoint keys")
 
     current_state = model.state_dict()
     skipped = []
@@ -614,28 +590,18 @@ def main():
 
     # Selective freezing
     if args.freeze_except:
-        expert_keys = ("stage1.", "stage2.")
         frozen = 0
         trainable = 0
         for name, param in model.named_parameters():
             if args.freeze_except == "experts":
-                # Train only expert SWA blocks
-                param.requires_grad = any(k in name for k in expert_keys)
+                param.requires_grad = "expert_blocks." in name
             elif args.freeze_except == "experts+ctc":
-                # Train expert SWA + CTC heads + LID-2
                 param.requires_grad = any(k in name for k in
-                    ("stage1.", "stage2.", "pool1.", "pool2.", "ctc_modules."))
-            elif args.freeze_except == "stage2+ctc":
-                # Train stage2 + pool2 + CTC heads + LID-2
-                param.requires_grad = any(k in name for k in
-                    ("stage2.", "pool2.", "ctc_modules."))
+                    ("expert_blocks.", "ctc_modules."))
             elif args.freeze_except == "ctc":
-                # Train only CTC heads + LID-2
                 param.requires_grad = "ctc_modules." in name
-            elif args.freeze_except == "shared":
-                # Train only shared encoder + LID-1
-                param.requires_grad = not any(k in name for k in
-                    ("stage1.", "stage2.", "ctc_modules."))
+            elif args.freeze_except == "backbone":
+                param.requires_grad = "backbone." in name
             if param.requires_grad:
                 trainable += param.numel()
             else:
