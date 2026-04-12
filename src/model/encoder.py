@@ -288,7 +288,7 @@ class LipiMoEEncoder(nn.Module):
         self,
         dim: int = 512,
         backbone: str = 'hgnetv2_b3',
-        num_expert_blocks: int = 4,
+        num_expert_blocks: int = 6,
         window_w: int = 32,
         mlp_ratio: int = 2,
         num_groups: int = NUM_GROUPS,
