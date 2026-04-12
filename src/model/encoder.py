@@ -565,24 +565,35 @@ class LipiMoEEncoder(nn.Module):
         x = self.norm(x_out)
         T = x.shape[1]
 
-        # Per-sample CTC routing (CTC decodes full sequences per primary group)
-        sample_counts = torch.bincount(sample_groups, minlength=self.num_groups)
-        active_sample_groups = sample_counts.nonzero(as_tuple=True)[0].tolist()
-
+        # Per-frame CTC routing: each frame's logits come from its group's CTC head
         max_vocab = max(m.max_vocab for m in self.ctc_modules)
         logits = torch.zeros(B, T, max_vocab, device=x.device, dtype=x.dtype)
         all_script_logits = []
 
-        for g in active_sample_groups:
-            mask = (sample_groups == g)
+        group_counts = torch.bincount(frame_groups.reshape(-1), minlength=self.num_groups)
+        active_groups = group_counts.nonzero(as_tuple=True)[0].tolist()
+
+        for g in active_groups:
+            frame_mask = (frame_groups == g)  # (B, T)
+            sample_mask = frame_mask.any(dim=1)  # (B,)
+            if not sample_mask.any():
+                continue
+
+            # Get logits from this group's CTC head for all frames
             local_script_ids = None
             if script_ids is not None:
-                local_script_ids = script_ids[mask]
-            g_logits, g_script_logits, g_script_ids = self.ctc_modules[g](
-                x[mask], script_ids=local_script_ids)
-            logits[mask, :, :g_logits.shape[-1]] = g_logits.to(logits.dtype)
+                local_script_ids = script_ids[sample_mask]
+            g_logits, g_script_logits, _ = self.ctc_modules[g](
+                x[sample_mask], script_ids=local_script_ids)
+            # g_logits: (N, T, group_vocab)
+
+            # Write only at frames belonging to this group
+            for i, b_idx in enumerate(sample_mask.nonzero(as_tuple=True)[0]):
+                f_mask = frame_mask[b_idx]  # (T,)
+                logits[b_idx, f_mask, :g_logits.shape[-1]] = g_logits[i, f_mask].to(logits.dtype)
+
             if g_script_logits is not None:
-                all_script_logits.append((g, g_script_logits, mask))
+                all_script_logits.append((g, g_script_logits, sample_mask))
 
         lengths = torch.full((B,), T, dtype=torch.long, device=x.device)
 
