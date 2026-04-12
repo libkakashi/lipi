@@ -2,7 +2,7 @@
 Lipi v3 MoE Vision Encoder.
 
 Architecture:
-    Input: (B, 2, 32, W) — L+a
+    Input: (B, 3, 32, W) — RGB
     -> HGNetV2 stages 0-2 (pretrained, no width downsample)
        → (B, 1024, 2, W)
     -> LID-1: 13-group classification on backbone features
@@ -258,8 +258,7 @@ class LipiMoEEncoder(nn.Module):
             "group_script_names": group_script_names,
         }
 
-        # Input: L+a (2ch) → 3ch for pretrained backbone
-        self.input_proj = nn.Conv2d(2, 3, kernel_size=1)
+        # Backbone expects RGB input directly (pretrained on ImageNet RGB)
 
         # Pretrained backbone with OCR strides
         self.backbone = timm.create_model(
@@ -325,9 +324,8 @@ class LipiMoEEncoder(nn.Module):
     ) -> dict:
         B = images.shape[0]
 
-        # Dequantize + adapt channels
+        # Dequantize RGB input
         x = images.float() / 255.0 if images.dtype == torch.uint8 else images
-        x = self.input_proj(x)
 
         # Backbone stages 0-2: (B, 1024, 2, W)
         feats = self.backbone(x)
