@@ -267,7 +267,7 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
             if key in s_lid2_total:
                 lid2_s = 100 * s_lid2_correct.get(key, 0) / max(s_lid2_total[key], 1)
                 lid2_str = f"{lid2_s:5.1f}%"
-            print(f"    {sname:<18s} {'':>6s} {'':>6s} {word_s:5.1f}% {char_s:5.1f}% {lid2_str}")
+            print(f"    {sname:<18s} {'':>6s} {word_s:5.1f}% {char_s:5.1f}% {lid2_str}")
 
     print(f"  {'─' * 56}")
 
