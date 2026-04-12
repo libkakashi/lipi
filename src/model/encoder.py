@@ -440,19 +440,27 @@ class LipiMoEEncoder(nn.Module):
         x_for_group = self.group_h_pool(x_for_group).squeeze(2).permute(0, 2, 1)  # (B, W/2, dim)
         group_logits = self.group_head(x_for_group)  # (B, W/2, num_groups)
 
-        # For training: use ground truth per-image group_ids for routing
-        # For inference: most common per-frame prediction
-        if group_ids is None:
-            frame_preds = group_logits.argmax(dim=-1)  # (B, W/2)
-            group_ids = frame_preds.mode(dim=-1).values  # (B,)
+        # Determine per-frame group assignments
+        if group_ids is not None:
+            # Training: ground truth — broadcast per-image to per-frame
+            if group_ids.dim() == 1:
+                frame_groups = group_ids.unsqueeze(1).expand(B, w)  # (B, W/2)
+            else:
+                frame_groups = group_ids  # already per-frame (B, W/2)
+            # Per-image group for expert block routing (majority)
+            sample_groups = group_ids if group_ids.dim() == 1 else group_ids.mode(dim=-1).values
+        else:
+            # Inference: use per-frame predictions
+            frame_groups = group_logits.argmax(dim=-1)  # (B, W/2)
+            sample_groups = frame_groups.mode(dim=-1).values  # (B,)
 
         if detach_for_experts:
             x = x.detach()
 
-        # Expert routing (per-sample for now, per-frame in future)
+        # Expert blocks route per-sample (each image goes to one expert)
         # Local expert blocks at h=2
         for block in self.local_blocks:
-            x = block(x, h, w, group_ids)
+            x = block(x, h, w, sample_groups)
 
         # Pool h=2→1 for local features: (B, W/2, dim)
         local_out = x.reshape(B, h, w, d).permute(0, 3, 1, 2)
@@ -461,28 +469,31 @@ class LipiMoEEncoder(nn.Module):
         # Wide expert blocks at h=1
         x_wide = local_out
         for block in self.wide_blocks:
-            x_wide = block(x_wide, 1, w, group_ids)
+            x_wide = block(x_wide, 1, w, sample_groups)
 
-        # Per-group aggregation
-        group_counts = torch.bincount(group_ids, minlength=self.num_groups)
+        # Per-frame aggregation: each frame uses its group's aggregate
+        group_counts = torch.bincount(frame_groups.reshape(-1), minlength=self.num_groups)
         active_groups = group_counts.nonzero(as_tuple=True)[0].tolist()
 
-        combined = torch.cat([local_out, x_wide], dim=-1)
-        x = torch.empty_like(local_out)
+        combined = torch.cat([local_out, x_wide], dim=-1)  # (B, W/2, dim*2)
+        x = torch.empty_like(local_out)  # (B, W/2, dim)
         for g in active_groups:
-            mask = (group_ids == g)
-            x[mask] = self.expert_aggregates[g](combined[mask])
+            frame_mask = (frame_groups == g)  # (B, W/2)
+            x[frame_mask] = self.expert_aggregates[g](combined[frame_mask])
 
         x = self.norm(x)
         T = x.shape[1]
 
-        # Per-group character CTC with LID-2
+        # Per-sample CTC routing (CTC needs full contiguous sequences)
+        sample_counts = torch.bincount(sample_groups, minlength=self.num_groups)
+        active_sample_groups = sample_counts.nonzero(as_tuple=True)[0].tolist()
+
         max_vocab = max(m.max_vocab for m in self.ctc_modules)
         logits = torch.zeros(B, T, max_vocab, device=x.device, dtype=x.dtype)
         all_script_logits = []
 
-        for g in active_groups:
-            mask = (group_ids == g)
+        for g in active_sample_groups:
+            mask = (sample_groups == g)
             local_script_ids = None
             if script_ids is not None:
                 local_script_ids = script_ids[mask]
@@ -497,7 +508,7 @@ class LipiMoEEncoder(nn.Module):
         return {
             "logits": logits,
             "lengths": lengths,
-            "group_logits": group_logits,  # (B, W/2, num_groups+1) — frame-level
-            "group_ids": group_ids,
+            "group_logits": group_logits,  # (B, W/2, num_groups) — frame-level
+            "group_ids": sample_groups,   # (B,) per-image group (majority of frames)
             "script_logits_per_group": all_script_logits,
         }
