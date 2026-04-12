@@ -503,7 +503,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                 _forward_backward(imgs, targets, tgt_lens, gids, sids, scale=1.0,
                                   group_labels_=group_labels)
         except torch.cuda.OutOfMemoryError:
-            del imgs, targets, tgt_lens, gids, sids
+            del imgs, targets, tgt_lens, gids, sids, group_labels
             optimizer.zero_grad(set_to_none=True)
             torch.cuda.empty_cache()
             oom_skipped += 1
