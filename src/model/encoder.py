@@ -317,7 +317,6 @@ class LipiMoEEncoder(nn.Module):
         num_groups: int = NUM_GROUPS,
         group_script_vocab_sizes: list[list[int]] | None = None,
         group_script_names: list[list[str]] | None = None,
-        vocab_sizes: list[int] | int | None = None,
     ):
         super().__init__()
         self.num_groups = num_groups
@@ -391,14 +390,7 @@ class LipiMoEEncoder(nn.Module):
         self.norm = nn.LayerNorm(dim)
 
         # Character CTC heads
-        if group_script_vocab_sizes is None:
-            if isinstance(vocab_sizes, int):
-                vocab_sizes = [vocab_sizes] * num_groups
-            if vocab_sizes is None:
-                vocab_sizes = [171] * num_groups
-            group_script_vocab_sizes = [[vs] for vs in vocab_sizes]
-            group_script_names = [[f"group{g}"] for g in range(num_groups)]
-        elif group_script_names is None:
+        if group_script_names is None:
             group_script_names = [[f"s{i}" for i in range(len(vs))]
                                   for vs in group_script_vocab_sizes]
 

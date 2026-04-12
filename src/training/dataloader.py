@@ -5,6 +5,7 @@ Uses MosaicML Streaming for efficient shard-based data loading with
 automatic caching, multi-worker support, and memory-mapped I/O.
 """
 
+import json
 import random
 from pathlib import Path
 
@@ -124,26 +125,17 @@ class LipiStreamingDataset(Dataset):
         tlen = torch.tensor(sample["target_len"], dtype=torch.long)
 
         # Per-pixel group labels → remap to local group IDs
-        if "group_labels" in sample:
-            gl = sample["group_labels"].copy()
-            remapped = np.zeros_like(gl)
-            for gid_global, gid_local in self._global_to_local_group.items():
-                remapped[gl == gid_global] = gid_local
-            group_labels = torch.from_numpy(remapped).to(torch.long)
-        else:
-            group_labels = torch.full((img.shape[2],), local_gid, dtype=torch.long)
+        gl = sample["group_labels"].copy()
+        remapped = np.zeros_like(gl)
+        for gid_global, gid_local in self._global_to_local_group.items():
+            remapped[gl == gid_global] = gid_local
+        group_labels = torch.from_numpy(remapped).to(torch.long)
 
         # Segments: per-word metadata for mixed-script CTC loss
-        import json
-        if "segments" in sample:
-            segments = json.loads(sample["segments"])
-            # Remap group/script IDs to local
-            for seg in segments:
-                seg["group_id"] = self._global_to_local_group.get(seg["group_id"], 0)
-                seg["script_id"] = self._global_sid_to_local.get(seg["script_id"], 0)
-        else:
-            segments = [{"group_id": local_gid, "script_id": local_sid,
-                         "text": label, "width": img.shape[2], "offset": 0}]
+        segments = json.loads(sample["segments"])
+        for seg in segments:
+            seg["group_id"] = self._global_to_local_group.get(seg["group_id"], 0)
+            seg["script_id"] = self._global_sid_to_local.get(seg["script_id"], 0)
 
         return (img, tids, tlen,
                 torch.tensor(local_gid, dtype=torch.long),

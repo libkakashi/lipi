@@ -24,27 +24,17 @@ def compute_lid1_loss(
     true_group_ids: Tensor,
     ce_loss_fn: nn.CrossEntropyLoss,
 ) -> Tensor:
-    """LID-1 group loss. Supports both per-image (B, G) and frame-level (B, T, G).
+    """LID-1 per-frame group cross-entropy.
 
-    Frame-level: per-frame cross-entropy. true_group_ids can be:
-      - (B,) per-image labels → broadcast to all frames (single-script)
-      - (B, T) per-frame labels → used directly (mixed-script)
-    Per-image: standard cross-entropy (v3 compatibility).
+    group_logits: (B, T, num_groups) — per-frame predictions.
+    true_group_ids: (B,) broadcast to all frames, or (B, T) per-frame.
     """
-    if group_logits.dim() == 3:
-        # Frame-level: (B, T, num_groups)
-        B, T, G = group_logits.shape
-        if true_group_ids.dim() == 1:
-            # Broadcast per-image label to all frames
-            frame_labels = true_group_ids.unsqueeze(1).expand(B, T)
-        else:
-            # Per-frame labels already provided
-            frame_labels = true_group_ids
-        # Reshape for cross-entropy: (B*T, G) vs (B*T,)
-        return ce_loss_fn(group_logits.reshape(B * T, G), frame_labels.reshape(B * T))
+    B, T, G = group_logits.shape
+    if true_group_ids.dim() == 1:
+        frame_labels = true_group_ids.unsqueeze(1).expand(B, T)
     else:
-        # Per-image classification: (B, num_groups)
-        return ce_loss_fn(group_logits, true_group_ids)
+        frame_labels = true_group_ids
+    return ce_loss_fn(group_logits.reshape(B * T, G), frame_labels.reshape(B * T))
 
 
 def compute_lid2_loss(

@@ -438,15 +438,12 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                         detach_for_experts=detach_for_experts)
 
         # Frame-level group labels: downsample pixel-level (W) to frame-level (W/2)
-        if group_labels_ is not None and out["group_logits"].dim() == 3:
-            T = out["group_logits"].shape[1]
-            gl_frames = group_labels_[:, ::2][:, :T]
-            lid1_loss = compute_lid1_loss(out["group_logits"], gl_frames, ce_loss_fn)
-        else:
-            lid1_loss = compute_lid1_loss(out["group_logits"], gids_, ce_loss_fn)
+        T = out["group_logits"].shape[1]
+        gl_frames = group_labels_[:, ::2][:, :T]
+        lid1_loss = compute_lid1_loss(out["group_logits"], gl_frames, ce_loss_fn)
 
-        # CTC loss: per-segment if segments available, else per-image
-        if segments_ is not None and any(len(s) > 1 for s in segments_):
+        # CTC loss: per-segment for mixed-script, per-image for single-script
+        if any(len(s) > 1 for s in segments_):
             ctc_loss = compute_ctc_loss_segments(
                 out["logits"], segments_, out["lengths"],
                 data["group_script_names"], group_script_vocabs)
@@ -486,15 +483,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                 out["group_logits"].detach(), detached_script_logits)
 
     for batch_idx, batch in enumerate(train_loader):
-        if len(batch) == 8:
-            imgs, targets, tgt_lens, gids, sids, _labels, group_labels, segments = batch
-        elif len(batch) == 7:
-            imgs, targets, tgt_lens, gids, sids, _labels, group_labels = batch
-            segments = None
-        else:
-            imgs, targets, tgt_lens, gids, sids, _labels = batch
-            group_labels = None
-            segments = None
+        imgs, targets, tgt_lens, gids, sids, _labels, group_labels, segments = batch
         if batch_idx < 5:
             print(f"    [shape] batch {batch_idx}: imgs={list(imgs.shape)} "
                   f"B={imgs.shape[0]} W={imgs.shape[3]}", flush=True)
@@ -555,13 +544,9 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             avg_ace = log_ace.item() / log_count
             avg_total = log_total.item() / log_count
             # LID-1 accuracy (predicted vs ground truth, last batch only)
-            if group_logits.dim() == 3:
-                # Frame-level: accuracy across all frames
-                frame_preds = group_logits.argmax(dim=-1)  # (B, T)
-                frame_labels = gids.unsqueeze(1).expand_as(frame_preds)
-                lid1_acc = (frame_preds == frame_labels).float().mean().item() * 100
-            else:
-                lid1_acc = (group_logits.argmax(-1) == gids).float().mean().item() * 100
+            frame_preds = group_logits.argmax(dim=-1)  # (B, T)
+            frame_labels = gids.unsqueeze(1).expand_as(frame_preds)
+            lid1_acc = (frame_preds == frame_labels).float().mean().item() * 100
             # LID-2 accuracy (all samples in multi-script groups)
             lid2_correct = 0
             lid2_total = 0

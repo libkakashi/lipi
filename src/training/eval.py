@@ -66,17 +66,8 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
     s_lid2_total: dict[tuple[int, int], int] = {}
 
     for batch_idx, batch in enumerate(val_loader):
-        if len(batch) == 8:
-            imgs, targets, tgt_lens, gids, sids, labels, group_labels, batch_segments = batch
-            group_labels = group_labels.to(device, non_blocking=True)
-        elif len(batch) == 7:
-            imgs, targets, tgt_lens, gids, sids, labels, group_labels = batch
-            group_labels = group_labels.to(device, non_blocking=True)
-            batch_segments = None
-        else:
-            imgs, targets, tgt_lens, gids, sids, labels = batch
-            group_labels = None
-            batch_segments = None
+        imgs, targets, tgt_lens, gids, sids, labels, group_labels, batch_segments = batch
+        group_labels = group_labels.to(device, non_blocking=True)
         imgs = imgs.to(device, non_blocking=True)
         gids = gids.to(device, non_blocking=True)
         sids_dev = sids.to(device, non_blocking=True)
@@ -112,47 +103,28 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
                     val_ctc_loss += ctc_l.item()
                     val_loss_samples += s_tgt_lens.sum().item()
 
-        # Val LID-1 loss (use per-frame labels if available)
+        # Val LID-1 loss (per-frame)
         ce_fn = torch.nn.CrossEntropyLoss()
-        if group_labels is not None and out_gt["group_logits"].dim() == 3:
-            T = out_gt["group_logits"].shape[1]
-            gl_frames = group_labels[:, ::2][:, :T]
-            lid1_l = compute_lid1_loss(out_gt["group_logits"], gl_frames, ce_fn)
-        else:
-            lid1_l = compute_lid1_loss(out_gt["group_logits"], gids, ce_fn)
+        T_gt = out_gt["group_logits"].shape[1]
+        gl_frames = group_labels[:, ::2][:, :T_gt]
+        lid1_l = compute_lid1_loss(out_gt["group_logits"], gl_frames, ce_fn)
         val_lid1_loss += lid1_l.item() * imgs.shape[0]
 
         del out_gt
 
         # LID-1 frame-level accuracy
-        gl = out["group_logits"]
-        if gl.dim() == 3:
-            frame_preds = gl.argmax(dim=-1)  # (B, T)
-            T_lid = frame_preds.shape[1]
+        frame_preds = out["group_logits"].argmax(dim=-1)  # (B, T)
+        T_lid = frame_preds.shape[1]
+        gl_frames = group_labels[:, ::2][:, :T_lid]
 
-            # Ground truth per-frame labels
-            if group_labels is not None:
-                gl_frames = group_labels[:, ::2][:, :T_lid]
-            else:
-                gl_frames = gids.unsqueeze(1).expand(-1, T_lid)
+        lid1_frame_correct += (frame_preds == gl_frames).sum().item()
+        lid1_frame_total += gl_frames.numel()
 
-            lid1_frame_correct += (frame_preds == gl_frames).sum().item()
-            lid1_frame_total += gl_frames.numel()
-
-            # Per-group frame accuracy
-            for g in range(n_groups):
-                g_frame_mask = (gl_frames == g)
-                if g_frame_mask.any():
-                    g_lid_frame_total[g] += g_frame_mask.sum().item()
-                    g_lid_frame_correct[g] += (frame_preds[g_frame_mask] == g).sum().item()
-
-            # For CTC routing below, use majority group per image
-            pred_gids = frame_preds.mode(dim=-1).values
-        else:
-            pred_gids = gl.argmax(-1)
-            # v3 compat: count as frame accuracy (1 frame per image)
-            lid1_frame_correct += (pred_gids == gids).sum().item()
-            lid1_frame_total += gids.shape[0]
+        for g in range(n_groups):
+            g_frame_mask = (gl_frames == g)
+            if g_frame_mask.any():
+                g_lid_frame_total[g] += g_frame_mask.sum().item()
+                g_lid_frame_correct[g] += (frame_preds[g_frame_mask] == g).sum().item()
 
         # LID-2 per multi-script group
         for g_idx, script_logits, group_mask in out["script_logits_per_group"]:
@@ -183,11 +155,7 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
         for i, (label, true_g, local_sid) in enumerate(
                 zip(labels, gids_cpu, sids_cpu)):
 
-            # Get per-frame group predictions
-            if gl_cpu.dim() == 3:
-                frame_preds = gl_cpu[i].argmax(dim=-1)  # (T,)
-            else:
-                frame_preds = torch.full((all_logits.shape[1],), gl_cpu[i].argmax().item())
+            frame_preds = gl_cpu[i].argmax(dim=-1)  # (T,)
 
             # Get ground truth segments for this image
             if batch_segments is not None:
