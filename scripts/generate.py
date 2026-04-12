@@ -12,6 +12,8 @@ import json
 import random
 import sys
 import time
+
+import numpy as np
 from pathlib import Path
 from multiprocessing import Pool
 
@@ -408,7 +410,7 @@ def save_mds_samples(images, labels, script, train_dir, val_dir, chunk_id):
         return 0, [], []
 
     import hashlib
-    import numpy as np
+
     from streaming import MDSWriter
 
     script_id = SCRIPT_TO_ID[script]
@@ -525,7 +527,6 @@ def _generate_mixed_batch(args_tuple):
         label = word1 + word2
 
         # Per-pixel group labels and segments based on render widths
-        import json
         final_w = combined.width
         boundary = int(img1.width / w_total * final_w)
         gl = np.full(final_w, gid2, dtype=np.int32)
@@ -550,7 +551,7 @@ def _generate_mixed_batch(args_tuple):
         return chunk_id, "mixed", 0, [], []
 
     import hashlib
-    import numpy as np
+
     from streaming import MDSWriter
     from src.encoding.decompose import encode_text
 
@@ -952,7 +953,7 @@ def main():
         styles_to_gen = [args.style]
         print(f"\nGenerating style: {args.style}")
 
-    import numpy as np
+
 
     # Create train/val dirs
     (shard_dir / "train").mkdir(parents=True, exist_ok=True)
