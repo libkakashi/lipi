@@ -112,7 +112,8 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
         # LID-1
         gl = out["group_logits"]
         if gl.dim() == 3:
-            pred_gids = gl[:, :, 1:].argmax(dim=-1).mode(dim=-1).values
+            # Frame-level: most common prediction per image
+            pred_gids = gl.argmax(dim=-1).mode(dim=-1).values
         else:
             pred_gids = gl.argmax(-1)
         lid1_correct += (pred_gids == gids).sum().item()

@@ -7,7 +7,7 @@ Architecture:
        → (B, 1024, 2, W/2)
     -> Project 1024 → dim, keep h=2
     -> 1 shared global attention block (h=2, cross-frame context)
-    -> Frame-level group CTC: per-frame script group prediction
+    -> Frame-level group CE: per-frame script group classification
     -> Route frames to expert blocks by group
     -> Local expert blocks (h=2, 2×16 windows)
     -> Pool h=2→1
@@ -288,12 +288,13 @@ class GroupCTCModule(nn.Module):
 
 
 class LipiMoEEncoder(nn.Module):
-    """Lipi v4: HGNetV2 backbone + frame-level group CTC + dual-stream experts.
+    """Lipi v4: HGNetV2 backbone + per-frame group CE + dual-stream experts.
 
-    Frame-level group CTC replaces per-image LID-1 classification.
-    One shared global attention block provides cross-frame context
-    before group prediction. Expert routing is per-sample (training)
-    with future support for per-frame routing (mixed-script inference).
+    Per-frame group cross-entropy replaces per-image LID-1 classification.
+    Each frame gets a group label — direct supervision at every position.
+    One shared global attention block provides cross-frame context.
+    Expert routing is per-sample (training) with future support for
+    per-frame routing (mixed-script inference).
     """
 
     _OCR_STRIDES = {
@@ -356,10 +357,10 @@ class LipiMoEEncoder(nn.Module):
         # Shared global attention block (h=2, sees all frames for group context)
         self.shared_attn = SharedBlock(dim=dim, num_heads=dim // 64, mlp_ratio=mlp_ratio)
 
-        # Frame-level group CTC head: predicts group per frame
-        # Pool h=2→1 for CTC, then Linear to num_groups+1 (blank=0)
+        # Frame-level group classifier: predicts group per frame
+        # Pool h=2→1, then Linear to num_groups
         self.group_h_pool = nn.AdaptiveAvgPool2d((1, None))
-        self.group_ctc_head = nn.Linear(dim, num_groups + 1)  # +1 for CTC blank
+        self.group_head = nn.Linear(dim, num_groups)
 
         # Local expert blocks: h=2, 2×local_window_w windows
         self.local_blocks = nn.ModuleList([
@@ -433,18 +434,17 @@ class LipiMoEEncoder(nn.Module):
         # Shared global attention at h=2 (cross-frame context for group CTC)
         x = self.shared_attn(x)
 
-        # Frame-level group CTC: pool h→1, predict group per frame
+        # Frame-level group prediction: pool h→1, classify each frame
         d = x.shape[-1]
         x_for_group = x.reshape(B, h, w, d).permute(0, 3, 1, 2)  # (B, dim, h, w)
         x_for_group = self.group_h_pool(x_for_group).squeeze(2).permute(0, 2, 1)  # (B, W/2, dim)
-        group_logits = self.group_ctc_head(x_for_group)  # (B, W/2, num_groups+1)
+        group_logits = self.group_head(x_for_group)  # (B, W/2, num_groups)
 
-        # For training: use ground truth per-image group_ids
-        # For inference: CTC decode group_logits to get per-image group
+        # For training: use ground truth per-image group_ids for routing
+        # For inference: most common per-frame prediction
         if group_ids is None:
-            # Simple: take most common non-blank prediction per image
-            frame_preds = group_logits[:, :, 1:].argmax(dim=-1)  # (B, W/2), exclude blank
-            group_ids = frame_preds.mode(dim=-1).values  # (B,) most frequent group
+            frame_preds = group_logits.argmax(dim=-1)  # (B, W/2)
+            group_ids = frame_preds.mode(dim=-1).values  # (B,)
 
         if detach_for_experts:
             x = x.detach()

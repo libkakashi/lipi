@@ -22,21 +22,24 @@ def compute_lid1_loss(
     true_group_ids: Tensor,
     ce_loss_fn: nn.CrossEntropyLoss,
 ) -> Tensor:
-    """LID-1 group loss. Supports both per-image (B, G) and frame-level (B, T, G+1).
+    """LID-1 group loss. Supports both per-image (B, G) and frame-level (B, T, G).
 
-    Frame-level: CTC loss where target is a single group_id per image.
+    Frame-level: per-frame cross-entropy. true_group_ids can be:
+      - (B,) per-image labels → broadcast to all frames (single-script)
+      - (B, T) per-frame labels → used directly (mixed-script)
     Per-image: standard cross-entropy (v3 compatibility).
     """
     if group_logits.dim() == 3:
-        # Frame-level group CTC: (B, T, num_groups+1)
-        B, T, G1 = group_logits.shape
-        log_probs = group_logits.float().log_softmax(dim=-1).permute(1, 0, 2)  # (T, B, G+1)
-        # Target: group_id + 1 (since blank=0 in CTC)
-        targets = (true_group_ids + 1).to(torch.long)  # (B,)
-        input_lengths = torch.full((B,), T, dtype=torch.long, device=group_logits.device)
-        target_lengths = torch.ones(B, dtype=torch.long, device=group_logits.device)
-        return F.ctc_loss(log_probs, targets, input_lengths, target_lengths,
-                          blank=0, reduction="mean", zero_infinity=True)
+        # Frame-level: (B, T, num_groups)
+        B, T, G = group_logits.shape
+        if true_group_ids.dim() == 1:
+            # Broadcast per-image label to all frames
+            frame_labels = true_group_ids.unsqueeze(1).expand(B, T)
+        else:
+            # Per-frame labels already provided
+            frame_labels = true_group_ids
+        # Reshape for cross-entropy: (B*T, G) vs (B*T,)
+        return ce_loss_fn(group_logits.reshape(B * T, G), frame_labels.reshape(B * T))
     else:
         # Per-image classification: (B, num_groups)
         return ce_loss_fn(group_logits, true_group_ids)
