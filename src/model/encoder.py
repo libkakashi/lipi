@@ -333,7 +333,7 @@ class LipiMoEEncoder(nn.Module):
         # Dequantize RGB input
         x = images.float() / 255.0 if images.dtype == torch.uint8 else images
 
-        # Backbone all stages: (B, 2048, 1, W)
+        # Backbone all stages: (B, 1024, 2, W)
         feats = self.backbone(x)
         backbone_out = feats[-1]
         _, C, h, w = backbone_out.shape
