@@ -189,7 +189,8 @@ def compute_ctc_loss_segments(
             ctc_loss = ctc_loss + seg_ctc
             ctc_chars += len(ids)
 
-    if skipped_no_script + skipped_no_ids + skipped_too_long > 0:
+    skip_total = skipped_no_script + skipped_no_ids + skipped_too_long
+    if skip_total > total_segs * 0.05:  # only warn if >5% skipped
         print(f"    [CTC segments] {ctc_chars} chars from {total_segs} segs | "
               f"skipped: {skipped_no_script} no_script, {skipped_no_ids} no_ids, "
               f"{skipped_too_long} too_long", flush=True)
