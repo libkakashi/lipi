@@ -83,7 +83,15 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
             # Replace padding (-100) with blank for model routing
             gl_for_model = gl_frames_gt.clone()
             gl_for_model[gl_for_model < 0] = n_groups  # n_groups = blank/whitespace
-            out_gt = model(imgs, group_ids=gl_for_model, script_ids=None)
+            # Build per-frame script labels from segment metadata
+            sl_frames = torch.zeros(B, T_est, dtype=torch.long, device=device)
+            for b in range(B):
+                if batch_segments is not None:
+                    for seg in batch_segments[b]:
+                        fs = seg["offset"] // 2
+                        fe = min((seg["offset"] + seg["width"] + 1) // 2, T_est)
+                        sl_frames[b, fs:fe] = seg.get("script_id", 0)
+            out_gt = model(imgs, group_ids=gl_for_model, script_ids=sl_frames)
 
         # Val CTC loss (with ground truth routing, same as training)
         B = imgs.shape[0]

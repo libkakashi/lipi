@@ -431,6 +431,8 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
     log_count = 0
     log_lid1_correct = 0
     log_lid1_total = 0
+    log_lid2_correct = 0
+    log_lid2_total = 0
     log_time = time.time()
     shared_norm = 0.0
     expert_norm = 0.0
@@ -446,7 +448,18 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             gl_frames = group_labels_[:, ::2][:, :T_est]
             gl_for_model = gl_frames.clone()
             gl_for_model[gl_for_model < 0] = NUM_GROUPS  # padding → blank for routing
-            out = model(imgs_, group_ids=gl_for_model, script_ids=None,
+
+            # Build per-frame script labels from segment metadata
+            # so CTC heads use ground truth script routing during training
+            B_cur = imgs_.shape[0]
+            sl_frames = torch.zeros(B_cur, T_est, dtype=torch.long, device=device)
+            for b in range(B_cur):
+                for seg in segments_[b]:
+                    frame_start = seg["offset"] // 2
+                    frame_end = min((seg["offset"] + seg["width"] + 1) // 2, T_est)
+                    sl_frames[b, frame_start:frame_end] = seg["script_id"]
+
+            out = model(imgs_, group_ids=gl_for_model, script_ids=sl_frames,
                         detach_for_experts=detach_for_experts)
 
         # LID-1 loss (gl_frames has -100 for padding → ignored by CE)
@@ -482,27 +495,24 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         if ctc_parts > 1:
             ctc_loss = ctc_loss / ctc_parts
 
-        # LID-2 loss: compute per-segment from script_logits_per_group
-        # Build per-image ground truth script_ids from segments metadata
+        # LID-2 loss: per-frame CE within multi-script groups
+        # Uses ground truth sl_frames as targets, same ignore_index=-100 as LID-1
         lid2_loss = torch.zeros(1, device=device)
         lid2_count = 0
-        for g_idx, script_logits, group_mask in out["script_logits_per_group"]:
-            if script_logits is None:
+        T_lid2 = out["group_logits"].shape[1]
+        sl_for_loss = sl_frames[:, :T_lid2]
+        gl_for_loss = gl_for_model[:, :T_lid2]
+        for g_str, lid2_logits in out.get("lid2_logits_per_group", {}).items():
+            g = int(g_str)
+            # Only compute on frames that belong to this group
+            g_mask = (gl_for_loss == g)
+            if not g_mask.any():
                 continue
-            # For each sample in this group, find the segment's script_id
-            sample_indices = group_mask.nonzero(as_tuple=True)[0]
-            for i, b_idx in enumerate(sample_indices):
-                b = b_idx.item()
-                # Find segment in this group for this image
-                for seg in segments_[b]:
-                    if seg["group_id"] == g_idx:
-                        true_sid = seg["script_id"]
-                        pred_sid = script_logits[i:i+1]  # (1, n_scripts)
-                        target = torch.tensor([true_sid], device=device)
-                        if true_sid < pred_sid.shape[1]:
-                            lid2_loss = lid2_loss + ce_loss_fn(pred_sid, target)
-                            lid2_count += 1
-                        break
+            # lid2_logits: (B, T, n_scripts_in_group)
+            pred = lid2_logits[g_mask]  # (N_frames, n_scripts)
+            target = sl_for_loss[g_mask]  # (N_frames,)
+            lid2_loss = lid2_loss + F.cross_entropy(pred, target)
+            lid2_count += 1
         if lid2_count > 0:
             lid2_loss = lid2_loss / lid2_count
 
@@ -525,12 +535,13 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
 
         scaler.scale(loss).backward()
         # Detach logits for logging — prevents autograd graph from leaking
-        detached_script_logits = [
-            (g, sl.detach() if sl is not None else None, m.detach())
-            for g, sl, m in out["script_logits_per_group"]
-        ]
+        # Detach LID-2 logits for logging
+        detached_lid2 = {
+            g: lg.detach() for g, lg in out.get("lid2_logits_per_group", {}).items()
+        }
         return (ctc_loss, lid1_loss, lid2_loss, ace_loss, loss,
-                out["group_logits"].detach(), detached_script_logits)
+                out["group_logits"].detach(), detached_lid2,
+                gl_for_model.detach(), sl_frames.detach())
 
     for batch_idx, batch in enumerate(train_loader):
         imgs, targets, tgt_lens, gids, sids, _labels, group_labels, segments = batch
@@ -550,7 +561,8 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             group_labels = group_labels.to(device, non_blocking=True)
 
         try:
-            ctc_loss, lid1_loss, lid2_loss, ace_loss, loss, group_logits, script_logits = \
+            (ctc_loss, lid1_loss, lid2_loss, ace_loss, loss,
+             group_logits, lid2_logits, gt_groups, gt_scripts) = \
                 _forward_backward(imgs, targets, tgt_lens, gids, sids, scale=1.0,
                                   group_labels_=group_labels, segments_=segments)
         except torch.cuda.OutOfMemoryError:
@@ -586,7 +598,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         n_batches += 1
         log_count += 1
 
-        # Accumulate LID-1 accuracy across logging interval
+        # Accumulate LID-1 and LID-2 accuracy across logging interval
         with torch.no_grad():
             fp = group_logits.argmax(dim=-1)
             T_acc = fp.shape[1]
@@ -595,6 +607,16 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             if non_pad.any():
                 log_lid1_correct += (fp[non_pad] == fl[non_pad]).sum().item()
                 log_lid1_total += non_pad.sum().item()
+
+            # LID-2: per-frame accuracy within multi-script groups
+            for g_str, lid2_log in lid2_logits.items():
+                g = int(g_str)
+                g_mask = (gt_groups[:, :T_acc] == g)
+                if g_mask.any():
+                    pred_s = lid2_log[:, :T_acc][g_mask].argmax(dim=-1)
+                    true_s = gt_scripts[:, :T_acc][g_mask]
+                    log_lid2_correct += (pred_s == true_s).sum().item()
+                    log_lid2_total += true_s.shape[0]
 
         if save_dir and n_batches % 500 == 0:
             save_checkpoint(model, optimizer, scheduler, scaler,
@@ -608,16 +630,8 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             avg_total = log_total.item() / log_count
             # LID-1 accuracy (accumulated across logging interval)
             lid1_acc = 100 * log_lid1_correct / max(log_lid1_total, 1)
-            # LID-2 accuracy (all samples in multi-script groups)
-            lid2_correct = 0
-            lid2_total = 0
-            for _g, sl, group_mask in script_logits:
-                if sl is not None:
-                    pred = sl.argmax(-1)
-                    true = sids[group_mask]
-                    lid2_correct += (pred == true).sum().item()
-                    lid2_total += true.shape[0]
-            lid2_acc = 100 * lid2_correct / max(lid2_total, 1)
+            # LID-2 accuracy (accumulated across logging interval)
+            lid2_acc = 100 * log_lid2_correct / max(log_lid2_total, 1)
             elapsed = time.time() - log_time
             ms_per_step = elapsed / log_count * 1000
             samples_per_sec = imgs.shape[0] * log_count / elapsed
@@ -640,6 +654,8 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             log_count = 0
             log_lid1_correct = 0
             log_lid1_total = 0
+            log_lid2_correct = 0
+            log_lid2_total = 0
 
     if oom_skipped > 0:
         print(f"  ** OOM: {oom_skipped} batches skipped this epoch")
