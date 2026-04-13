@@ -117,9 +117,9 @@ class LipiStreamingDataset(Dataset):
         global_sid = sample["script_id"]                    # int
         global_gid = sample["group_id"]                     # int
 
-        # Remap to local IDs
-        local_gid = self._global_to_local_group.get(global_gid, 0)
-        local_sid = self._global_sid_to_local.get(global_sid, 0)
+        # Remap to local IDs (default to 0 — per-image IDs are always in active set)
+        local_gid = self._global_to_local_group[global_gid]
+        local_sid = self._global_sid_to_local[global_sid]
 
         tids = torch.from_numpy(sample["target_ids"].copy())  # (L,) int64
         tlen = torch.tensor(sample["target_len"], dtype=torch.long)
@@ -134,9 +134,10 @@ class LipiStreamingDataset(Dataset):
         group_labels = torch.from_numpy(remapped).to(torch.long)
 
         # Segments: per-word metadata for mixed-script CTC loss
+        from src.model.lid import NUM_GROUPS
         segments = json.loads(sample["segments"])
         for seg in segments:
-            seg["group_id"] = self._global_to_local_group.get(seg["group_id"], 0)
+            seg["group_id"] = self._global_to_local_group.get(seg["group_id"], NUM_GROUPS)
             seg["script_id"] = self._global_sid_to_local.get(seg["script_id"], 0)
 
         return (img, tids, tlen,
