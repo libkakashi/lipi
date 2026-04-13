@@ -477,9 +477,10 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         if ctc_parts > 1:
             ctc_loss = ctc_loss / ctc_parts
 
-        all_true = torch.ones(imgs_.shape[0], dtype=torch.bool, device=device)
-        lid2_loss = compute_lid2_loss(
-            out["script_logits_per_group"], sids_, all_true, ce_loss_fn)
+        # LID-2 loss: skip when using per-frame routing (script_ids=None means
+        # LID-2 uses its own predictions — no ground truth script IDs available
+        # per-segment). LID-2 learns from CTC gradient flowing back through it.
+        lid2_loss = torch.zeros(1, device=device)
 
         if align_ce_weight > 0:
             all_ok = (tgt_lens_ <= out["lengths"]) & (tgt_lens_ > 0)
