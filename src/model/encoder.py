@@ -190,6 +190,9 @@ class CTCHead(nn.Module):
         super().__init__()
         self.vocab_size = vocab_size
         self.proj = nn.Linear(enc_dim, vocab_size)
+        # Init near-uniform so CTC starts at random baseline, not worse
+        nn.init.normal_(self.proj.weight, std=0.01)
+        nn.init.zeros_(self.proj.bias)
 
     def forward(self, features: Tensor) -> Tensor:
         return self.proj(features)
@@ -370,9 +373,16 @@ class LipiMoEEncoder(nn.Module):
         ])
 
         # Group aggregation: concat local + wide → dim
-        self.group_aggregates = nn.ModuleList([
-            nn.Linear(dim * 2, dim) for _ in range(num_groups)
-        ])
+        # Init as average of local+wide (near-identity)
+        self.group_aggregates = nn.ModuleList()
+        for _ in range(num_groups):
+            agg = nn.Linear(dim * 2, dim)
+            nn.init.zeros_(agg.bias)
+            with torch.no_grad():
+                agg.weight.zero_()
+                agg.weight[:, :dim] = 0.5 * torch.eye(dim)
+                agg.weight[:, dim:] = 0.5 * torch.eye(dim)
+            self.group_aggregates.append(agg)
 
         # LID-2: per-frame script classification within multi-script groups
         # One head per multi-script group
