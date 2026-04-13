@@ -383,6 +383,9 @@ class LipiMoEEncoder(nn.Module):
                 self.lid2_heads[str(g)] = nn.Linear(dim, n_scripts)
 
         # Script expert blocks (routed by flat script_id, 26 experts)
+        # Initialize output projections near-zero so residual connections
+        # pass features through initially (prevents randomly initialized
+        # script experts from destroying group-expert features)
         self.script_local_blocks = nn.ModuleList([
             ExpertBlock(dim=dim, num_heads=dim // 64,
                         num_experts=self.total_scripts,
@@ -397,11 +400,27 @@ class LipiMoEEncoder(nn.Module):
                         mlp_ratio=mlp_ratio)
             for i in range(num_script_wide_blocks)
         ])
+        for block_list in [self.script_local_blocks, self.script_wide_blocks]:
+            for block in block_list:
+                for attn in block.expert_attns:
+                    nn.init.zeros_(attn.proj.weight)
+                    nn.init.zeros_(attn.proj.bias)
+                for mlp in block.expert_mlps:
+                    nn.init.zeros_(mlp.fc2.weight)
+                    nn.init.zeros_(mlp.fc2.bias)
 
         # Script aggregation: concat local + wide → dim
-        self.script_aggregates = nn.ModuleList([
-            nn.Linear(dim * 2, dim) for _ in range(self.total_scripts)
-        ])
+        # Initialize as near-identity (average of local+wide) so untrained
+        # script experts pass features through without destroying them
+        self.script_aggregates = nn.ModuleList()
+        for _ in range(self.total_scripts):
+            agg = nn.Linear(dim * 2, dim)
+            nn.init.zeros_(agg.bias)
+            with torch.no_grad():
+                agg.weight.zero_()
+                agg.weight[:, :dim] = 0.5 * torch.eye(dim)
+                agg.weight[:, dim:] = 0.5 * torch.eye(dim)
+            self.script_aggregates.append(agg)
 
         # Output
         self.enc_out_dim = dim
