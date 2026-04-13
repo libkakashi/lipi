@@ -331,10 +331,13 @@ def resume_from_checkpoint(args, model, optimizer, base_optimizer, scaler, sched
             break
     model_dtype = next(model.parameters()).dtype
     dtype_changed = ckpt_dtype is not None and ckpt_dtype != model_dtype
-    # Check param group count matches (e.g., checkpoint had 1 group, now we have 2)
-    ckpt_groups = len(ckpt.get("optimizer", {}).get("param_groups", []))
+    # Check param groups match (count and size)
+    ckpt_opt = ckpt.get("optimizer", {})
+    ckpt_groups = len(ckpt_opt.get("param_groups", []))
     cur_groups = len(base_optimizer.param_groups)
-    groups_changed = ckpt_groups != cur_groups
+    ckpt_param_count = len(ckpt_opt.get("state", {}))
+    cur_param_count = sum(len(pg["params"]) for pg in base_optimizer.param_groups)
+    groups_changed = ckpt_groups != cur_groups or ckpt_param_count != cur_param_count
     freeze_mode = hasattr(args, 'freeze_except') and args.freeze_except is not None
     if "optimizer" not in ckpt:
         print("  No optimizer state in checkpoint (fresh optimizer)")
