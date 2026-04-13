@@ -362,6 +362,9 @@ class LipiMoEEncoder(nn.Module):
         )
 
         # Group expert blocks (routed by group_id, 13 experts)
+        # Init output projections near-zero so residual connections pass
+        # backbone features through initially — experts learn to specialize
+        # gradually without destroying features that CTC needs
         self.group_local_blocks = nn.ModuleList([
             ExpertBlock(dim=dim, num_heads=dim // 64, num_experts=num_groups,
                         window_h=2, window_w=local_window_w, shift=(i % 2 == 1),
@@ -375,6 +378,14 @@ class LipiMoEEncoder(nn.Module):
                         mlp_ratio=mlp_ratio)
             for i in range(num_group_wide_blocks)
         ])
+        for block_list in [self.group_local_blocks, self.group_wide_blocks]:
+            for block in block_list:
+                for attn in block.expert_attns:
+                    nn.init.zeros_(attn.proj.weight)
+                    nn.init.zeros_(attn.proj.bias)
+                for mlp in block.expert_mlps:
+                    nn.init.zeros_(mlp.fc2.weight)
+                    nn.init.zeros_(mlp.fc2.bias)
 
         # Group aggregation: concat local + wide → dim
         # Init as average of local+wide (near-identity)
