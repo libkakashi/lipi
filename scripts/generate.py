@@ -829,27 +829,35 @@ def _build_single_line_plan(script_info, punct_prob):
 
 
 def _build_mixed_line_plan(all_script_info, punct_prob):
-    """Build a content plan for a mixed-script line (2-6 words, 2+ groups)."""
-    n_words = random.choices([2, 3, 4, 5, 6],
-                             weights=[0.15, 0.30, 0.30, 0.15, 0.10],
+    """Build a content plan for a mixed-script line (2-8 words, 1-4 groups)."""
+    n_groups = random.choices([1, 2, 3, 4],
+                              weights=[0.10, 0.45, 0.30, 0.15],
+                              k=1)[0]
+    n_groups = min(n_groups, len(all_script_info))
+
+    n_words = random.choices([2, 3, 4, 5, 6, 7, 8],
+                             weights=[0.10, 0.20, 0.25, 0.20, 0.15, 0.05, 0.05],
                              k=1)[0]
+    # Need at least as many words as groups
+    n_words = max(n_words, n_groups)
 
-    # Pick words ensuring at least 2 different groups
-    chosen = []
-    used_groups = set()
-    for _ in range(n_words * 5):
-        info = random.choice(all_script_info)
-        chosen.append(info)
-        used_groups.add(info[3])  # group_id
-        if len(chosen) >= n_words:
-            break
+    # Pick n_groups distinct groups
+    available_by_group = {}
+    for info in all_script_info:
+        available_by_group.setdefault(info[3], []).append(info)
+    group_ids = random.sample(list(available_by_group.keys()),
+                              min(n_groups, len(available_by_group)))
 
-    if len(used_groups) < 2:
-        # Force a second group
-        other = [i for i in all_script_info if i[3] not in used_groups]
-        if not other:
-            return None
-        chosen[-1] = random.choice(other)
+    # Pick one script per selected group
+    group_scripts = []
+    for gid in group_ids:
+        group_scripts.append(random.choice(available_by_group[gid]))
+
+    # Fill n_words: first ensure one word per group, then random fill
+    chosen = list(group_scripts)
+    for _ in range(n_words - len(chosen)):
+        chosen.append(random.choice(group_scripts))
+    random.shuffle(chosen)
 
     plan = []
     for i, (script, _fonts, words, _gid) in enumerate(chosen):
