@@ -47,7 +47,6 @@ from src.data.word_lists import load_all_word_lists
 # ---------------------------------------------------------------------------
 
 CLEAN_RATIO = 0.3
-MIXED_LINE_RATIO = 0.6  # 60% mixed-script lines, 40% single-script
 
 # ---------------------------------------------------------------------------
 # Data styles — font selection + augmentation ops per style
@@ -378,8 +377,7 @@ def render_content_plan(plan, fonts_by_script, h, mw, aug=None, clean=False,
         # Try word pool first (pre-rendered), fall back to live render
         pool = word_pools.get(script) if word_pools else None
         if pool:
-            pool_img, pool_text, pool_w = random.choice(pool)
-            img, text = pool_img.copy(), pool_text
+            img, text, _pw = random.choice(pool)
         else:
             fonts = fonts_by_script.get(script, [])
             if not fonts:
@@ -608,24 +606,31 @@ def discover_fonts(active_scripts, word_lists):
 
 
 # ---------------------------------------------------------------------------
-# Chunk builders
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
 # Worker shared state (initialized once per worker via Pool initializer)
 # ---------------------------------------------------------------------------
 
 _worker_style_configs = None  # {style: (script_info, fonts_by_script)}
 _worker_word_pools = None     # {(style, script): [(pil_img, text, width), ...]}
+_worker_group_index = None    # {style: {group_id: [script_info, ...]}}
+_worker_mixed_ratio = 0.6     # set from CLI via initializer
 
 WORD_POOL_SIZE = 1000  # pre-rendered words per script per style
 
 
-def _init_line_worker(style_configs):
+def _init_line_worker(style_configs, mixed_ratio):
     """Pool initializer: load shared data into worker globals."""
     global _worker_style_configs, _worker_word_pools
+    global _worker_group_index, _worker_mixed_ratio
     _worker_style_configs = style_configs
     _worker_word_pools = {}
+    _worker_mixed_ratio = mixed_ratio
+    # Pre-build group index for fast mixed-line script selection
+    _worker_group_index = {}
+    for style, (script_info, _fonts) in style_configs.items():
+        by_group = {}
+        for info in script_info:
+            by_group.setdefault(info[3], []).append(info)
+        _worker_group_index[style] = by_group
 
 
 def _get_word_pool(style, script, fonts, words, h, clean, punct_prob=0.15):
@@ -642,6 +647,7 @@ def _get_word_pool(style, script, fonts, words, h, clean, punct_prob=0.15):
     pool = []
     attempts = 0
     target = min(WORD_POOL_SIZE, len(words) * 2)
+    t0 = time.time()
     while len(pool) < target and attempts < target * 3:
         attempts += 1
         word = random.choice(words)
@@ -654,9 +660,17 @@ def _get_word_pool(style, script, fonts, words, h, clean, punct_prob=0.15):
             continue
         pool.append((img, word, img.width))
 
+    elapsed = time.time() - t0
+    if elapsed > 2:
+        print(f"      pool[{script}] {len(pool)} words in {elapsed:.1f}s", flush=True)
+
     _worker_word_pools[key] = pool
     return pool
 
+
+# ---------------------------------------------------------------------------
+# Chunk builders
+# ---------------------------------------------------------------------------
 
 def build_line_chunks(tasks, script_fonts, word_lists, valid_scripts, args,
                       shard_dir, styles_to_gen):
@@ -781,7 +795,7 @@ def run_generation_pool(chunks, worker_fn, n_workers, label,
     done = 0
     all_train_widths = []
     all_val_widths = []
-    with Pool(processes=min(n_workers, len(chunks)), maxtasksperchild=1,
+    with Pool(processes=min(n_workers, len(chunks)),
               initializer=initializer, initargs=initargs) as pool:
         for result in pool.imap_unordered(worker_fn, chunks):
             _, script, n, tw, vw = result
@@ -832,10 +846,13 @@ def _generate_line_batch(args_tuple):
             primary_info = info
             break
 
+    # Pre-built group index for mixed line selection
+    group_index = _worker_group_index[style]
+
     samples = []
     attempts = 0
     clean_target = 0 if clean_render else int(count * CLEAN_RATIO)
-    can_mix = len(all_script_info) >= 2
+    can_mix = len(group_index) >= 2
 
     pool_init_time = time.time() - t0
     if pool_init_time > 1:
@@ -846,12 +863,12 @@ def _generate_line_batch(args_tuple):
         attempts += 1
 
         # Decide mixed vs single-script
-        do_mixed = can_mix and random.random() < MIXED_LINE_RATIO
+        do_mixed = can_mix and random.random() < _worker_mixed_ratio
 
         if do_mixed:
-            plan = _build_mixed_line_plan(all_script_info, punct_prob)
+            plan = _build_mixed_line_plan(group_index)
         else:
-            plan = _build_single_line_plan(primary_info, punct_prob)
+            plan = _build_single_line_plan(primary_info)
 
         if plan is None:
             continue
@@ -882,8 +899,12 @@ def _generate_line_batch(args_tuple):
     return chunk_id, primary_script, n, tw, vw
 
 
-def _build_single_line_plan(script_info, punct_prob):
-    """Build a content plan for a single-script line (2-8 words)."""
+def _build_single_line_plan(script_info):
+    """Build a content plan for a single-script line (2-8 words).
+
+    Text values are placeholders — render_content_plan replaces them
+    with pre-rendered pool images (which already include punctuation).
+    """
     if script_info is None:
         return None
 
@@ -895,36 +916,32 @@ def _build_single_line_plan(script_info, punct_prob):
     for i in range(n_words):
         if i > 0:
             plan.append({"text": " ", "script": "whitespace"})
-        word = random.choice(words)
-        word = mix_punctuation(word, p=punct_prob, script=script)
-        plan.append({"text": word, "script": script})
+        plan.append({"text": random.choice(words), "script": script})
     return plan
 
 
-def _build_mixed_line_plan(all_script_info, punct_prob):
-    """Build a content plan for a mixed-script line (2-8 words, 1-4 groups)."""
+def _build_mixed_line_plan(group_index):
+    """Build a content plan for a mixed-script line (2-8 words, 1-4 groups).
+
+    Args:
+        group_index: {group_id: [script_info, ...]} — pre-built index.
+    """
     n_groups = random.choices([1, 2, 3, 4],
                               weights=[0.10, 0.45, 0.30, 0.15],
                               k=1)[0]
-    n_groups = min(n_groups, len(all_script_info))
+    n_groups = min(n_groups, len(group_index))
 
     n_words = random.choices([2, 3, 4, 5, 6, 7, 8],
                              weights=[0.10, 0.20, 0.25, 0.20, 0.15, 0.05, 0.05],
                              k=1)[0]
-    # Need at least as many words as groups
     n_words = max(n_words, n_groups)
 
     # Pick n_groups distinct groups
-    available_by_group = {}
-    for info in all_script_info:
-        available_by_group.setdefault(info[3], []).append(info)
-    group_ids = random.sample(list(available_by_group.keys()),
-                              min(n_groups, len(available_by_group)))
+    group_ids = random.sample(list(group_index.keys()),
+                              min(n_groups, len(group_index)))
 
     # Pick one script per selected group
-    group_scripts = []
-    for gid in group_ids:
-        group_scripts.append(random.choice(available_by_group[gid]))
+    group_scripts = [random.choice(group_index[gid]) for gid in group_ids]
 
     # Fill n_words: first ensure one word per group, then random fill
     chosen = list(group_scripts)
@@ -936,9 +953,7 @@ def _build_mixed_line_plan(all_script_info, punct_prob):
     for i, (script, _fonts, words, _gid) in enumerate(chosen):
         if i > 0:
             plan.append({"text": " ", "script": "whitespace"})
-        word = random.choice(words)
-        word = mix_punctuation(word, p=punct_prob, script=script)
-        plan.append({"text": word, "script": script})
+        plan.append({"text": random.choice(words), "script": script})
     return plan
 
 
@@ -1043,16 +1058,13 @@ def main():
     (shard_dir / "train").mkdir(parents=True, exist_ok=True)
     (shard_dir / "val").mkdir(parents=True, exist_ok=True)
 
-    # Override global mixed ratio from CLI
-    global MIXED_LINE_RATIO
-    MIXED_LINE_RATIO = args.mixed_ratio
-
     all_train_widths = []
     all_val_widths = []
 
     # Line images (mixed + single-script)
-    print(f"\nLine generation: {MIXED_LINE_RATIO:.0%} mixed, "
-          f"{1 - MIXED_LINE_RATIO:.0%} single-script")
+    mixed_ratio = args.mixed_ratio
+    print(f"\nLine generation: {mixed_ratio:.0%} mixed, "
+          f"{1 - mixed_ratio:.0%} single-script")
     chunks, next_chunk_idx, skipped, style_configs = build_line_chunks(
         tasks, script_fonts, word_lists, valid_scripts, args,
         shard_dir, styles_to_gen)
@@ -1062,7 +1074,8 @@ def main():
     if chunks:
         _, tw, vw = run_generation_pool(
             chunks, _generate_line_batch, args.workers, "line",
-            initializer=_init_line_worker, initargs=(style_configs,))
+            initializer=_init_line_worker,
+            initargs=(style_configs, mixed_ratio))
         all_train_widths.extend(tw)
         all_val_widths.extend(vw)
     else:
@@ -1082,6 +1095,7 @@ def main():
             print("  All char chunks exist.")
 
     # Save widths for batch sampling
+    print("\nSaving widths and metadata...", flush=True)
     np.save(str(shard_dir / "train" / "widths.npy"),
             np.array(all_train_widths, dtype=np.int32))
     np.save(str(shard_dir / "val" / "widths.npy"),
