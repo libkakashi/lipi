@@ -512,7 +512,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             # lid2_logits: (B, T, n_scripts_in_group)
             pred = lid2_logits[g_mask]  # (N_frames, n_scripts)
             target = sl_for_loss[g_mask]  # (N_frames,)
-            lid2_loss = lid2_loss + F.cross_entropy(pred, target)
+            lid2_loss = lid2_loss + F.cross_entropy(pred, target, label_smoothing=0.1)
             lid2_count += 1
         if lid2_count > 0:
             lid2_loss = lid2_loss / lid2_count
@@ -747,7 +747,7 @@ def main():
         model = torch.compile(model)
         vram("after compile", device_type)
 
-    ce_loss_fn = nn.CrossEntropyLoss()  # default ignore_index=-100 skips padding
+    ce_loss_fn = nn.CrossEntropyLoss(label_smoothing=0.1)  # ignore_index=-100 skips padding
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 

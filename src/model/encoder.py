@@ -355,7 +355,11 @@ class LipiMoEEncoder(nn.Module):
 
         # LID-1: per-frame group classification
         self.group_h_pool = nn.AdaptiveAvgPool2d((1, None))
-        self.group_head = nn.Linear(dim, num_groups + 1)  # +1 for blank
+        self.group_head = nn.Sequential(
+            nn.Linear(dim, dim // 2),
+            nn.GELU(),
+            nn.Linear(dim // 2, num_groups + 1),
+        )
 
         # Group expert blocks (routed by group_id, 13 experts)
         self.group_local_blocks = nn.ModuleList([
@@ -390,7 +394,11 @@ class LipiMoEEncoder(nn.Module):
         for g in range(num_groups):
             n_scripts = len(group_script_vocab_sizes[g])
             if n_scripts > 1:
-                self.lid2_heads[str(g)] = nn.Linear(dim, n_scripts)
+                self.lid2_heads[str(g)] = nn.Sequential(
+                    nn.Linear(dim, dim // 2),
+                    nn.GELU(),
+                    nn.Linear(dim // 2, n_scripts),
+                )
 
         # Script expert blocks (routed by flat script_id, 26 experts)
         # Initialize output projections near-zero so residual connections
