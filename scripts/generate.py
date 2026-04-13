@@ -433,16 +433,20 @@ def save_mds_samples(images, labels, script, train_dir, val_dir, chunk_id):
             img_np = img_tensor.numpy()
             tids = np.array(ids, dtype=np.int64) if ids else np.zeros(1, dtype=np.int64)
             w = img_np.shape[2]
-            # Detect blank columns: if all pixels in a column are near-white, it's blank
-            # img_np is (3, 32, W) uint8
-            col_mean = img_np.mean(axis=(0, 1))  # (W,) average brightness per column
-            is_blank_col = col_mean > 240  # near-white = blank
-            gl = np.full(w, group_id, dtype=np.int32)
-            gl[is_blank_col] = BLANK_ID
+            # Find text boundaries by looking for ink (non-background) columns
+            # Use a stricter threshold — look for columns with significant ink
+            col_min = img_np.min(axis=(0, 1))  # darkest pixel per column
+            has_ink = col_min < 200  # columns with dark pixels = text
+            if has_ink.any():
+                first_ink = int(np.argmax(has_ink))
+                last_ink = int(w - np.argmax(has_ink[::-1]))
+            else:
+                first_ink, last_ink = 0, w
 
-            # Segments: only the non-blank region
-            first_ink = np.argmax(~is_blank_col) if (~is_blank_col).any() else 0
-            last_ink = w - np.argmax(~is_blank_col[::-1]) if (~is_blank_col).any() else w
+            # Label: whitespace outside text bounds, script within
+            gl = np.full(w, BLANK_ID, dtype=np.int32)
+            gl[first_ink:last_ink] = group_id
+
             segs = json.dumps([{
                 "group_id": group_id, "script_id": script_id,
                 "text": label, "width": last_ink - first_ink, "offset": first_ink,

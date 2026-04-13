@@ -459,9 +459,9 @@ class LipiMoEEncoder(nn.Module):
         # Batched path: group single-script images by their group
         if is_single.any():
             single_idx = is_single.nonzero(as_tuple=True)[0]
-            single_groups = frame_groups[single_idx, 0]  # (N,) each image's group
+            single_groups = primary[single_idx]  # (N,) primary non-blank group per image
             for g in single_groups.unique().tolist():
-                if g == self.blank_group_id:
+                if g < 0 or g == self.blank_group_id:
                     continue  # skip blank-only images
                 g_mask = (single_groups == g)
                 batch_idx = single_idx[g_mask]  # indices into original batch
