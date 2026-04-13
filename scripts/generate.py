@@ -341,7 +341,8 @@ def render_content_plan(plan, fonts_by_script, h, mw, aug=None, clean=False):
         clean: if True, render text cleanly (no anti-aliasing noise)
 
     Returns:
-        (img_tensor, label, group_labels, segments_json) or None if failed
+        (img_tensor, label, group_labels, segments) or None if failed
+        segments is a Python list (not JSON) for efficiency.
     """
     from PIL import Image
     from src.model.lid import NUM_GROUPS as BLANK_ID
@@ -354,11 +355,10 @@ def render_content_plan(plan, fonts_by_script, h, mw, aug=None, clean=False):
         script = item["script"]
 
         if script == "whitespace":
-            # Whitespace: fixed-width blank
             ws_w = random.randint(4, 16)
             if total_w + ws_w > mw:
                 break
-            blocks.append((None, "", BLANK_ID, 0, ws_w))  # None img = blank
+            blocks.append((None, "", BLANK_ID, 0, ws_w))
             total_w += ws_w
             continue
 
@@ -366,7 +366,6 @@ def render_content_plan(plan, fonts_by_script, h, mw, aug=None, clean=False):
             img = render_emoji(h, mw - total_w if total_w < mw else 32)
             if img is None:
                 continue
-            # Emoji may not be in SCRIPT_TO_GROUP; use group 0 as fallback
             emoji_gid = GROUP_TO_ID.get(SCRIPT_TO_GROUP.get(script, ""), 0)
             emoji_sid = SCRIPT_TO_ID.get(script, 0)
             blocks.append((img, text, emoji_gid, emoji_sid, img.width))
@@ -377,12 +376,17 @@ def render_content_plan(plan, fonts_by_script, h, mw, aug=None, clean=False):
         if not fonts:
             return None
 
-        font = random.choice(fonts)
-        if not font_covers_text(font, text):
-            return None
-
-        img = render_word(text, font, h, clean=clean)
-        if img is None or not image_has_ink(img):
+        # Try up to 3 fonts to find one that covers the text and renders
+        img = None
+        for _ in range(min(3, len(fonts))):
+            font = random.choice(fonts)
+            if not font_covers_text(font, text):
+                continue
+            img = render_word(text, font, h, clean=clean)
+            if img is not None and image_has_ink(img):
+                break
+            img = None
+        if img is None:
             return None
 
         if total_w + img.width > mw:
@@ -415,7 +419,6 @@ def render_content_plan(plan, fonts_by_script, h, mw, aug=None, clean=False):
                     "text": text, "width": bw, "offset": offset,
                 })
                 full_label += text
-        # else: whitespace — group_labels already BLANK_ID
         offset += bw
 
     # Resize/pad to target dimensions
@@ -429,30 +432,27 @@ def render_content_plan(plan, fonts_by_script, h, mw, aug=None, clean=False):
         for seg in segments:
             new_offset = round(seg["offset"] * scale)
             new_end = round((seg["offset"] + seg["width"]) * scale)
-            new_width = new_end - new_offset
             new_gl[new_offset:new_end] = seg["group_id"]
             seg["offset"] = new_offset
-            seg["width"] = new_width
+            seg["width"] = new_end - new_offset
         group_labels = new_gl
 
     # Apply augmentation
     if aug is not None:
         combined = aug(combined)
-        if not image_has_ink(combined, min_ink_pixels=5):
-            return None
 
     img_tensor = rgb_to_input(combined)
-    return img_tensor, full_label, group_labels, json.dumps(segments)
+    return img_tensor, full_label, group_labels, segments
 
 
 def save_rendered_samples(samples, primary_script, train_dir, val_dir, chunk_id):
-    """Write rendered samples to MDS. Each sample is (img_tensor, label, group_labels, segments_json).
+    """Write rendered samples to MDS.
 
-    Encodes target_ids per-segment from segments metadata, so mixed-script
-    samples get correct per-script encoding.
+    Each sample is (img_tensor, label, group_labels_np, segments_list).
+    Segments are Python lists (not JSON) — serialized once at write time.
 
     Args:
-        samples: list of (img_tensor, label, group_labels_np, segments_json)
+        samples: list of (img_tensor, label, group_labels_np, segments_list)
         primary_script: script name (used for script_id/group_id fields)
         train_dir, val_dir: output directories
         chunk_id: chunk index
@@ -479,16 +479,14 @@ def save_rendered_samples(samples, primary_script, train_dir, val_dir, chunk_id)
     val_count = 0
     with MDSWriter(out=t_dir, columns=MDS_COLUMNS, size_limit=1 << 26) as tw, \
          MDSWriter(out=v_dir, columns=MDS_COLUMNS, size_limit=1 << 26) as vw:
-        for idx, (img_tensor, label, gl, segs_json) in enumerate(samples):
+        for idx, (img_tensor, label, gl, segs) in enumerate(samples):
             img_np = img_tensor.numpy()
 
             # Encode target_ids per-segment for correct mixed-script encoding
-            segs = json.loads(segs_json)
             all_ids = []
             for seg in segs:
-                seg_text = seg["text"]
                 seg_script = _sid_to_name.get(seg.get("script_id", 0), primary_script)
-                all_ids.extend(encode_text(seg_text, seg_script))
+                all_ids.extend(encode_text(seg["text"], seg_script))
 
             tids = np.array(all_ids, dtype=np.int64) if all_ids else np.zeros(1, dtype=np.int64)
             sample = {
@@ -500,7 +498,7 @@ def save_rendered_samples(samples, primary_script, train_dir, val_dir, chunk_id)
                 "target_len": len(all_ids),
                 "width": img_np.shape[2],
                 "group_labels": gl,
-                "segments": segs_json,
+                "segments": json.dumps(segs),
             }
             h_val = int(hashlib.md5(f"{chunk_id}_{idx}_{label}".encode()).hexdigest(), 16)
             if h_val % 1000 < 100 and val_count < _MAX_VAL_PER_SCRIPT:
@@ -606,12 +604,26 @@ def discover_fonts(active_scripts, word_lists):
 # Chunk builders
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Worker shared state (initialized once per worker via Pool initializer)
+# ---------------------------------------------------------------------------
+
+_worker_style_configs = None  # {style: (script_info, fonts_by_script)}
+
+
+def _init_line_worker(style_configs):
+    """Pool initializer: load shared data into worker globals."""
+    global _worker_style_configs
+    _worker_style_configs = style_configs
+
+
 def build_line_chunks(tasks, script_fonts, word_lists, valid_scripts, args,
                       shard_dir, styles_to_gen):
-    """Build line-image chunks. Returns (chunks, next_chunk_idx, skipped).
+    """Build line-image chunks and per-style shared configs.
 
-    Each chunk generates lines for a primary script. Lines are 60% mixed-script
-    (drawing words from all available scripts) and 40% single-script.
+    Returns (chunks, next_chunk_idx, skipped, style_configs).
+    style_configs is passed to workers via Pool initializer to avoid
+    serializing font/word lists per chunk.
     """
     train_dir = str(shard_dir / "train")
     val_dir = str(shard_dir / "val")
@@ -627,25 +639,27 @@ def build_line_chunks(tasks, script_fonts, word_lists, valid_scripts, args,
             gid = GROUP_TO_ID[SCRIPT_TO_GROUP[script]]
             all_script_info.append((script, fonts, words, gid))
 
-    chunks = []
-    chunk_idx = 0
-    skipped = 0
+    # Pre-build per-style configs (passed to workers once via initializer)
+    style_configs = {}
     for style in styles_to_gen:
-        proportion = STYLES[style]["proportion"] if len(styles_to_gen) > 1 else 1.0
-
-        # Build style-filtered fonts_by_script for this style
         style_fonts = {}
         for script in valid_scripts:
             style_fonts[script] = filter_fonts_by_style(
                 script_fonts[script], style)
 
-        # Style-filtered script info for mixed line word selection
         style_script_info = []
         for script, _fonts, words, gid in all_script_info:
             sf = style_fonts.get(script, [])
             if sf:
                 style_script_info.append((script, sf, words, gid))
 
+        style_configs[style] = (style_script_info, style_fonts)
+
+    chunks = []
+    chunk_idx = 0
+    skipped = 0
+    for style in styles_to_gen:
+        proportion = STYLES[style]["proportion"] if len(styles_to_gen) > 1 else 1.0
         for script, target in tasks:
             style_target = max(1, int(target * proportion))
             chunk_size = min(5000, max(500,
@@ -656,13 +670,13 @@ def build_line_chunks(tasks, script_fonts, word_lists, valid_scripts, args,
                 if chunk_dir_exists(str(Path(train_dir) / f"chunk_{chunk_idx:04d}")):
                     skipped += batch
                 else:
-                    chunks.append((script, batch, style_script_info,
-                                   style_fonts, args.height, args.max_width,
+                    # Lightweight chunk: just script, count, style name, and paths
+                    chunks.append((script, batch, args.height, args.max_width,
                                    args.augment, chunk_idx, train_dir, val_dir,
                                    style, args.punct_prob))
                 chunk_idx += 1
                 remaining -= batch
-    return chunks, chunk_idx, skipped
+    return chunks, chunk_idx, skipped, style_configs
 
 
 def build_char_chunks(valid_scripts, script_fonts, args, shard_dir, start_chunk_idx):
@@ -706,7 +720,8 @@ def build_char_chunks(valid_scripts, script_fonts, args, shard_dir, start_chunk_
 # Pool runner
 # ---------------------------------------------------------------------------
 
-def run_generation_pool(chunks, worker_fn, n_workers, label):
+def run_generation_pool(chunks, worker_fn, n_workers, label,
+                        initializer=None, initargs=()):
     """Run a generation function over chunks using a multiprocessing pool.
 
     Returns (total_done, all_train_widths, all_val_widths).
@@ -725,7 +740,8 @@ def run_generation_pool(chunks, worker_fn, n_workers, label):
     done = 0
     all_train_widths = []
     all_val_widths = []
-    with Pool(processes=min(n_workers, len(chunks)), maxtasksperchild=1) as pool:
+    with Pool(processes=min(n_workers, len(chunks)), maxtasksperchild=1,
+              initializer=initializer, initargs=initargs) as pool:
         for result in pool.imap_unordered(worker_fn, chunks):
             _, script, n, tw, vw = result
             done += n
@@ -743,12 +759,14 @@ def run_generation_pool(chunks, worker_fn, n_workers, label):
 def _generate_line_batch(args_tuple):
     """Generate line images (mixed or single-script) using two-stage pipeline.
 
-    Each line has 2-8 words. 60% of lines are mixed-script (words from
-    different groups), 40% are single-script.
+    Each line has 2-8 words. Mixed ratio controlled by MIXED_LINE_RATIO.
+    Shared data (script_info, fonts) loaded from worker globals.
     """
-    (primary_script, count, all_script_info, fonts_by_script,
-     h, mw, do_augment, chunk_id, train_dir, val_dir,
-     style, punct_prob) = args_tuple
+    (primary_script, count, h, mw, do_augment, chunk_id,
+     train_dir, val_dir, style, punct_prob) = args_tuple
+
+    # Pull shared data from worker globals (set by Pool initializer)
+    all_script_info, fonts_by_script = _worker_style_configs[style]
 
     style_cfg = STYLES.get(style, STYLES["printed"])
     clean_render = style_cfg.get("clean_render", False)
@@ -980,14 +998,16 @@ def main():
     # Line images (mixed + single-script)
     print(f"\nLine generation: {MIXED_LINE_RATIO:.0%} mixed, "
           f"{1 - MIXED_LINE_RATIO:.0%} single-script")
-    chunks, next_chunk_idx, skipped = build_line_chunks(
+    chunks, next_chunk_idx, skipped, style_configs = build_line_chunks(
         tasks, script_fonts, word_lists, valid_scripts, args,
         shard_dir, styles_to_gen)
     if skipped > 0:
         print(f"\nResuming: {skipped} lines in existing chunks, "
               f"{sum(c[1] for c in chunks)} remaining")
     if chunks:
-        _, tw, vw = run_generation_pool(chunks, _generate_line_batch, args.workers, "line")
+        _, tw, vw = run_generation_pool(
+            chunks, _generate_line_batch, args.workers, "line",
+            initializer=_init_line_worker, initargs=(style_configs,))
         all_train_widths.extend(tw)
         all_val_widths.extend(vw)
     else:
