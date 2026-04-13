@@ -78,7 +78,9 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
         with torch.amp.autocast(device_type, enabled=use_amp, dtype=amp_dtype):
             out = model(imgs, group_ids=None)
             # Also run with ground truth routing to compute val loss
-            out_gt = model(imgs, group_ids=gids, script_ids=sids_dev)
+            T_est = imgs.shape[3] // 2
+            gl_frames_gt = group_labels[:, ::2][:, :T_est]
+            out_gt = model(imgs, group_ids=gl_frames_gt, script_ids=sids_dev)
 
         # Val CTC loss (with ground truth routing, same as training)
         B = imgs.shape[0]

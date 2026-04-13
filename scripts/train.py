@@ -437,12 +437,16 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                           group_labels_=None, segments_=None):
         """Run forward + backward on a (sub-)batch. scale adjusts loss."""
         with torch.amp.autocast(device_type, enabled=use_amp, dtype=amp_dtype):
-            out = model(imgs_, group_ids=gids_, script_ids=sids_,
+            # Pass per-frame group labels for routing (not per-image gids)
+            # This ensures blank frames are routed correctly
+            T_est = imgs_.shape[3] // 2  # W/2 estimate
+            gl_frames = group_labels_[:, ::2][:, :T_est]
+            out = model(imgs_, group_ids=gl_frames, script_ids=sids_,
                         detach_for_experts=detach_for_experts)
 
-        # Frame-level group labels: downsample pixel-level (W) to frame-level (W/2)
+        # LID-1 loss
         T = out["group_logits"].shape[1]
-        gl_frames = group_labels_[:, ::2][:, :T]
+        gl_frames = gl_frames[:, :T]  # trim to actual T if needed
         lid1_loss = compute_lid1_loss(out["group_logits"], gl_frames, ce_loss_fn)
 
         # CTC loss: batch single-script, per-segment for mixed
