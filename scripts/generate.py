@@ -627,6 +627,8 @@ def _init_line_worker(style_configs, mixed_ratio, pool_height=32):
     _worker_style_configs = style_configs
     _worker_word_pools = {}
     _worker_mixed_ratio = mixed_ratio
+    import os
+    pid = os.getpid()
     # Pre-build group index for fast mixed-line script selection
     _worker_group_index = {}
     for style, (script_info, _fonts) in style_configs.items():
@@ -636,10 +638,15 @@ def _init_line_worker(style_configs, mixed_ratio, pool_height=32):
         _worker_group_index[style] = by_group
     # Pre-build word pools for all scripts (one pool per script, shared
     # across styles since all words render clean white bg + black ink)
+    t0 = time.time()
     first_style = next(iter(style_configs))
     script_info, _ = style_configs[first_style]
     for script, fonts, words, _gid in script_info:
         _get_word_pool(first_style, script, fonts, words, h=pool_height)
+    elapsed = time.time() - t0
+    total_words = sum(len(p) for p in _worker_word_pools.values())
+    print(f"    [worker {pid}] pools ready: {len(_worker_word_pools)} scripts, "
+          f"{total_words} words, {elapsed:.1f}s", flush=True)
 
 
 def _get_word_pool(style, script, fonts, words, h=32, punct_prob=0.15):
@@ -795,12 +802,19 @@ def run_generation_pool(chunks, worker_fn, n_workers, label,
     print(f"\nGenerating {total_est} {label} images, {len(chunks)} chunks, "
           f"{min(n_workers, len(chunks))} workers\n")
 
+    n_procs = min(n_workers, len(chunks))
+    if initializer:
+        print(f"  Starting {n_procs} workers (building word pools)...", flush=True)
+
     start = time.time()
     done = 0
     all_train_widths = []
     all_val_widths = []
-    with Pool(processes=min(n_workers, len(chunks)),
+    with Pool(processes=n_procs,
               initializer=initializer, initargs=initargs) as pool:
+        if initializer:
+            # Workers are initializing — first result confirms they're ready
+            print(f"  Workers initialized, generating...", flush=True)
         for result in pool.imap_unordered(worker_fn, chunks):
             _, script, n, tw, vw = result
             done += n
@@ -808,6 +822,9 @@ def run_generation_pool(chunks, worker_fn, n_workers, label,
             all_val_widths.extend(vw)
             elapsed = time.time() - start
             print(f"    total: {done}/{total_est} ({done/elapsed:.0f} img/s)", flush=True)
+    elapsed = time.time() - start
+    print(f"  Done: {done} {label} images in {elapsed:.0f}s "
+          f"({done/max(elapsed,0.1):.0f} img/s)", flush=True)
     return done, all_train_widths, all_val_widths
 
 
@@ -884,14 +901,17 @@ def _generate_line_batch(args_tuple):
             print(f"    [{primary_script}] {len(samples)}/{count} "
                   f"({rate:.0f} img/s)", flush=True)
 
+    render_time = time.time() - t0
     n, tw, vw = save_rendered_samples(samples, primary_script,
                                       train_dir, val_dir, chunk_id)
     del samples
 
     elapsed = time.time() - t0
     rate = n / elapsed if elapsed > 0 else 0
+    save_time = elapsed - render_time
+    extra = f" (render {render_time:.0f}s + save {save_time:.0f}s)" if save_time > 1 else ""
     print(f"  {primary_script:<15} {n:>5} lines in {elapsed:.0f}s "
-          f"({rate:.0f} img/s)", flush=True)
+          f"({rate:.0f} img/s){extra}", flush=True)
     return chunk_id, primary_script, n, tw, vw
 
 
@@ -981,13 +1001,17 @@ def _generate_char_batch(args_tuple):
         if not got_any:
             skipped_chars += 1
 
+    render_time = time.time() - t0
     n, tw, vw = save_rendered_samples(samples, script, train_dir, val_dir, chunk_id)
     del samples
 
     elapsed = time.time() - t0
-    skip_str = f", {skipped_chars} chars skipped (bad render)" if skipped_chars else ""
+    skip_str = f", {skipped_chars} skipped" if skipped_chars else ""
+    save_time = elapsed - render_time
+    extra = f" (render {render_time:.0f}s + save {save_time:.0f}s)" if save_time > 1 else ""
     print(f"  {script:<15} {n:>5} char images "
-          f"({len(chars)} unique × {reps_per_char} reps{skip_str}) in {elapsed:.0f}s", flush=True)
+          f"({len(chars)} unique × {reps_per_char} reps{skip_str}) "
+          f"in {elapsed:.0f}s{extra}", flush=True)
     return chunk_id, script, n, tw, vw
 
 
