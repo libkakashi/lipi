@@ -248,11 +248,7 @@ class GroupCTCModule(nn.Module):
         ])
 
         if self.multi_script:
-            self.lid2_pool = nn.Sequential(
-                nn.Conv1d(enc_dim, enc_dim, kernel_size=4, stride=4, groups=16),
-                nn.GELU(),
-                nn.AdaptiveAvgPool1d(1),
-            )
+            self.lid2_pool = nn.AdaptiveAvgPool1d(1)
             self.lid2_classifier = nn.Sequential(
                 nn.Linear(enc_dim, enc_dim // 4),
                 nn.ReLU(),
