@@ -418,8 +418,10 @@ class LipiMoEEncoder(nn.Module):
         ])
 
     def _get_flat_script_ids(self, group_ids, script_ids):
-        """Convert (group_id, local_script_id) pairs to flat script indices."""
-        flat = torch.zeros_like(group_ids)
+        """Convert (group_id, local_script_id) pairs to flat script indices.
+        Blank/whitespace frames (group_id == blank_group_id) get flat_id = -1.
+        """
+        flat = torch.full_like(group_ids, -1)
         for (g, s), f in self._flat_script_id.items():
             mask = (group_ids == g) & (script_ids == s)
             flat[mask] = f
