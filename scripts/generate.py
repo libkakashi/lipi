@@ -47,6 +47,7 @@ from src.data.word_lists import load_all_word_lists
 # ---------------------------------------------------------------------------
 
 CLEAN_RATIO = 0.3
+MIXED_LINE_RATIO = 0.6  # 60% mixed-script lines, 40% single-script
 
 # ---------------------------------------------------------------------------
 # Data styles — font selection + augmentation ops per style
@@ -514,66 +515,6 @@ def save_rendered_samples(samples, primary_script, train_dir, val_dir, chunk_id)
 
 
 # ---------------------------------------------------------------------------
-# Mixed-script generation
-# ---------------------------------------------------------------------------
-
-def _generate_mixed_batch(args_tuple):
-    """Generate mixed-script images using two-stage pipeline."""
-    count, all_script_info, h, mw, do_augment, chunk_id, train_dir, val_dir = args_tuple
-    aug = RandAugmentOCR(n_ops=2, p=0.5) if do_augment else None
-    t0 = time.time()
-
-    # Build fonts_by_script for render_content_plan
-    fonts_by_script = {}
-    for script, fonts, _words, _gid in all_script_info:
-        fonts_by_script[script] = fonts
-
-    samples = []
-    primary_script = all_script_info[0][0]  # for MDS metadata fields
-    attempts = 0
-
-    while len(samples) < count and attempts < count * 10:
-        attempts += 1
-
-        # Pick 2-4 words from different groups
-        n_words = random.choices([2, 3, 4], weights=[0.6, 0.3, 0.1], k=1)[0]
-        chosen = []
-        used_groups = set()
-        for _ in range(n_words * 3):  # attempts to find different groups
-            info = random.choice(all_script_info)
-            if info[3] not in used_groups:  # different group_id
-                chosen.append(info)
-                used_groups.add(info[3])
-            if len(chosen) >= n_words:
-                break
-
-        if len(chosen) < 2:
-            continue
-
-        # Stage 1: build content plan with explicit whitespace
-        plan = []
-        for i, (script, _fonts, words, _gid) in enumerate(chosen):
-            if i > 0:
-                plan.append({"text": " ", "script": "whitespace"})
-            plan.append({"text": random.choice(words), "script": script})
-
-        # Stage 2: render
-        result = render_content_plan(plan, fonts_by_script, h, mw, aug=aug)
-        if result is None:
-            continue
-
-        samples.append(result)
-
-    n, tw, vw = save_rendered_samples(samples, primary_script,
-                                      train_dir, val_dir, chunk_id)
-    del samples
-
-    elapsed = time.time() - t0
-    print(f"  {'mixed':<15} {n:>5} images in {elapsed:.0f}s", flush=True)
-    return chunk_id, "mixed", n, tw, vw
-
-
-# ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
 
@@ -593,13 +534,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--augment", dest="augment", action="store_true", default=True)
     parser.add_argument("--no-augment", dest="augment", action="store_false")
     parser.add_argument("--height", type=int, default=32)
-    parser.add_argument("--max-width", type=int, default=768)
+    parser.add_argument("--max-width", type=int, default=1280)
     parser.add_argument("--punct-prob", type=float, default=0.15,
                         help="Probability of mixing punctuation/numbers into a word (default: 0.15)")
+    parser.add_argument("--mixed-ratio", type=float, default=0.6,
+                        help="Fraction of lines that are mixed-script (default: 0.6)")
     parser.add_argument("--include-chars", action="store_true")
     parser.add_argument("--char-reps", type=int, default=3)
-    parser.add_argument("--mixed-script", type=int, default=0,
-                        help="Number of mixed-script (two scripts side by side) samples to generate")
     parser.add_argument("--out", type=str, default="data/shards")
     parser.add_argument("--workers", type=int, default=48)
     args = parser.parse_args()
@@ -665,31 +606,60 @@ def discover_fonts(active_scripts, word_lists):
 # Chunk builders
 # ---------------------------------------------------------------------------
 
-def build_word_chunks(tasks, script_fonts, word_lists, args, shard_dir, styles_to_gen):
-    """Build word-image chunks. Returns (chunks, next_chunk_idx, skipped)."""
+def build_line_chunks(tasks, script_fonts, word_lists, valid_scripts, args,
+                      shard_dir, styles_to_gen):
+    """Build line-image chunks. Returns (chunks, next_chunk_idx, skipped).
+
+    Each chunk generates lines for a primary script. Lines are 60% mixed-script
+    (drawing words from all available scripts) and 40% single-script.
+    """
     train_dir = str(shard_dir / "train")
     val_dir = str(shard_dir / "val")
+
+    # Build all_script_info for mixed lines: (script, fonts, words, group_id)
+    all_script_info = []
+    for script in valid_scripts:
+        if script == "emoji":
+            continue
+        fonts = script_fonts.get(script, [])
+        words = word_lists.get(script, [])
+        if fonts and words:
+            gid = GROUP_TO_ID[SCRIPT_TO_GROUP[script]]
+            all_script_info.append((script, fonts, words, gid))
+
     chunks = []
     chunk_idx = 0
     skipped = 0
     for style in styles_to_gen:
         proportion = STYLES[style]["proportion"] if len(styles_to_gen) > 1 else 1.0
+
+        # Build style-filtered fonts_by_script for this style
+        style_fonts = {}
+        for script in valid_scripts:
+            style_fonts[script] = filter_fonts_by_style(
+                script_fonts[script], style)
+
+        # Style-filtered script info for mixed line word selection
+        style_script_info = []
+        for script, _fonts, words, gid in all_script_info:
+            sf = style_fonts.get(script, [])
+            if sf:
+                style_script_info.append((script, sf, words, gid))
+
         for script, target in tasks:
             style_target = max(1, int(target * proportion))
-            fonts = filter_fonts_by_style(script_fonts[script], style)
-            words = word_lists.get(script, ["placeholder"])
-            chunk_size = min(5000, max(500, style_target // max(1, args.workers // len(tasks))))
+            chunk_size = min(5000, max(500,
+                style_target // max(1, args.workers // len(tasks))))
             remaining = style_target
             while remaining > 0:
                 batch = min(chunk_size, remaining)
-                # Check if this chunk's train subdir already exists
                 if chunk_dir_exists(str(Path(train_dir) / f"chunk_{chunk_idx:04d}")):
                     skipped += batch
                 else:
-                    chunks.append((script, batch, fonts, words,
-                                  args.height, args.max_width, args.augment,
-                                  chunk_idx, train_dir, val_dir,
-                                  style, args.punct_prob))
+                    chunks.append((script, batch, style_script_info,
+                                   style_fonts, args.height, args.max_width,
+                                   args.augment, chunk_idx, train_dir, val_dir,
+                                   style, args.punct_prob))
                 chunk_idx += 1
                 remaining -= batch
     return chunks, chunk_idx, skipped
@@ -741,13 +711,10 @@ def run_generation_pool(chunks, worker_fn, n_workers, label):
 
     Returns (total_done, all_train_widths, all_val_widths).
     """
-    # Estimate total: word chunks have count at c[1], char chunks at len(c[1])*c[2],
-    # mixed chunks have count at c[0]
+    # Estimate total: line chunks have count at c[1], char chunks at len(c[1])*c[2]
     def _est(c):
-        if isinstance(c[0], int) and not isinstance(c[1], int):
-            return c[0]  # mixed: (count, script_info, ...)
-        elif isinstance(c[1], int):
-            return c[1]  # word: (script, count, ...)
+        if isinstance(c[1], int):
+            return c[1]  # line: (script, count, ...)
         else:
             return len(c[1]) * c[2]  # char: (script, chars, reps, ...)
     total_est = sum(_est(c) for c in chunks)
@@ -773,9 +740,16 @@ def run_generation_pool(chunks, worker_fn, n_workers, label):
 # Worker functions (called in multiprocessing pool)
 # ---------------------------------------------------------------------------
 
-def _generate_word_batch(args_tuple):
-    """Generate word images for one chunk using two-stage pipeline."""
-    script, count, fonts, words, h, mw, do_augment, chunk_id, train_dir, val_dir, style, punct_prob = args_tuple
+def _generate_line_batch(args_tuple):
+    """Generate line images (mixed or single-script) using two-stage pipeline.
+
+    Each line has 2-8 words. 60% of lines are mixed-script (words from
+    different groups), 40% are single-script.
+    """
+    (primary_script, count, all_script_info, fonts_by_script,
+     h, mw, do_augment, chunk_id, train_dir, val_dir,
+     style, punct_prob) = args_tuple
+
     style_cfg = STYLES.get(style, STYLES["printed"])
     clean_render = style_cfg.get("clean_render", False)
     if not do_augment or not style_cfg["ops"]:
@@ -784,29 +758,32 @@ def _generate_word_batch(args_tuple):
         aug = RandAugmentOCR(n_ops=2, p=0.5, ops=style_cfg["ops"])
     t0 = time.time()
 
-    fonts_by_script = {script: fonts}
+    # Find this script's info for single-script lines
+    primary_info = None
+    for info in all_script_info:
+        if info[0] == primary_script:
+            primary_info = info
+            break
+
     samples = []
     attempts = 0
     clean_target = 0 if clean_render else int(count * CLEAN_RATIO)
+    can_mix = len(all_script_info) >= 2
 
     while len(samples) < count and attempts < count * 5:
         attempts += 1
 
-        if script == "emoji":
-            plan = [{"text": "emoji", "script": "emoji"}]
+        # Decide mixed vs single-script
+        do_mixed = can_mix and random.random() < MIXED_LINE_RATIO
+
+        if do_mixed:
+            plan = _build_mixed_line_plan(all_script_info, punct_prob)
         else:
-            word = random.choice(words)
-            word = mix_punctuation(word, p=punct_prob, script=script)
+            plan = _build_single_line_plan(primary_info, punct_prob)
 
-            # Multi-word: split by whitespace, interleave with whitespace items
-            parts = word.split(" ")
-            plan = []
-            for i, part in enumerate(parts):
-                if i > 0:
-                    plan.append({"text": " ", "script": "whitespace"})
-                plan.append({"text": part, "script": script})
+        if plan is None:
+            continue
 
-        # First clean_target samples skip augmentation for training diversity
         use_aug = aug if len(samples) >= clean_target else None
         result = render_content_plan(plan, fonts_by_script, h, mw,
                                      aug=use_aug, clean=clean_render)
@@ -818,15 +795,70 @@ def _generate_word_batch(args_tuple):
         if len(samples) % 1000 == 0:
             elapsed = time.time() - t0
             rate = len(samples) / elapsed if elapsed > 0 else 0
-            print(f"    [{script}] {len(samples)}/{count} ({rate:.0f} img/s)", flush=True)
+            print(f"    [{primary_script}] {len(samples)}/{count} "
+                  f"({rate:.0f} img/s)", flush=True)
 
-    n, tw, vw = save_rendered_samples(samples, script, train_dir, val_dir, chunk_id)
+    n, tw, vw = save_rendered_samples(samples, primary_script,
+                                      train_dir, val_dir, chunk_id)
     del samples
 
     elapsed = time.time() - t0
     rate = n / elapsed if elapsed > 0 else 0
-    print(f"  {script:<15} {n:>5} images in {elapsed:.0f}s ({rate:.0f} img/s)", flush=True)
-    return chunk_id, script, n, tw, vw
+    print(f"  {primary_script:<15} {n:>5} lines in {elapsed:.0f}s "
+          f"({rate:.0f} img/s)", flush=True)
+    return chunk_id, primary_script, n, tw, vw
+
+
+def _build_single_line_plan(script_info, punct_prob):
+    """Build a content plan for a single-script line (2-8 words)."""
+    if script_info is None:
+        return None
+
+    script, _fonts, words, _gid = script_info
+    n_words = random.choices([2, 3, 4, 5, 6, 7, 8],
+                             weights=[0.10, 0.20, 0.25, 0.20, 0.15, 0.05, 0.05],
+                             k=1)[0]
+    plan = []
+    for i in range(n_words):
+        if i > 0:
+            plan.append({"text": " ", "script": "whitespace"})
+        word = random.choice(words)
+        word = mix_punctuation(word, p=punct_prob, script=script)
+        plan.append({"text": word, "script": script})
+    return plan
+
+
+def _build_mixed_line_plan(all_script_info, punct_prob):
+    """Build a content plan for a mixed-script line (2-6 words, 2+ groups)."""
+    n_words = random.choices([2, 3, 4, 5, 6],
+                             weights=[0.15, 0.30, 0.30, 0.15, 0.10],
+                             k=1)[0]
+
+    # Pick words ensuring at least 2 different groups
+    chosen = []
+    used_groups = set()
+    for _ in range(n_words * 5):
+        info = random.choice(all_script_info)
+        chosen.append(info)
+        used_groups.add(info[3])  # group_id
+        if len(chosen) >= n_words:
+            break
+
+    if len(used_groups) < 2:
+        # Force a second group
+        other = [i for i in all_script_info if i[3] not in used_groups]
+        if not other:
+            return None
+        chosen[-1] = random.choice(other)
+
+    plan = []
+    for i, (script, _fonts, words, _gid) in enumerate(chosen):
+        if i > 0:
+            plan.append({"text": " ", "script": "whitespace"})
+        word = random.choice(words)
+        word = mix_punctuation(word, p=punct_prob, script=script)
+        plan.append({"text": word, "script": script})
+    return plan
 
 
 def _generate_char_batch(args_tuple):
@@ -930,17 +962,24 @@ def main():
     (shard_dir / "train").mkdir(parents=True, exist_ok=True)
     (shard_dir / "val").mkdir(parents=True, exist_ok=True)
 
+    # Override global mixed ratio from CLI
+    global MIXED_LINE_RATIO
+    MIXED_LINE_RATIO = args.mixed_ratio
+
     all_train_widths = []
     all_val_widths = []
 
-    # Word images
-    chunks, next_chunk_idx, skipped = build_word_chunks(
-        tasks, script_fonts, word_lists, args, shard_dir, styles_to_gen)
+    # Line images (mixed + single-script)
+    print(f"\nLine generation: {MIXED_LINE_RATIO:.0%} mixed, "
+          f"{1 - MIXED_LINE_RATIO:.0%} single-script")
+    chunks, next_chunk_idx, skipped = build_line_chunks(
+        tasks, script_fonts, word_lists, valid_scripts, args,
+        shard_dir, styles_to_gen)
     if skipped > 0:
-        print(f"\nResuming: {skipped} images in existing chunks, "
+        print(f"\nResuming: {skipped} lines in existing chunks, "
               f"{sum(c[1] for c in chunks)} remaining")
     if chunks:
-        _, tw, vw = run_generation_pool(chunks, _generate_word_batch, args.workers, "word")
+        _, tw, vw = run_generation_pool(chunks, _generate_line_batch, args.workers, "line")
         all_train_widths.extend(tw)
         all_val_widths.extend(vw)
     else:
@@ -958,49 +997,6 @@ def main():
             all_val_widths.extend(vw)
         else:
             print("  All char chunks exist.")
-
-    # Mixed-script images
-    if args.mixed_script > 0:
-        print(f"\n{'='*60}")
-        print(f"Generating {args.mixed_script} mixed-script images")
-        print(f"{'='*60}")
-
-        # Build script info for mixed generator
-        # Tuples: (script_name, fonts, words, group_id)
-        all_script_info = []
-        for script in valid_scripts:
-            if script == "emoji":
-                continue
-            fonts = script_fonts.get(script, [])
-            words = word_lists.get(script, [])
-            if fonts and words:
-                gid = GROUP_TO_ID[SCRIPT_TO_GROUP[script]]
-                all_script_info.append((script, fonts, words, gid))
-
-        if len(all_script_info) >= 2:
-            train_dir = str(shard_dir / "train")
-            val_dir = str(shard_dir / "val")
-            # Use chunk index after all previous chunks
-            n_char_chunks = len(char_chunks) if args.include_chars else 0
-            mixed_chunk_idx = next_chunk_idx + n_char_chunks
-            chunk_size = min(2000, args.mixed_script)
-            mixed_chunks = []
-            remaining = args.mixed_script
-            ci = mixed_chunk_idx
-            while remaining > 0:
-                batch = min(chunk_size, remaining)
-                if not chunk_dir_exists(str(Path(train_dir) / f"chunk_{ci:04d}")):
-                    mixed_chunks.append((batch, all_script_info, args.height,
-                                         args.max_width, args.augment, ci,
-                                         train_dir, val_dir))
-                ci += 1
-                remaining -= batch
-
-            print(f"  {len(mixed_chunks)} mixed chunks")
-            _, tw, vw = run_generation_pool(mixed_chunks, _generate_mixed_batch,
-                                            min(args.workers, len(mixed_chunks)), "mixed")
-            all_train_widths.extend(tw)
-            all_val_widths.extend(vw)
 
     # Save widths for batch sampling
     np.save(str(shard_dir / "train" / "widths.npy"),
