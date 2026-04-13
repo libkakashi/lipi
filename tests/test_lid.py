@@ -16,10 +16,12 @@ class TestLIDCoarse:
         logits = lid(x)
         assert logits.shape == (4, NUM_GROUPS)
 
-    def test_predict(self):
-        lid = LIDCoarse(in_channels=64)
+    def test_argmax_and_softmax(self):
+        lid = LIDCoarse(in_channels=64, num_groups=NUM_GROUPS)
         x = torch.randn(2, 64, 8, 32)
-        group_ids, confidences = lid.predict(x)
+        logits = lid(x)
+        group_ids = logits.argmax(dim=-1)
+        confidences = logits.softmax(dim=-1).max(dim=-1).values
         assert group_ids.shape == (2,)
         assert confidences.shape == (2,)
         assert (confidences >= 0).all() and (confidences <= 1).all()

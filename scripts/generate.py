@@ -3,8 +3,8 @@
 Generate synthetic training data for LID and MoE training.
 
 Usage:
-    python scripts/generate_data.py --samples-per-script 10000 --out data/shards
-    python scripts/generate_data.py --samples-per-script 30000 --balance-groups --include-chars --out data/shards
+    python scripts/generate.py --samples-per-script 10000 --out data/shards
+    python scripts/generate.py --samples-per-script 30000 --balance-groups --include-chars --out data/shards
 """
 
 import argparse
@@ -21,7 +21,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.model.lid import SCRIPTS, SCRIPT_TO_GROUP, GROUP_TO_ID, SCRIPT_TO_ID, GROUPS
+from src.model.lid import SCRIPTS, SCRIPT_TO_GROUP, GROUP_TO_ID, SCRIPT_TO_ID
 from src.data.color import rgb_to_input
 from src.data.augmentation import (
     RandAugmentOCR,
@@ -47,78 +47,6 @@ from src.data.word_lists import load_all_word_lists
 # ---------------------------------------------------------------------------
 
 CLEAN_RATIO = 0.3
-CHAR_BUDGET_RATIO = 0.25
-MIN_SHARD_BYTES = 100
-
-# ---------------------------------------------------------------------------
-# Label encoding (tokenizers built once per worker process)
-# ---------------------------------------------------------------------------
-
-# Module-level cache for tokenizers (populated lazily in each worker)
-_worker_group_tokenizers = None
-_worker_active_groups = None
-_worker_all_scripts = None
-_worker_group_script_names = None
-
-
-def _ensure_tokenizers():
-    """Build tokenizers once per worker process (lazy init)."""
-    global _worker_group_tokenizers, _worker_active_groups
-    global _worker_all_scripts, _worker_group_script_names
-    if _worker_group_tokenizers is not None:
-        return
-
-    import io
-    from src.training.dataloader import build_script_tokenizers
-
-    _worker_active_groups = list(GROUPS)
-    _worker_all_scripts = list(SCRIPT_TO_GROUP.keys())
-    # Suppress per-script vocab prints in worker processes
-    old_stdout = sys.stdout
-    sys.stdout = io.StringIO()
-    try:
-        _worker_group_tokenizers, _, _worker_group_script_names = build_script_tokenizers(
-            _worker_all_scripts, _worker_active_groups)
-    finally:
-        sys.stdout = old_stdout
-
-
-def _get_local_group_and_script(script: str):
-    """Get (local_group_id, local_script_id) for a script."""
-    _ensure_tokenizers()
-    group_name = SCRIPT_TO_GROUP[script]
-    local_gid = _worker_active_groups.index(group_name)
-    local_sid = _worker_group_script_names[local_gid].index(script)
-    return local_gid, local_sid
-
-
-def encode_labels_for_shard(labels: list[str], script: str) -> tuple[torch.Tensor, torch.Tensor]:
-    """Encode labels into token IDs for a single script.
-
-    Returns:
-        target_ids: (N, max_len) zero-padded token IDs, dtype long
-        target_lens: (N,) actual lengths, dtype long
-    """
-    from src.encoding.decompose import encode_text
-
-    encoded = []
-    max_len = 0
-    for label in labels:
-        ids = encode_text(label, script)
-        encoded.append(ids)
-        if len(ids) > max_len:
-            max_len = len(ids)
-
-    if max_len == 0:
-        max_len = 1
-    target_ids = torch.zeros(len(encoded), max_len, dtype=torch.long)
-    target_lens = torch.zeros(len(encoded), dtype=torch.long)
-    for i, ids in enumerate(encoded):
-        target_lens[i] = len(ids)
-        if ids:
-            target_ids[i, :len(ids)] = torch.tensor(ids, dtype=torch.long)
-
-    return target_ids, target_lens
 
 # ---------------------------------------------------------------------------
 # Data styles — font selection + augmentation ops per style
@@ -265,11 +193,6 @@ def get_renderable_chars(script: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 # Common punctuation and number patterns seen in real documents
-_PUNCT_CHARS = list(".,;:!?-()\"'/@#&*+=$%")
-_TYPO_PUNCT = ["\u2018", "\u2019", "\u201C", "\u201D", "\u201E",  # ' ' " " „
-               "\u2013", "\u2014", "\u2010",                       # – — ‐
-               "\u2026",                                            # …
-               "\u00AB", "\u00BB"]                                  # « »
 _DIGITS = list("0123456789")
 _CURRENCY = list("$")
 
@@ -404,24 +327,150 @@ MDS_COLUMNS = {
 
 _MAX_VAL_PER_SCRIPT = 500  # Set from args before workers spawn
 
-def save_mds_samples(images, labels, script, train_dir, val_dir, chunk_id):
-    """Write samples directly to train/val MDS splits. No merge needed."""
-    if not images:
+
+def render_content_plan(plan, fonts_by_script, h, mw, aug=None, clean=False):
+    """Stage 2: Render a content plan into image + metadata.
+
+    Args:
+        plan: list of {"text": str, "script": str} — "whitespace" script means gap
+        fonts_by_script: {script: [font_paths]}
+        h: image height
+        mw: max width
+        aug: augmentation (applied to final composed image)
+        clean: if True, render text cleanly (no anti-aliasing noise)
+
+    Returns:
+        (img_tensor, label, group_labels, segments_json) or None if failed
+    """
+    from PIL import Image
+    from src.model.lid import NUM_GROUPS as BLANK_ID
+
+    blocks = []  # (img, text, group_id, script_id, width) per rendered block
+    total_w = 0
+
+    for item in plan:
+        text = item["text"]
+        script = item["script"]
+
+        if script == "whitespace":
+            # Whitespace: fixed-width blank
+            ws_w = random.randint(4, 16)
+            if total_w + ws_w > mw:
+                break
+            blocks.append((None, "", BLANK_ID, 0, ws_w))  # None img = blank
+            total_w += ws_w
+            continue
+
+        if script == "emoji":
+            img = render_emoji(h, mw - total_w if total_w < mw else 32)
+            if img is None:
+                continue
+            # Emoji may not be in SCRIPT_TO_GROUP; use group 0 as fallback
+            emoji_gid = GROUP_TO_ID.get(SCRIPT_TO_GROUP.get(script, ""), 0)
+            emoji_sid = SCRIPT_TO_ID.get(script, 0)
+            blocks.append((img, text, emoji_gid, emoji_sid, img.width))
+            total_w += img.width
+            continue
+
+        fonts = fonts_by_script.get(script, [])
+        if not fonts:
+            return None
+
+        font = random.choice(fonts)
+        if not font_covers_text(font, text):
+            return None
+
+        img = render_word(text, font, h, clean=clean)
+        if img is None or not image_has_ink(img):
+            return None
+
+        if total_w + img.width > mw:
+            img = img.crop((0, 0, min(img.width, mw - total_w), h))
+            if img.width < 4:
+                break
+
+        gid = GROUP_TO_ID[SCRIPT_TO_GROUP[script]]
+        sid = SCRIPT_TO_ID[script]
+        blocks.append((img, text, gid, sid, img.width))
+        total_w += img.width
+
+    if not blocks or total_w == 0 or not any(b[1] for b in blocks):
+        return None
+
+    # Compose: concatenate all blocks
+    combined = Image.new("RGB", (total_w, h), (255, 255, 255))
+    group_labels = np.full(total_w, BLANK_ID, dtype=np.int32)
+    segments = []
+    full_label = ""
+    offset = 0
+
+    for block_img, text, gid, sid, bw in blocks:
+        if block_img is not None:
+            combined.paste(block_img, (offset, 0))
+            group_labels[offset:offset + bw] = gid
+            if text:
+                segments.append({
+                    "group_id": gid, "script_id": sid,
+                    "text": text, "width": bw, "offset": offset,
+                })
+                full_label += text
+        # else: whitespace — group_labels already BLANK_ID
+        offset += bw
+
+    # Resize/pad to target dimensions
+    combined = resize_or_pad(combined, h, mw)
+    final_w = combined.width
+
+    # Scale group_labels and segment offsets/widths to match final image width
+    if final_w != total_w:
+        scale = final_w / total_w
+        new_gl = np.full(final_w, BLANK_ID, dtype=np.int32)
+        for seg in segments:
+            new_offset = round(seg["offset"] * scale)
+            new_end = round((seg["offset"] + seg["width"]) * scale)
+            new_width = new_end - new_offset
+            new_gl[new_offset:new_end] = seg["group_id"]
+            seg["offset"] = new_offset
+            seg["width"] = new_width
+        group_labels = new_gl
+
+    # Apply augmentation
+    if aug is not None:
+        combined = aug(combined)
+        if not image_has_ink(combined, min_ink_pixels=5):
+            return None
+
+    img_tensor = rgb_to_input(combined)
+    return img_tensor, full_label, group_labels, json.dumps(segments)
+
+
+def save_rendered_samples(samples, primary_script, train_dir, val_dir, chunk_id):
+    """Write rendered samples to MDS. Each sample is (img_tensor, label, group_labels, segments_json).
+
+    Encodes target_ids per-segment from segments metadata, so mixed-script
+    samples get correct per-script encoding.
+
+    Args:
+        samples: list of (img_tensor, label, group_labels_np, segments_json)
+        primary_script: script name (used for script_id/group_id fields)
+        train_dir, val_dir: output directories
+        chunk_id: chunk index
+    """
+    if not samples:
         return 0, [], []
 
     import hashlib
-    from src.model.lid import NUM_GROUPS as BLANK_ID
-
     from streaming import MDSWriter
-
-    script_id = SCRIPT_TO_ID[script]
-    group_id = GROUP_TO_ID[SCRIPT_TO_GROUP[script]]
-
     from src.encoding.decompose import encode_text
-    encoded = [encode_text(label, script) for label in labels]
 
-    t_dir = str(Path(train_dir) / f"chunk_{chunk_id}")
-    v_dir = str(Path(val_dir) / f"chunk_{chunk_id}")
+    script_id = SCRIPT_TO_ID[primary_script]
+    group_id = GROUP_TO_ID[SCRIPT_TO_GROUP[primary_script]]
+
+    # Reverse lookup: global script_id → script name
+    _sid_to_name = {v: k for k, v in SCRIPT_TO_ID.items()}
+
+    t_dir = str(Path(train_dir) / f"chunk_{chunk_id:04d}")
+    v_dir = str(Path(val_dir) / f"chunk_{chunk_id:04d}")
     Path(t_dir).mkdir(parents=True, exist_ok=True)
     Path(v_dir).mkdir(parents=True, exist_ok=True)
 
@@ -429,176 +478,28 @@ def save_mds_samples(images, labels, script, train_dir, val_dir, chunk_id):
     val_count = 0
     with MDSWriter(out=t_dir, columns=MDS_COLUMNS, size_limit=1 << 26) as tw, \
          MDSWriter(out=v_dir, columns=MDS_COLUMNS, size_limit=1 << 26) as vw:
-        for idx, (img_tensor, label, ids) in enumerate(zip(images, labels, encoded)):
+        for idx, (img_tensor, label, gl, segs_json) in enumerate(samples):
             img_np = img_tensor.numpy()
-            tids = np.array(ids, dtype=np.int64) if ids else np.zeros(1, dtype=np.int64)
-            w = img_np.shape[2]
-            # Find text boundaries by looking for ink (non-background) columns
-            # Use a stricter threshold — look for columns with significant ink
-            col_min = img_np.min(axis=(0, 1))  # darkest pixel per column
-            has_ink = col_min < 200  # columns with dark pixels = text
-            if has_ink.any():
-                first_ink = int(np.argmax(has_ink))
-                last_ink = int(w - np.argmax(has_ink[::-1]))
-            else:
-                first_ink, last_ink = 0, w
 
-            # Label: whitespace outside text bounds, script within
-            gl = np.full(w, BLANK_ID, dtype=np.int32)
-            gl[first_ink:last_ink] = group_id
+            # Encode target_ids per-segment for correct mixed-script encoding
+            segs = json.loads(segs_json)
+            all_ids = []
+            for seg in segs:
+                seg_text = seg["text"]
+                seg_script = _sid_to_name.get(seg.get("script_id", 0), primary_script)
+                all_ids.extend(encode_text(seg_text, seg_script))
 
-            segs = json.dumps([{
-                "group_id": group_id, "script_id": script_id,
-                "text": label, "width": last_ink - first_ink, "offset": first_ink,
-            }])
+            tids = np.array(all_ids, dtype=np.int64) if all_ids else np.zeros(1, dtype=np.int64)
             sample = {
                 "image": img_np,
                 "label": label,
                 "script_id": script_id,
                 "group_id": group_id,
                 "target_ids": tids,
-                "target_len": len(ids),
-                "width": w,
-                "group_labels": gl,
-                "segments": segs,
-            }
-            h = int(hashlib.md5(f"{chunk_id}_{idx}_{label}".encode()).hexdigest(), 16)
-            if h % 1000 < 100 and val_count < _MAX_VAL_PER_SCRIPT:  # 10% val, capped
-                vw.write(sample)
-                val_widths.append(img_np.shape[2])
-                val_count += 1
-            else:
-                tw.write(sample)
-                train_widths.append(img_np.shape[2])
-
-    return len(images), train_widths, val_widths
-
-
-# ---------------------------------------------------------------------------
-# Mixed-script generation
-# ---------------------------------------------------------------------------
-
-def _generate_mixed_batch(args_tuple):
-    """Generate mixed-script images: two words from different scripts side by side."""
-    from PIL import Image
-    from src.model.lid import NUM_GROUPS as BLANK_ID
-    count, all_script_info, h, mw, do_augment, chunk_id, train_dir, val_dir = args_tuple
-    aug = RandAugmentOCR(n_ops=2, p=0.5) if do_augment else None
-    t0 = time.time()
-
-    images, labels, script_ids_list, group_ids_list, group_labels_list, segments_list = [], [], [], [], [], []
-    attempts = 0
-
-    # all_script_info: list of (script, fonts, words, script_id, group_id)
-    while len(images) < count and attempts < count * 10:
-        attempts += 1
-
-        # Pick two different scripts from different groups
-        s1_info = random.choice(all_script_info)
-        s2_info = random.choice(all_script_info)
-        if s1_info[0] == s2_info[0] or s1_info[4] == s2_info[4]:
-            continue  # want different groups
-
-        script1, fonts1, words1, sid1, gid1 = s1_info
-        script2, fonts2, words2, sid2, gid2 = s2_info
-
-        # Render word 1
-        word1 = random.choice(words1)
-        font1 = random.choice(fonts1)
-        if not font_covers_text(font1, word1):
-            continue
-        img1 = render_word(word1, font1, h, clean=True)
-        if img1 is None or not image_has_ink(img1):
-            continue
-
-        # Render word 2 with same style
-        word2 = random.choice(words2)
-        font2 = random.choice(fonts2)
-        if not font_covers_text(font2, word2):
-            continue
-        img2 = render_word(word2, font2, h, clean=True)
-        if img2 is None or not image_has_ink(img2):
-            continue
-
-        # Concatenate horizontally (optional small gap)
-        gap = random.randint(0, 4)
-        w_total = img1.width + gap + img2.width
-        if w_total > mw:
-            continue
-
-        combined = Image.new("RGB", (w_total, h), (255, 255, 255))
-        combined.paste(img1, (0, 0))
-        combined.paste(img2, (img1.width + gap, 0))
-
-        combined = resize_or_pad(combined, h, mw)
-
-        if aug is not None:
-            combined = aug(combined)
-            if not image_has_ink(combined, min_ink_pixels=5):
-                continue
-
-        # Label: concatenated text
-        label = word1 + word2
-
-        # Per-pixel group labels and segments based on render widths
-        final_w = combined.width
-        w1_scaled = int(img1.width / w_total * final_w)
-        gap_scaled = int(gap / w_total * final_w)
-        boundary = w1_scaled + gap_scaled
-        gl = np.full(final_w, gid2, dtype=np.int32)
-        gl[:w1_scaled] = gid1
-        gl[w1_scaled:boundary] = BLANK_ID  # gap = blank
-
-        segs = json.dumps([
-            {"group_id": gid1, "script_id": sid1, "text": word1,
-             "width": w1_scaled, "offset": 0},
-            {"group_id": gid2, "script_id": sid2, "text": word2,
-             "width": final_w - boundary, "offset": boundary},
-        ])
-
-        images.append(rgb_to_input(combined))
-        labels.append(label)
-        script_ids_list.append(sid1)
-        group_ids_list.append(gid1)
-        group_labels_list.append(gl)
-        segments_list.append(segs)
-
-    # Write to MDS
-    if not images:
-        return chunk_id, "mixed", 0, [], []
-
-    import hashlib
-
-    from streaming import MDSWriter
-    from src.encoding.decompose import encode_text
-
-    t_dir = str(Path(train_dir) / f"chunk_{chunk_id}")
-    v_dir = str(Path(val_dir) / f"chunk_{chunk_id}")
-    Path(t_dir).mkdir(parents=True, exist_ok=True)
-    Path(v_dir).mkdir(parents=True, exist_ok=True)
-
-    train_widths, val_widths = [], []
-    val_count = 0
-    with MDSWriter(out=t_dir, columns=MDS_COLUMNS, size_limit=1 << 26) as tw, \
-         MDSWriter(out=v_dir, columns=MDS_COLUMNS, size_limit=1 << 26) as vw:
-        for idx, (img_tensor, label, sid, gid, gl, segs) in enumerate(
-                zip(images, labels, script_ids_list, group_ids_list,
-                    group_labels_list, segments_list)):
-            # Encode using primary script (for legacy target_ids)
-            script_name = SCRIPTS[sid]
-            ids = encode_text(label, script_name)
-            img_np = img_tensor.numpy()
-            tids = np.array(ids, dtype=np.int64) if ids else np.zeros(1, dtype=np.int64)
-            sample = {
-                "image": img_np,
-                "label": label,
-                "script_id": sid,
-                "group_id": gid,
-                "target_ids": tids,
-                "target_len": len(ids),
+                "target_len": len(all_ids),
                 "width": img_np.shape[2],
                 "group_labels": gl,
-                "segments": segs,
+                "segments": segs_json,
             }
             h_val = int(hashlib.md5(f"{chunk_id}_{idx}_{label}".encode()).hexdigest(), 16)
             if h_val % 1000 < 100 and val_count < _MAX_VAL_PER_SCRIPT:
@@ -609,9 +510,67 @@ def _generate_mixed_batch(args_tuple):
                 tw.write(sample)
                 train_widths.append(img_np.shape[2])
 
+    return len(samples), train_widths, val_widths
+
+
+# ---------------------------------------------------------------------------
+# Mixed-script generation
+# ---------------------------------------------------------------------------
+
+def _generate_mixed_batch(args_tuple):
+    """Generate mixed-script images using two-stage pipeline."""
+    count, all_script_info, h, mw, do_augment, chunk_id, train_dir, val_dir = args_tuple
+    aug = RandAugmentOCR(n_ops=2, p=0.5) if do_augment else None
+    t0 = time.time()
+
+    # Build fonts_by_script for render_content_plan
+    fonts_by_script = {}
+    for script, fonts, _words, _gid in all_script_info:
+        fonts_by_script[script] = fonts
+
+    samples = []
+    primary_script = all_script_info[0][0]  # for MDS metadata fields
+    attempts = 0
+
+    while len(samples) < count and attempts < count * 10:
+        attempts += 1
+
+        # Pick 2-4 words from different groups
+        n_words = random.choices([2, 3, 4], weights=[0.6, 0.3, 0.1], k=1)[0]
+        chosen = []
+        used_groups = set()
+        for _ in range(n_words * 3):  # attempts to find different groups
+            info = random.choice(all_script_info)
+            if info[3] not in used_groups:  # different group_id
+                chosen.append(info)
+                used_groups.add(info[3])
+            if len(chosen) >= n_words:
+                break
+
+        if len(chosen) < 2:
+            continue
+
+        # Stage 1: build content plan with explicit whitespace
+        plan = []
+        for i, (script, _fonts, words, _gid) in enumerate(chosen):
+            if i > 0:
+                plan.append({"text": " ", "script": "whitespace"})
+            plan.append({"text": random.choice(words), "script": script})
+
+        # Stage 2: render
+        result = render_content_plan(plan, fonts_by_script, h, mw, aug=aug)
+        if result is None:
+            continue
+
+        samples.append(result)
+
+    n, tw, vw = save_rendered_samples(samples, primary_script,
+                                      train_dir, val_dir, chunk_id)
+    del samples
+
     elapsed = time.time() - t0
-    print(f"  {'mixed':<15} {len(images):>5} images in {elapsed:.0f}s", flush=True)
-    return chunk_id, "mixed", len(images), train_widths, val_widths
+    print(f"  {'mixed':<15} {n:>5} images in {elapsed:.0f}s", flush=True)
+    return chunk_id, "mixed", n, tw, vw
 
 
 # ---------------------------------------------------------------------------
@@ -736,7 +695,7 @@ def build_word_chunks(tasks, script_fonts, word_lists, args, shard_dir, styles_t
     return chunks, chunk_idx, skipped
 
 
-def build_char_chunks(valid_scripts, script_fonts, tasks, args, shard_dir, start_chunk_idx):
+def build_char_chunks(valid_scripts, script_fonts, args, shard_dir, start_chunk_idx):
     """Build single-character chunks. Returns char_chunks."""
     train_dir = str(shard_dir / "train")
     val_dir = str(shard_dir / "val")
@@ -811,64 +770,58 @@ def run_generation_pool(chunks, worker_fn, n_workers, label):
 
 
 # ---------------------------------------------------------------------------
-# Metadata
-# ---------------------------------------------------------------------------
-
-
-
-# ---------------------------------------------------------------------------
 # Worker functions (called in multiprocessing pool)
 # ---------------------------------------------------------------------------
 
 def _generate_word_batch(args_tuple):
-    """Generate word images for one chunk, write to MDS."""
+    """Generate word images for one chunk using two-stage pipeline."""
     script, count, fonts, words, h, mw, do_augment, chunk_id, train_dir, val_dir, style, punct_prob = args_tuple
     style_cfg = STYLES.get(style, STYLES["printed"])
+    clean_render = style_cfg.get("clean_render", False)
     if not do_augment or not style_cfg["ops"]:
         aug = None
     else:
         aug = RandAugmentOCR(n_ops=2, p=0.5, ops=style_cfg["ops"])
-    clean_render = style_cfg.get("clean_render", False)
     t0 = time.time()
 
-    images, labels = [], []
+    fonts_by_script = {script: fonts}
+    samples = []
     attempts = 0
     clean_target = 0 if clean_render else int(count * CLEAN_RATIO)
 
-    while len(images) < count and attempts < count * 5:
+    while len(samples) < count and attempts < count * 5:
         attempts += 1
+
         if script == "emoji":
-            img = render_emoji(h, mw)
-            label = "emoji"
+            plan = [{"text": "emoji", "script": "emoji"}]
         else:
             word = random.choice(words)
             word = mix_punctuation(word, p=punct_prob, script=script)
-            font = random.choice(fonts)
-            if not font_covers_text(font, word):
-                continue
-            img = render_word(word, font, h, clean=clean_render)
-            label = word
 
-        if img is None or not image_has_ink(img):
+            # Multi-word: split by whitespace, interleave with whitespace items
+            parts = word.split(" ")
+            plan = []
+            for i, part in enumerate(parts):
+                if i > 0:
+                    plan.append({"text": " ", "script": "whitespace"})
+                plan.append({"text": part, "script": script})
+
+        # First clean_target samples skip augmentation for training diversity
+        use_aug = aug if len(samples) >= clean_target else None
+        result = render_content_plan(plan, fonts_by_script, h, mw,
+                                     aug=use_aug, clean=clean_render)
+        if result is None:
             continue
 
-        img = resize_or_pad(img, h, mw)
+        samples.append(result)
 
-        if aug is not None and len(images) >= clean_target:
-            img = aug(img)
-            if not image_has_ink(img, min_ink_pixels=5):
-                continue
-
-        images.append(rgb_to_input(img))
-        labels.append(label)
-
-        if len(images) % 1000 == 0:
+        if len(samples) % 1000 == 0:
             elapsed = time.time() - t0
-            rate = len(images) / elapsed if elapsed > 0 else 0
-            print(f"    [{script}] {len(images)}/{count} ({rate:.0f} img/s)", flush=True)
+            rate = len(samples) / elapsed if elapsed > 0 else 0
+            print(f"    [{script}] {len(samples)}/{count} ({rate:.0f} img/s)", flush=True)
 
-    n, tw, vw = save_mds_samples(images, labels, script, train_dir, val_dir, chunk_id)
-    del images, labels
+    n, tw, vw = save_rendered_samples(samples, script, train_dir, val_dir, chunk_id)
+    del samples
 
     elapsed = time.time() - t0
     rate = n / elapsed if elapsed > 0 else 0
@@ -877,12 +830,13 @@ def _generate_word_batch(args_tuple):
 
 
 def _generate_char_batch(args_tuple):
-    """Generate single-character images with cmap validation, write to MDS."""
+    """Generate single-character images using two-stage pipeline."""
     script, chars, reps_per_char, fonts, h, mw, do_augment, chunk_id, train_dir, val_dir = args_tuple
     aug = RandAugmentOCR(n_ops=2, p=0.5) if do_augment else None
     t0 = time.time()
 
-    images, labels = [], []
+    fonts_by_script = {script: fonts}
+    samples = []
     skipped_chars = 0
 
     char_fonts = filter_fonts_by_cmap(fonts, chars)
@@ -891,26 +845,20 @@ def _generate_char_batch(args_tuple):
     for ch in char_fonts:
         got_any = False
         for rep in range(reps_per_char):
-            font = random.choice(char_fonts[ch])
-            img = render_word(ch, font, h)
-            if img is None or not image_has_ink(img):
+            # Override fonts_by_script to only use fonts that cover this char
+            fonts_by_script[script] = char_fonts[ch]
+            plan = [{"text": ch, "script": script}]
+            result = render_content_plan(plan, fonts_by_script, h, mw,
+                                         aug=aug if rep > 0 else None)
+            if result is None:
                 continue
             got_any = True
-
-            img = resize_or_pad(img, h, mw)
-
-            if aug is not None and rep > 0:
-                img = aug(img)
-                if not image_has_ink(img, min_ink_pixels=5):
-                    continue
-
-            images.append(rgb_to_input(img))
-            labels.append(ch)
+            samples.append(result)
         if not got_any:
             skipped_chars += 1
 
-    n, tw, vw = save_mds_samples(images, labels, script, train_dir, val_dir, chunk_id)
-    del images, labels
+    n, tw, vw = save_rendered_samples(samples, script, train_dir, val_dir, chunk_id)
+    del samples
 
     elapsed = time.time() - t0
     skip_str = f", {skipped_chars} chars skipped (bad render)" if skipped_chars else ""
@@ -944,7 +892,6 @@ def main():
             if script == "emoji":
                 script_vocabs[script] = 10  # minimal vocab, fixed budget
             else:
-                group = SCRIPT_TO_GROUP[script]
                 vocab = build_script_vocab(script)
                 script_vocabs[script] = len(vocab)
         min_vocab = min(script_vocabs.values())
@@ -979,8 +926,6 @@ def main():
         styles_to_gen = [args.style]
         print(f"\nGenerating style: {args.style}")
 
-
-
     # Create train/val dirs
     (shard_dir / "train").mkdir(parents=True, exist_ok=True)
     (shard_dir / "val").mkdir(parents=True, exist_ok=True)
@@ -1003,7 +948,7 @@ def main():
 
     # Character images
     if args.include_chars:
-        char_chunks = build_char_chunks(valid_scripts, script_fonts, tasks, args,
+        char_chunks = build_char_chunks(valid_scripts, script_fonts, args,
                                         shard_dir, next_chunk_idx)
         if char_chunks:
             print(f"\n  {len(char_chunks)} char chunks across "
@@ -1021,6 +966,7 @@ def main():
         print(f"{'='*60}")
 
         # Build script info for mixed generator
+        # Tuples: (script_name, fonts, words, group_id)
         all_script_info = []
         for script in valid_scripts:
             if script == "emoji":
@@ -1028,24 +974,25 @@ def main():
             fonts = script_fonts.get(script, [])
             words = word_lists.get(script, [])
             if fonts and words:
-                sid = SCRIPT_TO_ID[script]
                 gid = GROUP_TO_ID[SCRIPT_TO_GROUP[script]]
-                all_script_info.append((script, fonts, words, sid, gid))
+                all_script_info.append((script, fonts, words, gid))
 
         if len(all_script_info) >= 2:
             train_dir = str(shard_dir / "train")
             val_dir = str(shard_dir / "val")
             # Use chunk index after all previous chunks
-            mixed_chunk_idx = next_chunk_idx + len(char_chunks) if args.include_chars else next_chunk_idx
+            n_char_chunks = len(char_chunks) if args.include_chars else 0
+            mixed_chunk_idx = next_chunk_idx + n_char_chunks
             chunk_size = min(2000, args.mixed_script)
             mixed_chunks = []
             remaining = args.mixed_script
             ci = mixed_chunk_idx
             while remaining > 0:
                 batch = min(chunk_size, remaining)
-                mixed_chunks.append((batch, all_script_info, args.height,
-                                     args.max_width, args.augment, ci,
-                                     train_dir, val_dir))
+                if not chunk_dir_exists(str(Path(train_dir) / f"chunk_{ci:04d}")):
+                    mixed_chunks.append((batch, all_script_info, args.height,
+                                         args.max_width, args.augment, ci,
+                                         train_dir, val_dir))
                 ci += 1
                 remaining -= batch
 
