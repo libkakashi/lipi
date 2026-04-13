@@ -566,7 +566,8 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             avg_total = log_total.item() / log_count
             # LID-1 accuracy (predicted vs ground truth, last batch only)
             frame_preds = group_logits.argmax(dim=-1)  # (B, T)
-            frame_labels = gids.unsqueeze(1).expand_as(frame_preds)
+            T_acc = frame_preds.shape[1]
+            frame_labels = group_labels[:, ::2][:, :T_acc].to(frame_preds.device)
             lid1_acc = (frame_preds == frame_labels).float().mean().item() * 100
             # LID-2 accuracy (all samples in multi-script groups)
             lid2_correct = 0
