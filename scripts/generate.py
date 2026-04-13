@@ -620,8 +620,8 @@ _worker_mixed_ratio = 0.6     # set from CLI via initializer
 WORD_POOL_SIZE = 1000  # pre-rendered words per script per style
 
 
-def _init_line_worker(style_configs, mixed_ratio):
-    """Pool initializer: load shared data into worker globals."""
+def _init_line_worker(style_configs, mixed_ratio, pool_height=32):
+    """Pool initializer: load shared data and pre-build word pools."""
     global _worker_style_configs, _worker_word_pools
     global _worker_group_index, _worker_mixed_ratio
     _worker_style_configs = style_configs
@@ -634,17 +634,22 @@ def _init_line_worker(style_configs, mixed_ratio):
         for info in script_info:
             by_group.setdefault(info[3], []).append(info)
         _worker_group_index[style] = by_group
+    # Pre-build word pools for all scripts (one pool per script, shared
+    # across styles since all words render clean white bg + black ink)
+    first_style = next(iter(style_configs))
+    script_info, _ = style_configs[first_style]
+    for script, fonts, words, _gid in script_info:
+        _get_word_pool(first_style, script, fonts, words, h=pool_height)
 
 
 def _get_word_pool(style, script, fonts, words, h=32, punct_prob=0.15):
-    """Get or build a pre-rendered word pool for (style, script).
+    """Get or build a pre-rendered word pool for a script.
 
     Each pool entry is (pil_image, text, width). Built once per worker,
-    reused across all chunks with the same style. Words are rendered
-    clean (white bg, black ink) — augmentation applies color/style
-    to the composed line so all words share one visual style.
+    shared across all styles (words render clean — augmentation applies
+    color/style to the composed line).
     """
-    key = (style, script)
+    key = script  # style-independent since all words render clean
     if key in _worker_word_pools:
         return _worker_word_pools[key]
 
@@ -829,23 +834,12 @@ def _generate_line_batch(args_tuple):
         aug = RandAugmentOCR(n_ops=2, p=0.5, ops=style_cfg["ops"])
     t0 = time.time()
 
-    # Build pre-rendered word pools for all scripts in this style
-    # (cached per worker — only builds on first chunk with this style)
-    new_pools = 0
+    # Collect pre-built word pools (built at worker init, shared across styles)
     word_pools = {}
     for script, fonts, words, _gid in all_script_info:
-        key = (style, script)
-        is_new = key not in _worker_word_pools
         pool = _get_word_pool(style, script, fonts, words, h=h, punct_prob=punct_prob)
         if pool:
             word_pools[script] = pool
-            if is_new:
-                new_pools += 1
-
-    if new_pools > 0:
-        print(f"    [{primary_script}/{style}] built {new_pools} word pools "
-              f"({sum(len(p) for p in word_pools.values())} words, "
-              f"{time.time() - t0:.1f}s)", flush=True)
 
     # Find this script's info for single-script lines
     primary_info = None
@@ -1077,7 +1071,7 @@ def main():
         _, tw, vw = run_generation_pool(
             chunks, _generate_line_batch, args.workers, "line",
             initializer=_init_line_worker,
-            initargs=(style_configs, mixed_ratio))
+            initargs=(style_configs, mixed_ratio, args.height))
         all_train_widths.extend(tw)
         all_val_widths.extend(vw)
     else:
