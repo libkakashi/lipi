@@ -441,7 +441,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             # This ensures blank frames are routed correctly
             T_est = imgs_.shape[3] // 2  # W/2 estimate
             gl_frames = group_labels_[:, ::2][:, :T_est]
-            out = model(imgs_, group_ids=gl_frames, script_ids=sids_,
+            out = model(imgs_, group_ids=gl_frames, script_ids=None,
                         detach_for_experts=detach_for_experts)
 
         # LID-1 loss

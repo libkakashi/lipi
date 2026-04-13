@@ -80,7 +80,7 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
             # Also run with ground truth routing to compute val loss
             T_est = imgs.shape[3] // 2
             gl_frames_gt = group_labels[:, ::2][:, :T_est]
-            out_gt = model(imgs, group_ids=gl_frames_gt, script_ids=sids_dev)
+            out_gt = model(imgs, group_ids=gl_frames_gt, script_ids=None)
 
         # Val CTC loss (with ground truth routing, same as training)
         B = imgs.shape[0]
