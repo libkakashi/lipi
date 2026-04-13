@@ -432,11 +432,21 @@ def save_mds_samples(images, labels, script, train_dir, val_dir, chunk_id):
             img_np = img_tensor.numpy()
             tids = np.array(ids, dtype=np.int64) if ids else np.zeros(1, dtype=np.int64)
 
+            from src.model.lid import NUM_GROUPS as BLANK_ID
             w = img_np.shape[2]
+            # Detect blank columns: if all pixels in a column are near-white, it's blank
+            # img_np is (3, 32, W) uint8
+            col_mean = img_np.mean(axis=(0, 1))  # (W,) average brightness per column
+            is_blank_col = col_mean > 240  # near-white = blank
             gl = np.full(w, group_id, dtype=np.int32)
+            gl[is_blank_col] = BLANK_ID
+
+            # Segments: only the non-blank region
+            first_ink = np.argmax(~is_blank_col) if (~is_blank_col).any() else 0
+            last_ink = w - np.argmax(~is_blank_col[::-1]) if (~is_blank_col).any() else w
             segs = json.dumps([{
                 "group_id": group_id, "script_id": script_id,
-                "text": label, "width": w, "offset": 0,
+                "text": label, "width": last_ink - first_ink, "offset": first_ink,
             }])
             sample = {
                 "image": img_np,
