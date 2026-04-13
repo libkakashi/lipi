@@ -429,6 +429,8 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
     log_ace = torch.zeros(1, device=device)
     log_total = torch.zeros(1, device=device)
     log_count = 0
+    log_lid1_correct = 0
+    log_lid1_total = 0
     log_time = time.time()
     shared_norm = 0.0
     expert_norm = 0.0
@@ -581,6 +583,16 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         n_batches += 1
         log_count += 1
 
+        # Accumulate LID-1 accuracy across logging interval
+        with torch.no_grad():
+            fp = group_logits.argmax(dim=-1)
+            T_acc = fp.shape[1]
+            fl = group_labels[:, ::2][:, :T_acc].to(fp.device)
+            non_pad = (fl >= 0)
+            if non_pad.any():
+                log_lid1_correct += (fp[non_pad] == fl[non_pad]).sum().item()
+                log_lid1_total += non_pad.sum().item()
+
         if save_dir and n_batches % 500 == 0:
             save_checkpoint(model, optimizer, scheduler, scaler,
                             epoch, args, save_dir)
@@ -591,15 +603,8 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             avg_lid2 = log_lid2.item() / log_count
             avg_ace = log_ace.item() / log_count
             avg_total = log_total.item() / log_count
-            # LID-1 accuracy (predicted vs ground truth, last batch only)
-            frame_preds = group_logits.argmax(dim=-1)  # (B, T)
-            T_acc = frame_preds.shape[1]
-            frame_labels = group_labels[:, ::2][:, :T_acc].to(frame_preds.device)
-            non_pad = (frame_labels >= 0)  # exclude -100 padding
-            if non_pad.any():
-                lid1_acc = (frame_preds[non_pad] == frame_labels[non_pad]).float().mean().item() * 100
-            else:
-                lid1_acc = 0.0
+            # LID-1 accuracy (accumulated across logging interval)
+            lid1_acc = 100 * log_lid1_correct / max(log_lid1_total, 1)
             # LID-2 accuracy (all samples in multi-script groups)
             lid2_correct = 0
             lid2_total = 0
@@ -630,6 +635,8 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             log_ace.zero_()
             log_total.zero_()
             log_count = 0
+            log_lid1_correct = 0
+            log_lid1_total = 0
 
     if oom_skipped > 0:
         print(f"  ** OOM: {oom_skipped} batches skipped this epoch")

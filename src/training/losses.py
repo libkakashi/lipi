@@ -130,13 +130,16 @@ def compute_ctc_loss_segments(
     ctc_loss = torch.zeros(1, device=device)
     ctc_chars = 0
 
+    skipped_no_script = 0
+    skipped_no_ids = 0
+    skipped_too_long = 0
+    total_segs = 0
+
     for b in range(B):
         segs = segments_batch[b]
-        img_w = sum(seg["width"] for seg in segs)
-        if img_w == 0:
-            continue
 
         for seg in segs:
+            total_segs += 1
             text = seg["text"]
             g = seg["group_id"]
             s = seg["script_id"]
@@ -154,12 +157,20 @@ def compute_ctc_loss_segments(
                 continue
 
             # Encode text with correct script
-            script_name = group_script_names[g][s] if g < len(group_script_names) and s < len(group_script_names[g]) else ""
+            if g >= len(group_script_names) or s >= len(group_script_names[g]):
+                skipped_no_script += 1
+                continue
+            script_name = group_script_names[g][s]
             if not script_name:
+                skipped_no_script += 1
                 continue
             ids = encode_text(text, script_name)
-            if not ids or len(ids) > seg_len:
-                continue  # target longer than frames — CTC can't align
+            if not ids:
+                skipped_no_ids += 1
+                continue
+            if len(ids) > seg_len:
+                skipped_too_long += 1
+                continue
 
             vs = group_script_vocabs[g][s] if g < len(group_script_vocabs) and s < len(group_script_vocabs[g]) else 0
             if vs == 0:
@@ -177,6 +188,11 @@ def compute_ctc_loss_segments(
                 blank=0, reduction="sum", zero_infinity=True)
             ctc_loss = ctc_loss + seg_ctc
             ctc_chars += len(ids)
+
+    if skipped_no_script + skipped_no_ids + skipped_too_long > 0:
+        print(f"    [CTC segments] {ctc_chars} chars from {total_segs} segs | "
+              f"skipped: {skipped_no_script} no_script, {skipped_no_ids} no_ids, "
+              f"{skipped_too_long} too_long", flush=True)
 
     if ctc_chars > 0:
         ctc_loss = ctc_loss / ctc_chars
