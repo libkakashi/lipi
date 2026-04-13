@@ -535,8 +535,11 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
     for batch_idx, batch in enumerate(train_loader):
         imgs, targets, tgt_lens, gids, sids, _labels, group_labels, segments = batch
         if batch_idx < 5:
-            print(f"    [shape] batch {batch_idx}: imgs={list(imgs.shape)} "
-                  f"B={imgs.shape[0]} W={imgs.shape[3]}", flush=True)
+            print(f"    [shape] batch {batch_idx}: B={imgs.shape[0]} "
+                  f"C={imgs.shape[1]} H={imgs.shape[2]} W={imgs.shape[3]}", flush=True)
+        if batch_idx == 0 and imgs.shape[1] != 3:
+            raise ValueError(f"Expected 3-channel RGB images, got {imgs.shape[1]} channels. "
+                             f"Regenerate data with current code.")
 
         imgs = imgs.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
