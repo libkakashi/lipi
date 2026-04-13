@@ -477,10 +477,29 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         if ctc_parts > 1:
             ctc_loss = ctc_loss / ctc_parts
 
-        # LID-2 loss: skip when using per-frame routing (script_ids=None means
-        # LID-2 uses its own predictions — no ground truth script IDs available
-        # per-segment). LID-2 learns from CTC gradient flowing back through it.
+        # LID-2 loss: compute per-segment from script_logits_per_group
+        # Build per-image ground truth script_ids from segments metadata
         lid2_loss = torch.zeros(1, device=device)
+        lid2_count = 0
+        for g_idx, script_logits, group_mask in out["script_logits_per_group"]:
+            if script_logits is None:
+                continue
+            # For each sample in this group, find the segment's script_id
+            sample_indices = group_mask.nonzero(as_tuple=True)[0]
+            for i, b_idx in enumerate(sample_indices):
+                b = b_idx.item()
+                # Find segment in this group for this image
+                for seg in segments_[b]:
+                    if seg["group_id"] == g_idx:
+                        true_sid = seg["script_id"]
+                        pred_sid = script_logits[i:i+1]  # (1, n_scripts)
+                        target = torch.tensor([true_sid], device=device)
+                        if true_sid < pred_sid.shape[1]:
+                            lid2_loss = lid2_loss + ce_loss_fn(pred_sid, target)
+                            lid2_count += 1
+                        break
+        if lid2_count > 0:
+            lid2_loss = lid2_loss / lid2_count
 
         if align_ce_weight > 0:
             all_ok = (tgt_lens_ <= out["lengths"]) & (tgt_lens_ > 0)
