@@ -31,6 +31,6 @@ def test_model_forward_pass():
     assert out["lengths"].shape[0] == B
     # T = W/2
     assert out["lengths"][0].item() == W // 2
-    # group_logits is frame-level: (B, T, num_groups)
+    # group_logits is frame-level: (B, T, num_groups+1) with blank
     assert out["group_logits"].shape[0] == B
-    assert out["group_logits"].shape[2] == 2  # 2 groups
+    assert out["group_logits"].shape[2] == 3  # 2 groups + blank

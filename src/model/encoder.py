@@ -353,9 +353,10 @@ class LipiMoEEncoder(nn.Module):
         self.shared_attn = SharedBlock(dim=dim, num_heads=dim // 64, mlp_ratio=mlp_ratio)
 
         # Frame-level group classifier: predicts group per frame
-        # Pool h=2→1, then Linear to num_groups
+        # Pool h=2→1, then Linear to num_groups + 1 (blank = num_groups)
         self.group_h_pool = nn.AdaptiveAvgPool2d((1, None))
-        self.group_head = nn.Linear(dim, num_groups)
+        self.group_head = nn.Linear(dim, num_groups + 1)  # +1 for blank/no-script
+        self.blank_group_id = num_groups
 
         # Local expert blocks: h=2, 2×local_window_w windows
         self.local_blocks = nn.ModuleList([
@@ -426,7 +427,7 @@ class LipiMoEEncoder(nn.Module):
         d = x.shape[-1]
         x_for_group = x.reshape(B, h, w, d).permute(0, 3, 1, 2)  # (B, dim, h, w)
         x_for_group = self.group_h_pool(x_for_group).squeeze(2).permute(0, 2, 1)  # (B, W/2, dim)
-        group_logits = self.group_head(x_for_group)  # (B, W/2, num_groups)
+        group_logits = self.group_head(x_for_group)  # (B, W/2, num_groups+1)
 
         # Determine per-frame group assignments
         if group_ids is not None:
@@ -451,6 +452,8 @@ class LipiMoEEncoder(nn.Module):
             single_idx = is_single.nonzero(as_tuple=True)[0]
             single_groups = frame_groups[single_idx, 0]  # (N,) each image's group
             for g in single_groups.unique().tolist():
+                if g == self.blank_group_id:
+                    continue  # skip blank-only images
                 g_mask = (single_groups == g)
                 batch_idx = single_idx[g_mask]  # indices into original batch
                 x_batch = x[batch_idx]  # (N_g, h*w, dim)
@@ -505,6 +508,8 @@ class LipiMoEEncoder(nn.Module):
         for b in (~is_single).nonzero(as_tuple=True)[0]:
             fg = frame_groups[b]
             for g in fg.unique().tolist():
+                if g == self.blank_group_id:
+                    continue  # skip blank frames
                 seg_mask = (fg == g)
                 seg_len = seg_mask.sum().item()
                 if seg_len == 0:
@@ -564,8 +569,9 @@ class LipiMoEEncoder(nn.Module):
         logits = torch.zeros(B, T, max_vocab, device=x.device, dtype=x.dtype)
         all_script_logits = []
 
-        group_counts = torch.bincount(frame_groups.reshape(-1), minlength=self.num_groups)
-        active_groups = group_counts.nonzero(as_tuple=True)[0].tolist()
+        group_counts = torch.bincount(frame_groups.reshape(-1), minlength=self.num_groups + 1)
+        active_groups = [g for g in group_counts.nonzero(as_tuple=True)[0].tolist()
+                         if g != self.blank_group_id]
 
         for g in active_groups:
             frame_mask = (frame_groups == g)  # (B, T)

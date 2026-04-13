@@ -527,14 +527,19 @@ def _generate_mixed_batch(args_tuple):
         label = word1 + word2
 
         # Per-pixel group labels and segments based on render widths
+        # Gap pixels labeled as blank (NUM_GROUPS = 13)
+        from src.model.lid import NUM_GROUPS as BLANK_ID
         final_w = combined.width
-        boundary = int(img1.width / w_total * final_w)
+        w1_scaled = int(img1.width / w_total * final_w)
+        gap_scaled = int(gap / w_total * final_w)
+        boundary = w1_scaled + gap_scaled
         gl = np.full(final_w, gid2, dtype=np.int32)
-        gl[:boundary] = gid1
+        gl[:w1_scaled] = gid1
+        gl[w1_scaled:boundary] = BLANK_ID  # gap = blank
 
         segs = json.dumps([
             {"group_id": gid1, "script_id": sid1, "text": word1,
-             "width": boundary, "offset": 0},
+             "width": w1_scaled, "offset": 0},
             {"group_id": gid2, "script_id": sid2, "text": word2,
              "width": final_w - boundary, "offset": boundary},
         ])

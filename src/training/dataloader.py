@@ -232,12 +232,13 @@ def collate_moe(batch):
         else:
             padded_tgt.append(t)
 
-    # Pad group_labels to max_w (pixel-level, same padding as images)
+    # Pad group_labels to max_w — padded region labeled as blank (NUM_GROUPS)
+    from src.model.lid import NUM_GROUPS
     padded_gl = []
     for gl in group_labels:
         if gl.shape[0] < max_w:
-            # Pad with the last group label (or first — doesn't matter for padded region)
-            padded_gl.append(torch.cat([gl, gl[-1:].expand(max_w - gl.shape[0])]))
+            pad = torch.full((max_w - gl.shape[0],), NUM_GROUPS, dtype=gl.dtype)
+            padded_gl.append(torch.cat([gl, pad]))
         else:
             padded_gl.append(gl[:max_w])
 
