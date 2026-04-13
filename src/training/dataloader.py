@@ -235,12 +235,14 @@ def collate_moe(batch):
         else:
             padded_tgt.append(t)
 
-    # Pad group_labels to max_w — padded region labeled as blank (NUM_GROUPS)
-    from src.model.lid import NUM_GROUPS
+    # Pad group_labels to max_w
+    # Whitespace between words = NUM_GROUPS (learnable class, from MDS data)
+    # Padding to batch width = -100 (ignored by CrossEntropyLoss)
+    PAD_IGNORE = -100
     padded_gl = []
     for gl in group_labels:
         if gl.shape[0] < max_w:
-            pad = torch.full((max_w - gl.shape[0],), NUM_GROUPS, dtype=gl.dtype)
+            pad = torch.full((max_w - gl.shape[0],), PAD_IGNORE, dtype=gl.dtype)
             padded_gl.append(torch.cat([gl, pad]))
         else:
             padded_gl.append(gl[:max_w])

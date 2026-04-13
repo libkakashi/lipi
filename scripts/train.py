@@ -437,16 +437,19 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                           group_labels_=None, segments_=None):
         """Run forward + backward on a (sub-)batch. scale adjusts loss."""
         with torch.amp.autocast(device_type, enabled=use_amp, dtype=amp_dtype):
-            # Pass per-frame group labels for routing (not per-image gids)
-            # This ensures blank frames are routed correctly
-            T_est = imgs_.shape[3] // 2  # W/2 estimate
+            # Per-frame group labels: -100 = padding (loss ignores),
+            # NUM_GROUPS = whitespace (learnable). For model routing,
+            # both padding and whitespace should skip expert blocks.
+            T_est = imgs_.shape[3] // 2
             gl_frames = group_labels_[:, ::2][:, :T_est]
-            out = model(imgs_, group_ids=gl_frames, script_ids=None,
+            gl_for_model = gl_frames.clone()
+            gl_for_model[gl_for_model < 0] = NUM_GROUPS  # padding → blank for routing
+            out = model(imgs_, group_ids=gl_for_model, script_ids=None,
                         detach_for_experts=detach_for_experts)
 
-        # LID-1 loss
+        # LID-1 loss (gl_frames has -100 for padding → ignored by CE)
         T = out["group_logits"].shape[1]
-        gl_frames = gl_frames[:, :T]  # trim to actual T if needed
+        gl_frames = gl_frames[:, :T]
         lid1_loss = compute_lid1_loss(out["group_logits"], gl_frames, ce_loss_fn)
 
         # CTC loss: batch single-script, per-segment for mixed
@@ -592,7 +595,11 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             frame_preds = group_logits.argmax(dim=-1)  # (B, T)
             T_acc = frame_preds.shape[1]
             frame_labels = group_labels[:, ::2][:, :T_acc].to(frame_preds.device)
-            lid1_acc = (frame_preds == frame_labels).float().mean().item() * 100
+            non_pad = (frame_labels >= 0)  # exclude -100 padding
+            if non_pad.any():
+                lid1_acc = (frame_preds[non_pad] == frame_labels[non_pad]).float().mean().item() * 100
+            else:
+                lid1_acc = 0.0
             # LID-2 accuracy (all samples in multi-script groups)
             lid2_correct = 0
             lid2_total = 0
@@ -713,7 +720,7 @@ def main():
         model = torch.compile(model)
         vram("after compile", device_type)
 
-    ce_loss_fn = nn.CrossEntropyLoss()
+    ce_loss_fn = nn.CrossEntropyLoss()  # default ignore_index=-100 skips padding
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 

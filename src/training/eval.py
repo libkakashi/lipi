@@ -80,7 +80,10 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
             # Also run with ground truth routing to compute val loss
             T_est = imgs.shape[3] // 2
             gl_frames_gt = group_labels[:, ::2][:, :T_est]
-            out_gt = model(imgs, group_ids=gl_frames_gt, script_ids=None)
+            # Replace padding (-100) with blank for model routing
+            gl_for_model = gl_frames_gt.clone()
+            gl_for_model[gl_for_model < 0] = n_groups  # n_groups = blank/whitespace
+            out_gt = model(imgs, group_ids=gl_for_model, script_ids=None)
 
         # Val CTC loss (with ground truth routing, same as training)
         B = imgs.shape[0]
@@ -105,7 +108,7 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
                     val_ctc_loss += ctc_l.item()
                     val_loss_samples += s_tgt_lens.sum().item()
 
-        # Val LID-1 loss (per-frame)
+        # Val LID-1 loss (per-frame, -100 padding ignored by default)
         ce_fn = torch.nn.CrossEntropyLoss()
         T_gt = out_gt["group_logits"].shape[1]
         gl_frames = group_labels[:, ::2][:, :T_gt]
@@ -114,14 +117,14 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
 
         del out_gt
 
-        # LID-1 frame-level accuracy
+        # LID-1 frame-level accuracy (exclude padding, include whitespace)
         frame_preds = out["group_logits"].argmax(dim=-1)  # (B, T)
         T_lid = frame_preds.shape[1]
         gl_frames = group_labels[:, ::2][:, :T_lid]
 
-        # Count all frames including blank
-        lid1_frame_correct += (frame_preds == gl_frames).sum().item()
-        lid1_frame_total += gl_frames.numel()
+        non_pad = (gl_frames >= 0)  # exclude -100 padding
+        lid1_frame_correct += (frame_preds[non_pad] == gl_frames[non_pad]).sum().item()
+        lid1_frame_total += non_pad.sum().item()
 
         for g in range(n_groups):
             g_frame_mask = (gl_frames == g)
