@@ -329,7 +329,8 @@ MDS_COLUMNS = {
 _MAX_VAL_PER_SCRIPT = 500  # Set from args before workers spawn
 
 
-def render_content_plan(plan, fonts_by_script, h, mw, aug=None, clean=False):
+def render_content_plan(plan, fonts_by_script, h, mw, aug=None, clean=False,
+                        word_pools=None):
     """Stage 2: Render a content plan into image + metadata.
 
     Args:
@@ -339,6 +340,8 @@ def render_content_plan(plan, fonts_by_script, h, mw, aug=None, clean=False):
         mw: max width
         aug: augmentation (applied to final composed image)
         clean: if True, render text cleanly (no anti-aliasing noise)
+        word_pools: {script: [(pil_img, text, width), ...]} — pre-rendered
+            word images. If provided, picks from pool instead of rendering.
 
     Returns:
         (img_tensor, label, group_labels, segments) or None if failed
@@ -372,22 +375,26 @@ def render_content_plan(plan, fonts_by_script, h, mw, aug=None, clean=False):
             total_w += img.width
             continue
 
-        fonts = fonts_by_script.get(script, [])
-        if not fonts:
-            return None
-
-        # Try up to 3 fonts to find one that covers the text and renders
-        img = None
-        for _ in range(min(3, len(fonts))):
-            font = random.choice(fonts)
-            if not font_covers_text(font, text):
-                continue
-            img = render_word(text, font, h, clean=clean)
-            if img is not None and image_has_ink(img):
-                break
+        # Try word pool first (pre-rendered), fall back to live render
+        pool = word_pools.get(script) if word_pools else None
+        if pool:
+            pool_img, pool_text, pool_w = random.choice(pool)
+            img, text = pool_img.copy(), pool_text
+        else:
+            fonts = fonts_by_script.get(script, [])
+            if not fonts:
+                return None
             img = None
-        if img is None:
-            return None
+            for _ in range(min(3, len(fonts))):
+                font = random.choice(fonts)
+                if not font_covers_text(font, text):
+                    continue
+                img = render_word(text, font, h, clean=clean)
+                if img is not None and image_has_ink(img):
+                    break
+                img = None
+            if img is None:
+                return None
 
         if total_w + img.width > mw:
             img = img.crop((0, 0, min(img.width, mw - total_w), h))
@@ -609,12 +616,46 @@ def discover_fonts(active_scripts, word_lists):
 # ---------------------------------------------------------------------------
 
 _worker_style_configs = None  # {style: (script_info, fonts_by_script)}
+_worker_word_pools = None     # {(style, script): [(pil_img, text, width), ...]}
+
+WORD_POOL_SIZE = 1000  # pre-rendered words per script per style
 
 
 def _init_line_worker(style_configs):
     """Pool initializer: load shared data into worker globals."""
-    global _worker_style_configs
+    global _worker_style_configs, _worker_word_pools
     _worker_style_configs = style_configs
+    _worker_word_pools = {}
+
+
+def _get_word_pool(style, script, fonts, words, h, clean, punct_prob=0.15):
+    """Get or build a pre-rendered word pool for (style, script).
+
+    Each pool entry is (pil_image, text, width). Built once per worker,
+    reused across all chunks with the same style. ~15% of words get
+    punctuation/number mixing applied before rendering.
+    """
+    key = (style, script)
+    if key in _worker_word_pools:
+        return _worker_word_pools[key]
+
+    pool = []
+    attempts = 0
+    target = min(WORD_POOL_SIZE, len(words) * 2)
+    while len(pool) < target and attempts < target * 3:
+        attempts += 1
+        word = random.choice(words)
+        word = mix_punctuation(word, p=punct_prob, script=script)
+        font = random.choice(fonts)
+        if not font_covers_text(font, word):
+            continue
+        img = render_word(word, font, h, clean=clean)
+        if img is None or not image_has_ink(img):
+            continue
+        pool.append((img, word, img.width))
+
+    _worker_word_pools[key] = pool
+    return pool
 
 
 def build_line_chunks(tasks, script_fonts, word_lists, valid_scripts, args,
@@ -776,6 +817,14 @@ def _generate_line_batch(args_tuple):
         aug = RandAugmentOCR(n_ops=2, p=0.5, ops=style_cfg["ops"])
     t0 = time.time()
 
+    # Build pre-rendered word pools for all scripts in this style
+    word_pools = {}
+    for script, fonts, words, _gid in all_script_info:
+        pool = _get_word_pool(style, script, fonts, words, h, clean_render,
+                              punct_prob)
+        if pool:
+            word_pools[script] = pool
+
     # Find this script's info for single-script lines
     primary_info = None
     for info in all_script_info:
@@ -787,6 +836,11 @@ def _generate_line_batch(args_tuple):
     attempts = 0
     clean_target = 0 if clean_render else int(count * CLEAN_RATIO)
     can_mix = len(all_script_info) >= 2
+
+    pool_init_time = time.time() - t0
+    if pool_init_time > 1:
+        print(f"    [{primary_script}] word pools built in {pool_init_time:.1f}s "
+              f"({sum(len(p) for p in word_pools.values())} words)", flush=True)
 
     while len(samples) < count and attempts < count * 5:
         attempts += 1
@@ -804,7 +858,8 @@ def _generate_line_batch(args_tuple):
 
         use_aug = aug if len(samples) >= clean_target else None
         result = render_content_plan(plan, fonts_by_script, h, mw,
-                                     aug=use_aug, clean=clean_render)
+                                     aug=use_aug, clean=clean_render,
+                                     word_pools=word_pools)
         if result is None:
             continue
 
