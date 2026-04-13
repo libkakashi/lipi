@@ -75,6 +75,8 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
         targets = targets.to(device, non_blocking=True)
         tgt_lens = tgt_lens.to(device, non_blocking=True)
 
+        B = imgs.shape[0]
+
         with torch.amp.autocast(device_type, enabled=use_amp, dtype=amp_dtype):
             out = model(imgs, group_ids=None)
             # Also run with ground truth routing to compute val loss
@@ -92,9 +94,6 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
                         fe = min((seg["offset"] + seg["width"] + 1) // 2, T_est)
                         sl_frames[b, fs:fe] = seg.get("script_id", 0)
             out_gt = model(imgs, group_ids=gl_for_model, script_ids=sl_frames)
-
-        # Val CTC loss (with ground truth routing, same as training)
-        B = imgs.shape[0]
         ctc_ok = (tgt_lens <= out_gt["lengths"]) & (tgt_lens > 0)
         if group_script_vocab_sizes and ctc_ok.any():
             for g, script_vocabs in enumerate(group_script_vocab_sizes):
