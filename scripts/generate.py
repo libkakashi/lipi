@@ -660,10 +660,6 @@ def _get_word_pool(style, script, fonts, words, h, clean, punct_prob=0.15):
             continue
         pool.append((img, word, img.width))
 
-    elapsed = time.time() - t0
-    if elapsed > 2:
-        print(f"      pool[{script}] {len(pool)} words in {elapsed:.1f}s", flush=True)
-
     _worker_word_pools[key] = pool
     return pool
 
@@ -832,12 +828,23 @@ def _generate_line_batch(args_tuple):
     t0 = time.time()
 
     # Build pre-rendered word pools for all scripts in this style
+    # (cached per worker — only builds on first chunk with this style)
+    new_pools = 0
     word_pools = {}
     for script, fonts, words, _gid in all_script_info:
+        key = (style, script)
+        is_new = key not in _worker_word_pools
         pool = _get_word_pool(style, script, fonts, words, h, clean_render,
                               punct_prob)
         if pool:
             word_pools[script] = pool
+            if is_new:
+                new_pools += 1
+
+    if new_pools > 0:
+        print(f"    [{primary_script}/{style}] built {new_pools} word pools "
+              f"({sum(len(p) for p in word_pools.values())} words, "
+              f"{time.time() - t0:.1f}s)", flush=True)
 
     # Find this script's info for single-script lines
     primary_info = None
@@ -853,11 +860,6 @@ def _generate_line_batch(args_tuple):
     attempts = 0
     clean_target = 0 if clean_render else int(count * CLEAN_RATIO)
     can_mix = len(group_index) >= 2
-
-    pool_init_time = time.time() - t0
-    if pool_init_time > 1:
-        print(f"    [{primary_script}] word pools built in {pool_init_time:.1f}s "
-              f"({sum(len(p) for p in word_pools.values())} words)", flush=True)
 
     while len(samples) < count and attempts < count * 5:
         attempts += 1
