@@ -617,7 +617,7 @@ _worker_word_pools = None     # {(style, script): [(pil_img, text, width), ...]}
 _worker_group_index = None    # {style: {group_id: [script_info, ...]}}
 _worker_mixed_ratio = 0.6     # set from CLI via initializer
 
-WORD_POOL_SIZE = 1000  # pre-rendered words per script per style
+WORD_POOL_SIZE = 200  # pre-rendered words per script
 
 
 def _init_line_worker(style_configs, mixed_ratio, pool_height=32):
