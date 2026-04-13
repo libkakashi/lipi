@@ -328,9 +328,12 @@ MDS_COLUMNS = {
 _MAX_VAL_PER_SCRIPT = 500  # Set from args before workers spawn
 
 
-def render_content_plan(plan, fonts_by_script, h, mw, aug=None, clean=False,
+def render_content_plan(plan, fonts_by_script, h, mw, aug=None,
                         word_pools=None):
     """Stage 2: Render a content plan into image + metadata.
+
+    Words are always rendered clean (white bg, black ink). Augmentation
+    applies color/style to the composed line so all words share one style.
 
     Args:
         plan: list of {"text": str, "script": str} — "whitespace" script means gap
@@ -338,7 +341,6 @@ def render_content_plan(plan, fonts_by_script, h, mw, aug=None, clean=False,
         h: image height
         mw: max width
         aug: augmentation (applied to final composed image)
-        clean: if True, render text cleanly (no anti-aliasing noise)
         word_pools: {script: [(pil_img, text, width), ...]} — pre-rendered
             word images. If provided, picks from pool instead of rendering.
 
@@ -387,7 +389,8 @@ def render_content_plan(plan, fonts_by_script, h, mw, aug=None, clean=False,
                 font = random.choice(fonts)
                 if not font_covers_text(font, text):
                     continue
-                img = render_word(text, font, h, clean=clean)
+                # Always render clean — augmentation applies style to composed line
+                img = render_word(text, font, h, clean=True)
                 if img is not None and image_has_ink(img):
                     break
                 img = None
@@ -633,12 +636,13 @@ def _init_line_worker(style_configs, mixed_ratio):
         _worker_group_index[style] = by_group
 
 
-def _get_word_pool(style, script, fonts, words, h, clean, punct_prob=0.15):
+def _get_word_pool(style, script, fonts, words, h=32, punct_prob=0.15):
     """Get or build a pre-rendered word pool for (style, script).
 
     Each pool entry is (pil_image, text, width). Built once per worker,
-    reused across all chunks with the same style. ~15% of words get
-    punctuation/number mixing applied before rendering.
+    reused across all chunks with the same style. Words are rendered
+    clean (white bg, black ink) — augmentation applies color/style
+    to the composed line so all words share one visual style.
     """
     key = (style, script)
     if key in _worker_word_pools:
@@ -647,7 +651,6 @@ def _get_word_pool(style, script, fonts, words, h, clean, punct_prob=0.15):
     pool = []
     attempts = 0
     target = min(WORD_POOL_SIZE, len(words) * 2)
-    t0 = time.time()
     while len(pool) < target and attempts < target * 3:
         attempts += 1
         word = random.choice(words)
@@ -655,7 +658,7 @@ def _get_word_pool(style, script, fonts, words, h, clean, punct_prob=0.15):
         font = random.choice(fonts)
         if not font_covers_text(font, word):
             continue
-        img = render_word(word, font, h, clean=clean)
+        img = render_word(word, font, h, clean=True)
         if img is None or not image_has_ink(img):
             continue
         pool.append((img, word, img.width))
@@ -820,7 +823,6 @@ def _generate_line_batch(args_tuple):
     all_script_info, fonts_by_script = _worker_style_configs[style]
 
     style_cfg = STYLES.get(style, STYLES["printed"])
-    clean_render = style_cfg.get("clean_render", False)
     if not do_augment or not style_cfg["ops"]:
         aug = None
     else:
@@ -834,8 +836,7 @@ def _generate_line_batch(args_tuple):
     for script, fonts, words, _gid in all_script_info:
         key = (style, script)
         is_new = key not in _worker_word_pools
-        pool = _get_word_pool(style, script, fonts, words, h, clean_render,
-                              punct_prob)
+        pool = _get_word_pool(style, script, fonts, words, h=h, punct_prob=punct_prob)
         if pool:
             word_pools[script] = pool
             if is_new:
@@ -858,7 +859,7 @@ def _generate_line_batch(args_tuple):
 
     samples = []
     attempts = 0
-    clean_target = 0 if clean_render else int(count * CLEAN_RATIO)
+    clean_target = int(count * CLEAN_RATIO)
     can_mix = len(group_index) >= 2
 
     while len(samples) < count and attempts < count * 5:
@@ -877,8 +878,7 @@ def _generate_line_batch(args_tuple):
 
         use_aug = aug if len(samples) >= clean_target else None
         result = render_content_plan(plan, fonts_by_script, h, mw,
-                                     aug=use_aug, clean=clean_render,
-                                     word_pools=word_pools)
+                                     aug=use_aug, word_pools=word_pools)
         if result is None:
             continue
 
