@@ -117,8 +117,11 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
         T_lid = frame_preds.shape[1]
         gl_frames = group_labels[:, ::2][:, :T_lid]
 
-        lid1_frame_correct += (frame_preds == gl_frames).sum().item()
-        lid1_frame_total += gl_frames.numel()
+        # Exclude blank frames from accuracy
+        from src.model.lid import NUM_GROUPS
+        non_blank = (gl_frames != NUM_GROUPS)
+        lid1_frame_correct += ((frame_preds == gl_frames) & non_blank).sum().item()
+        lid1_frame_total += non_blank.sum().item()
 
         for g in range(n_groups):
             g_frame_mask = (gl_frames == g)

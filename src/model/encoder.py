@@ -444,7 +444,16 @@ class LipiMoEEncoder(nn.Module):
             x = x.detach()
 
         # Separate single-script (batchable) from mixed-script (per-image)
-        is_single = (frame_groups == frame_groups[:, :1]).all(dim=1)  # (B,)
+        # Single-script: all non-blank frames have the same group
+        # Replace blank with first non-blank group per image, then check all equal
+        fg_filled = frame_groups.clone()
+        fg_filled[fg_filled == self.blank_group_id] = -1
+        # Get primary group per image (max of non-blank, or -1 if all blank)
+        primary = fg_filled.max(dim=1).values  # (B,)
+        # Fill blanks with primary so they don't break the all-equal check
+        for b in range(B):
+            fg_filled[b][fg_filled[b] == -1] = primary[b]
+        is_single = (fg_filled == fg_filled[:, :1]).all(dim=1)
         x_out = torch.zeros(B, w, d, device=x.device, dtype=x.dtype)
 
         # Batched path: group single-script images by their group

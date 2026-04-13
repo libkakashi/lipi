@@ -410,6 +410,7 @@ def save_mds_samples(images, labels, script, train_dir, val_dir, chunk_id):
         return 0, [], []
 
     import hashlib
+    from src.model.lid import NUM_GROUPS as BLANK_ID
 
     from streaming import MDSWriter
 
@@ -431,8 +432,6 @@ def save_mds_samples(images, labels, script, train_dir, val_dir, chunk_id):
         for idx, (img_tensor, label, ids) in enumerate(zip(images, labels, encoded)):
             img_np = img_tensor.numpy()
             tids = np.array(ids, dtype=np.int64) if ids else np.zeros(1, dtype=np.int64)
-
-            from src.model.lid import NUM_GROUPS as BLANK_ID
             w = img_np.shape[2]
             # Detect blank columns: if all pixels in a column are near-white, it's blank
             # img_np is (3, 32, W) uint8
@@ -478,6 +477,7 @@ def save_mds_samples(images, labels, script, train_dir, val_dir, chunk_id):
 def _generate_mixed_batch(args_tuple):
     """Generate mixed-script images: two words from different scripts side by side."""
     from PIL import Image
+    from src.model.lid import NUM_GROUPS as BLANK_ID
     count, all_script_info, h, mw, do_augment, chunk_id, train_dir, val_dir = args_tuple
     aug = RandAugmentOCR(n_ops=2, p=0.5) if do_augment else None
     t0 = time.time()
@@ -537,8 +537,6 @@ def _generate_mixed_batch(args_tuple):
         label = word1 + word2
 
         # Per-pixel group labels and segments based on render widths
-        # Gap pixels labeled as blank (NUM_GROUPS = 13)
-        from src.model.lid import NUM_GROUPS as BLANK_ID
         final_w = combined.width
         w1_scaled = int(img1.width / w_total * final_w)
         gap_scaled = int(gap / w_total * final_w)
