@@ -125,8 +125,10 @@ class LipiStreamingDataset(Dataset):
         tlen = torch.tensor(sample["target_len"], dtype=torch.long)
 
         # Per-pixel group labels → remap to local group IDs
+        # Blank pixels (NUM_GROUPS) must stay as NUM_GROUPS, not become 0
+        from src.model.lid import NUM_GROUPS
         gl = sample["group_labels"].copy()
-        remapped = np.zeros_like(gl)
+        remapped = np.full_like(gl, NUM_GROUPS)  # default to blank
         for gid_global, gid_local in self._global_to_local_group.items():
             remapped[gl == gid_global] = gid_local
         group_labels = torch.from_numpy(remapped).to(torch.long)
