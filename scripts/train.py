@@ -85,7 +85,7 @@ def parse_args():
     parser.add_argument("--val-split", type=float, default=0.1)
     parser.add_argument("--log-interval", type=int, default=20)
     # Model
-    parser.add_argument("--dim", type=int, default=512)
+    parser.add_argument("--dim", type=int, default=256)
     parser.add_argument("--no-compile", action="store_true")
     parser.add_argument("--ctc-weight", type=float, default=1.0,
                         help="Set to 0 to disable CTC loss. Useful for "
