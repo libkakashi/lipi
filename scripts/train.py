@@ -38,6 +38,20 @@ from src.training.routing import build_frame_labels_from_segments
 from src.training.eval import evaluate
 
 
+# Parameter-name prefixes for the "expert" param split (distinct LR / clip
+# group from the shared backbone and LID heads). Must be kept in sync with
+# encoder.py module names.
+EXPERT_PARAM_PREFIXES = (
+    "group_local_blocks.", "group_wide_blocks.",
+    "script_local_blocks.", "script_wide_blocks.",
+    "ctc_modules.",
+)
+
+
+def _is_expert_param(name: str) -> bool:
+    return any(k in name for k in EXPERT_PARAM_PREFIXES)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -246,9 +260,9 @@ def build_optimizer_and_scheduler(args, model, device_type, steps_per_epoch):
     expert_lr = args.expert_lr or args.lr
     if expert_lr != args.lr:
         shared_params = [p for n, p in model.named_parameters()
-                         if not any(k in n for k in ("expert_blocks.", "ctc_modules."))]
+                         if not _is_expert_param(n)]
         expert_params = [p for n, p in model.named_parameters()
-                         if any(k in n for k in ("expert_blocks.", "ctc_modules."))]
+                         if _is_expert_param(n)]
         base_optimizer = torch.optim.AdamW([
             {"params": shared_params, "lr": args.lr},
             {"params": expert_params, "lr": expert_lr},
@@ -413,7 +427,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
     shared_params = []
     expert_params = []
     for name, p in model.named_parameters():
-        if any(k in name for k in ("expert_blocks.", "ctc_modules.")):
+        if _is_expert_param(name):
             expert_params.append(p)
         else:
             shared_params.append(p)
@@ -642,10 +656,11 @@ def main():
         trainable = 0
         for name, param in model.named_parameters():
             if args.freeze_except == "experts":
-                param.requires_grad = "expert_blocks." in name
+                param.requires_grad = any(
+                    k in name for k in EXPERT_PARAM_PREFIXES
+                    if k != "ctc_modules.")
             elif args.freeze_except == "experts+ctc":
-                param.requires_grad = any(k in name for k in
-                    ("expert_blocks.", "ctc_modules."))
+                param.requires_grad = _is_expert_param(name)
             elif args.freeze_except == "ctc":
                 param.requires_grad = "ctc_modules." in name
             elif args.freeze_except == "backbone":
