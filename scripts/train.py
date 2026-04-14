@@ -285,13 +285,14 @@ def build_optimizer_and_scheduler(args, model, device_type, steps_per_epoch):
         scaler = torch.amp.GradScaler(enabled=False)
 
     total_steps = steps_per_epoch * args.epochs
-    warmup_steps = min(steps_per_epoch, total_steps // 10)
-    warmup = torch.optim.lr_scheduler.LinearLR(
-        base_optimizer, start_factor=0.01, end_factor=1.0, total_iters=max(warmup_steps, 1))
-    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
-        base_optimizer, T_max=max(total_steps - warmup_steps, 1), eta_min=1e-6)
-    scheduler = torch.optim.lr_scheduler.SequentialLR(
-        base_optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps])
+    # No LR warmup: with identity-init experts and small CTC head init,
+    # early gradients are already well-behaved, and low-LR warmup just
+    # parks CTC in the blank-collapse basin. AdamW's bias correction
+    # handles moment initialization in its first ~100 steps internally.
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        base_optimizer, T_max=max(total_steps, 1), eta_min=1e-6)
+    print(f"LR schedule: cosine {total_steps} steps "
+          f"({args.lr:.1e} → 1e-6), no warmup")
 
     return {
         "optimizer": optimizer,
