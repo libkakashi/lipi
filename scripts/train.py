@@ -633,6 +633,9 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             lid1_acc = 100 * log_lid1_correct / max(log_lid1_total, 1)
             # LID-2 accuracy (accumulated across logging interval)
             lid2_acc = 100 * log_lid2_correct / max(log_lid2_total, 1)
+            # Sanity check: warn if accumulator empty (possible bug)
+            if log_lid1_total == 0:
+                print(f"  WARN: log_lid1_total=0 at step {batch_idx+1}", flush=True)
             elapsed = time.time() - log_time
             ms_per_step = elapsed / log_count * 1000
             samples_per_sec = imgs.shape[0] * log_count / elapsed
