@@ -11,6 +11,7 @@ from torch import Tensor
 
 from src.encoding.decompose import decode_ids, script_vocab_size
 from src.training.losses import compute_lid1_loss
+from src.training.routing import build_frame_labels_from_segments
 
 
 def _edit_distance(a: str, b: str) -> int:
@@ -80,20 +81,10 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
         with torch.amp.autocast(device_type, enabled=use_amp, dtype=amp_dtype):
             out = model(imgs, group_ids=None)
             # Also run with ground truth routing to compute val loss.
-            # Build gl_for_model and sl_frames from segment metadata using
-            # the same offset→frame arithmetic as compute_ctc_loss_segments,
-            # so routing labels and CTC segment ranges agree frame-for-frame.
             T_est = imgs.shape[3] // 2
-            gl_for_model = torch.full((B, T_est), n_groups,
-                                      dtype=torch.long, device=device)
-            sl_frames = torch.zeros(B, T_est, dtype=torch.long, device=device)
-            if batch_segments is not None:
-                for b in range(B):
-                    for seg in batch_segments[b]:
-                        fs = seg["offset"] // 2
-                        fe = min((seg["offset"] + seg["width"] + 1) // 2, T_est)
-                        gl_for_model[b, fs:fe] = seg["group_id"]
-                        sl_frames[b, fs:fe] = seg.get("script_id", 0)
+            segs = batch_segments if batch_segments is not None else [[] for _ in range(B)]
+            gl_for_model, sl_frames = build_frame_labels_from_segments(
+                segs, T_est, n_groups, device)
             out_gt = model(imgs, group_ids=gl_for_model, script_ids=sl_frames)
         # Per-segment CTC val loss (matches training, works for mixed lines)
         T_val = out_gt["logits"].shape[1]

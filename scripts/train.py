@@ -34,6 +34,7 @@ from src.training.dataloader import (
 from src.training.losses import (
     compute_lid1_loss, compute_ctc_loss_segments,
 )
+from src.training.routing import build_frame_labels_from_segments
 from src.training.eval import evaluate
 
 
@@ -442,21 +443,12 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             # NUM_GROUPS = whitespace (learnable). For model routing,
             # both padding and whitespace should skip expert blocks.
             T_est = imgs_.shape[3] // 2
+            # LID-1 CE target: keep -100 for padding so ignore_index works
             gl_frames = group_labels_[:, ::2][:, :T_est]
-
-            # Build per-frame group/script labels from segment metadata
-            # using the same offset→frame arithmetic as CTC loss, so model
-            # routing and CTC segment ranges agree frame-for-frame.
-            B_cur = imgs_.shape[0]
-            gl_for_model = torch.full((B_cur, T_est), NUM_GROUPS,
-                                      dtype=torch.long, device=device)
-            sl_frames = torch.zeros(B_cur, T_est, dtype=torch.long, device=device)
-            for b in range(B_cur):
-                for seg in segments_[b]:
-                    frame_start = seg["offset"] // 2
-                    frame_end = min((seg["offset"] + seg["width"] + 1) // 2, T_est)
-                    gl_for_model[b, frame_start:frame_end] = seg["group_id"]
-                    sl_frames[b, frame_start:frame_end] = seg["script_id"]
+            # Model routing + CTC segment ranges: derived from segments so
+            # both see identical frame boundaries.
+            gl_for_model, sl_frames = build_frame_labels_from_segments(
+                segments_, T_est, NUM_GROUPS, device)
 
             out = model(imgs_, group_ids=gl_for_model, script_ids=sl_frames,
                         detach_for_experts=detach_for_experts)
