@@ -523,51 +523,13 @@ class LipiMoEEncoder(nn.Module):
             x = x.detach()
 
         # =====================================================================
-        # STAGE 1: Group expert blocks (2 local + 2 wide, routed by group_id)
+        # STAGE 1: Group expert blocks (routed per-segment by group_id)
         # =====================================================================
 
-        # Separate single-group (batchable) from mixed-group (per-image)
-        fg_filled = frame_groups.clone()
-        fg_filled[fg_filled == self.blank_group_id] = -1
-        primary = fg_filled.max(dim=1).values
-        for b_idx in range(B):
-            fg_filled[b_idx][fg_filled[b_idx] == -1] = primary[b_idx]
-        is_single_group = (fg_filled == fg_filled[:, :1]).all(dim=1)
-
-        # Output after group experts: (B, W/2, dim)
         x_after_group = torch.zeros(B, w, d, device=x.device, dtype=x.dtype)
 
-        # Batched path for single-group images
-        if is_single_group.any():
-            single_idx = is_single_group.nonzero(as_tuple=True)[0]
-            single_groups = primary[single_idx]
-            for g in single_groups.unique().tolist():
-                if g < 0 or g == self.blank_group_id:
-                    continue
-                g_mask = (single_groups == g)
-                batch_idx = single_idx[g_mask]
-                x_batch = x[batch_idx]
-
-                # Local group expert blocks (h=2)
-                for block in self.group_local_blocks:
-                    x_batch = _run_expert_block(block, x_batch, g, h, w, use_ckpt)
-
-                # Pool h=2→1
-                N_g = x_batch.shape[0]
-                local_batch = x_batch.reshape(N_g, h, w, d).permute(0, 3, 1, 2)
-                local_batch = self.h_pool(local_batch).squeeze(2).permute(0, 2, 1)
-
-                # Wide group expert blocks (h=1)
-                wide_batch = local_batch
-                for block in self.group_wide_blocks:
-                    wide_batch = _run_expert_block(block, wide_batch, g, 1, w, use_ckpt)
-
-                # Group aggregation
-                comb = torch.cat([local_batch, wide_batch], dim=-1)
-                x_after_group[batch_idx] = self.group_aggregates[g](comb)
-
-        # Per-image path for mixed-group images
-        for b_idx in (~is_single_group).nonzero(as_tuple=True)[0]:
+        # Per-image, per-group-segment processing
+        for b_idx in range(B):
             fg = frame_groups[b_idx]
             for g in fg.unique().tolist():
                 if g == self.blank_group_id:
@@ -629,50 +591,16 @@ class LipiMoEEncoder(nn.Module):
         flat_scripts = self._get_flat_script_ids(frame_groups, frame_scripts)
 
         # =====================================================================
-        # STAGE 2: Script expert blocks (1 local + 1 wide, routed by script_id)
+        # STAGE 2: Script expert blocks (routed per-segment by flat script_id)
         # =====================================================================
 
         x_after_script = torch.zeros(B, w, d, device=x.device, dtype=x.dtype)
 
-        # Determine single-script images (all non-blank frames same script)
-        fs_filled = flat_scripts.clone()
-        blank_mask = (frame_groups == self.blank_group_id)
-        fs_filled[blank_mask] = -1
-        primary_script = fs_filled.max(dim=1).values
+        # Per-image, per-script-segment processing
         for b_idx in range(B):
-            fs_filled[b_idx][fs_filled[b_idx] == -1] = primary_script[b_idx]
-        is_single_script = (fs_filled == fs_filled[:, :1]).all(dim=1)
-
-        # Batched path for single-script images
-        if is_single_script.any():
-            single_idx = is_single_script.nonzero(as_tuple=True)[0]
-            single_scripts = primary_script[single_idx]
-            for s in single_scripts.unique().tolist():
-                if s < 0:
-                    continue
-                s_mask = (single_scripts == s)
-                batch_idx = single_idx[s_mask]
-                x_batch = x_after_group[batch_idx]
-
-                # Local script expert blocks (h=1)
-                local_batch = x_batch
-                for block in self.script_local_blocks:
-                    local_batch = _run_expert_block(block, local_batch, s, 1, w, use_ckpt)
-
-                # Wide script expert blocks (h=1)
-                wide_batch = x_batch
-                for block in self.script_wide_blocks:
-                    wide_batch = _run_expert_block(block, wide_batch, s, 1, w, use_ckpt)
-
-                # Script aggregation
-                comb = torch.cat([local_batch, wide_batch], dim=-1)
-                x_after_script[batch_idx] = self.script_aggregates[s](comb)
-
-        # Per-image path for mixed-script images
-        for b_idx in (~is_single_script).nonzero(as_tuple=True)[0]:
             fs = flat_scripts[b_idx]
             for s in fs.unique().tolist():
-                if s < 0 or frame_groups[b_idx][flat_scripts[b_idx] == s][0] == self.blank_group_id:
+                if s < 0:  # blank/whitespace frame
                     continue
                 seg_mask = (fs == s)
                 seg_len = seg_mask.sum().item()
@@ -693,7 +621,7 @@ class LipiMoEEncoder(nn.Module):
                 x_after_script[b_idx, seg_mask] = self.script_aggregates[s](comb.squeeze(0))
 
         # =====================================================================
-        # CTC heads
+        # CTC heads (per-segment routing)
         # =====================================================================
 
         x = self.norm(x_after_script)
@@ -702,49 +630,22 @@ class LipiMoEEncoder(nn.Module):
         max_vocab = max(m.max_vocab for m in self.ctc_modules)
         logits = torch.zeros(B, T, max_vocab, device=x.device, dtype=x.dtype)
 
-        group_counts = torch.bincount(frame_groups.reshape(-1),
-                                      minlength=self.num_groups + 1)
-        active_groups = [g for g in group_counts.nonzero(as_tuple=True)[0].tolist()
-                         if g != self.blank_group_id]
-
-        for g in active_groups:
-            frame_mask = (frame_groups == g)
-            sample_mask = frame_mask.any(dim=1)
-            if not sample_mask.any():
-                continue
-
-            # Get per-frame script IDs for this group
-            g_frame_scripts = frame_scripts.clone()
-
-            all_single = (frame_mask[sample_mask].all(dim=1)).all().item()
-            if all_single:
-                # All frames in these samples belong to this group
-                # Use mode of script_ids as per-sample script
-                sample_scripts = torch.zeros(sample_mask.sum(), dtype=torch.long,
-                                             device=x.device)
-                for i, b_idx in enumerate(sample_mask.nonzero(as_tuple=True)[0]):
-                    s_ids = g_frame_scripts[b_idx][frame_mask[b_idx]]
-                    sample_scripts[i] = s_ids[0]  # single-script: all same
-
-                g_logits, _ = self.ctc_modules[g](x[sample_mask],
-                                                   script_ids=sample_scripts)
-                for i, b_idx in enumerate(sample_mask.nonzero(as_tuple=True)[0]):
-                    f_mask = frame_mask[b_idx]
-                    logits[b_idx, f_mask, :g_logits.shape[-1]] = \
-                        g_logits[i, f_mask].to(logits.dtype)
-            else:
-                for b_idx in sample_mask.nonzero(as_tuple=True)[0]:
-                    f_mask = frame_mask[b_idx]
-                    seg_len = f_mask.sum().item()
-                    if seg_len == 0:
-                        continue
-                    seg_features = x[b_idx, f_mask].unsqueeze(0)
-                    s_id = g_frame_scripts[b_idx][f_mask][0]
-                    seg_script = s_id.unsqueeze(0)
-                    seg_logits, _ = self.ctc_modules[g](seg_features,
-                                                         script_ids=seg_script)
-                    logits[b_idx, f_mask, :seg_logits.shape[-1]] = \
-                        seg_logits.squeeze(0).to(logits.dtype)
+        # Per-image, per-group-segment CTC routing
+        for b_idx in range(B):
+            fg = frame_groups[b_idx]
+            for g in fg.unique().tolist():
+                if g == self.blank_group_id:
+                    continue
+                f_mask = (fg == g)
+                seg_len = f_mask.sum().item()
+                if seg_len == 0:
+                    continue
+                seg_features = x[b_idx, f_mask].unsqueeze(0)  # (1, seg_len, dim)
+                # Use first frame's script id (segments have uniform script within group)
+                s_id = frame_scripts[b_idx][f_mask][0].unsqueeze(0)
+                seg_logits, _ = self.ctc_modules[g](seg_features, script_ids=s_id)
+                logits[b_idx, f_mask, :seg_logits.shape[-1]] = \
+                    seg_logits.squeeze(0).to(logits.dtype)
 
         lengths = torch.full((B,), T, dtype=torch.long, device=x.device)
 
@@ -756,5 +657,4 @@ class LipiMoEEncoder(nn.Module):
             "lid2_logits_per_group": lid2_logits_per_group,
             "frame_scripts": frame_scripts,
             "flat_scripts": flat_scripts,
-            "script_logits_per_group": [],  # backward compat — remove later
         }
