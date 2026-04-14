@@ -7,13 +7,13 @@ Architecture:
        → (B, 128, 8, W/2)
     -> Shared SWA-A: 2× windowed-attention blocks at (h=8, w=W/2)
     -> Pool h=8→4, proj 128→dim
-    -> Shared SWA-B: 1× windowed-attention block at (h=4, w=W/2, dim)
+    -> Shared SWA-B: 2× windowed-attention blocks at (h=4, w=W/2, dim)
     -> Pool h=4→2
     -> Frame-level LID-1: per-frame script group classification
     -> Route frames to group expert blocks by group_id
-    -> 2 local group expert blocks (h=2, 2×16 windows, 13 experts)
+    -> 1 local group expert block (h=2, 2×16 windows, 13 experts)
     -> Pool h=2→1
-    -> 2 wide group expert blocks (h=1, 1×64 windows, 13 experts)
+    -> 1 wide group expert block (h=1, 1×64 windows, 13 experts)
     -> Per-group aggregation (concat local + wide → dim)
     -> Frame-level LID-2: per-frame script classification (multi-script groups)
     -> Route frames to script expert blocks by script_id
@@ -288,9 +288,9 @@ class LipiMoEEncoder(nn.Module):
         stem_mid_ch: int = 64,
         stem_out_ch: int = 128,
         num_shared_a_blocks: int = 2,
-        num_shared_b_blocks: int = 1,
-        num_group_local_blocks: int = 2,
-        num_group_wide_blocks: int = 2,
+        num_shared_b_blocks: int = 2,
+        num_group_local_blocks: int = 1,
+        num_group_wide_blocks: int = 1,
         num_script_local_blocks: int = 1,
         num_script_wide_blocks: int = 1,
         local_window_w: int = 16,
