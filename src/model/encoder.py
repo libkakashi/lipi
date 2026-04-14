@@ -64,7 +64,9 @@ class LayerScale(nn.Module):
         self.gamma = nn.Parameter(init_value * torch.ones(dim))
 
     def forward(self, x: Tensor) -> Tensor:
-        return self.gamma * x
+        # Cast gamma to x's dtype so autocast (bf16/fp16) doesn't upcast
+        # the residual branch to fp32 at the multiply.
+        return self.gamma.to(x.dtype) * x
 
 
 class WindowedAttention(nn.Module):
