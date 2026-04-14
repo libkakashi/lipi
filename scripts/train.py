@@ -649,7 +649,9 @@ def main():
             elif args.freeze_except == "ctc":
                 param.requires_grad = "ctc_modules." in name
             elif args.freeze_except == "backbone":
-                param.requires_grad = "backbone." in name
+                param.requires_grad = any(
+                    k in name for k in ("stem.", "shared_a.", "shared_b.",
+                                        "proj_a.", "pool_a.", "pool_b."))
             if param.requires_grad:
                 trainable += param.numel()
             else:

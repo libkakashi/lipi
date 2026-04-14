@@ -1,12 +1,14 @@
 """
-Lipi v4 MoE Vision Encoder.
+Lipi v5 MoE Vision Encoder (from scratch — no pretrained backbone).
 
 Architecture:
     Input: (B, 3, 32, W) — RGB
-    -> HGNetV2 backbone (pretrained, 1024ch)
-       → (B, 1024, 2, W/2)
-    -> Project 1024 → dim, keep h=2
-    -> 1 shared global attention block (h=2, cross-frame context)
+    -> ConvStem: two plain strided convs (no ResBlocks, small RF ~5px)
+       → (B, 128, 8, W/2)
+    -> Shared SWA-A: 2× windowed-attention blocks at (h=8, w=W/2)
+    -> Pool h=8→4, proj 128→dim
+    -> Shared SWA-B: 1× windowed-attention block at (h=4, w=W/2, dim)
+    -> Pool h=4→2
     -> Frame-level LID-1: per-frame script group classification
     -> Route frames to group expert blocks by group_id
     -> 2 local group expert blocks (h=2, 2×16 windows, 13 experts)
@@ -27,47 +29,7 @@ import torch.nn.functional as F
 import torch.utils.checkpoint as ckpt_util
 from torch import Tensor
 
-import timm
-
 from src.model.lid import NUM_GROUPS
-
-
-class GlobalAttention(nn.Module):
-    """Standard multi-head self-attention on flattened 2D sequences."""
-
-    def __init__(self, dim: int, num_heads: int):
-        super().__init__()
-        self.num_heads = num_heads
-        self.head_dim = dim // num_heads
-        self.scale = self.head_dim ** -0.5
-        self.qkv = nn.Linear(dim, 3 * dim)
-        self.proj = nn.Linear(dim, dim)
-
-    def forward(self, x: Tensor) -> Tensor:
-        B, N, C = x.shape
-        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim)
-        q, k, v = qkv.unbind(2)
-        attn = F.scaled_dot_product_attention(
-            q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2))
-        return self.proj(attn.transpose(1, 2).reshape(B, N, C))
-
-
-class SharedBlock(nn.Module):
-    """Shared (non-expert) transformer block: attention + MLP."""
-
-    def __init__(self, dim: int, num_heads: int, mlp_ratio: int = 2):
-        super().__init__()
-        self.norm1 = nn.LayerNorm(dim)
-        self.attn = GlobalAttention(dim, num_heads)
-        self.norm2 = nn.LayerNorm(dim)
-        hidden = dim * mlp_ratio
-        self.mlp = nn.Sequential(
-            nn.Linear(dim, hidden), nn.GELU(), nn.Linear(hidden, dim))
-
-    def forward(self, x: Tensor) -> Tensor:
-        x = x + self.attn(self.norm1(x))
-        x = x + self.mlp(self.norm2(x))
-        return x
 
 
 class WindowedAttention(nn.Module):
@@ -185,6 +147,56 @@ class ExpertBlock(nn.Module):
         ])
 
 
+class ConvStem(nn.Module):
+    """Small plain-conv stem with two strided convs. No ResBlocks.
+
+    (B, 3, 32, W) → (B, out_ch, 8, W/2). Receptive field ~5-7 pixels so
+    boundary contamination is minimal before attention takes over.
+    """
+
+    def __init__(self, in_ch: int = 3, mid_ch: int = 64, out_ch: int = 128):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(in_ch, mid_ch, kernel_size=3, stride=(2, 1),
+                      padding=1, bias=False),
+            nn.GroupNorm(1, mid_ch),
+            nn.GELU(),
+            nn.Conv2d(mid_ch, out_ch, kernel_size=3, stride=(2, 2),
+                      padding=1, bias=False),
+            nn.GroupNorm(1, out_ch),
+            nn.GELU(),
+        )
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.net(x)
+
+
+class SWABlock(nn.Module):
+    """Windowed attention + MLP block (non-expert version of ExpertBlock).
+
+    Used in the shared stem-post stages where all frames go through the
+    same weights.
+    """
+
+    def __init__(self, dim: int, num_heads: int,
+                 window_h: int, window_w: int, shift: bool,
+                 mlp_ratio: int = 2):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim)
+        self.attn = WindowedAttention(
+            dim=dim, num_heads=num_heads,
+            window_h=window_h, window_w=window_w, shift=shift)
+        self.norm2 = nn.LayerNorm(dim)
+        hidden = dim * mlp_ratio
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, hidden), nn.GELU(), nn.Linear(hidden, dim))
+
+    def forward(self, x: Tensor, h: int, w: int) -> Tensor:
+        x = x + self.attn(self.norm1(x), h, w)
+        x = x + self.mlp(self.norm2(x))
+        return x
+
+
 class CTCHead(nn.Module):
     def __init__(self, enc_dim: int, vocab_size: int):
         super().__init__()
@@ -255,7 +267,10 @@ def _run_expert_block(block, x, expert_id, h, w, use_ckpt):
 
 
 class LipiMoEEncoder(nn.Module):
-    """Lipi v4: HGNetV2 backbone + LID-1 + group experts + LID-2 + script experts.
+    """Lipi v5: ConvStem + shared SWA + group experts + LID-2 + script experts.
+
+    Trained from scratch (no pretrained backbone). Small-RF stem keeps
+    boundary contamination minimal before attention layers take over.
 
     Two-level expert routing:
       1. LID-1 classifies each frame into a script group (13 groups + blank)
@@ -267,18 +282,13 @@ class LipiMoEEncoder(nn.Module):
     Single-script groups skip LID-2 (only 1 script, trivially assigned).
     """
 
-    _OCR_STRIDES = {
-        'stem.stem1.conv': (2, 1),
-        'stem.stem3.conv': (2, 1),
-        'stages_1.downsample.conv': (2, 2),     # one width downsample
-        'stages_2.downsample.conv': (2, 1),
-        'stages_3.downsample.conv': (1, 1),     # keep h=2
-    }
-
     def __init__(
         self,
         dim: int = 256,
-        backbone: str = 'hgnetv2_b3',
+        stem_mid_ch: int = 64,
+        stem_out_ch: int = 128,
+        num_shared_a_blocks: int = 2,
+        num_shared_b_blocks: int = 1,
         num_group_local_blocks: int = 2,
         num_group_wide_blocks: int = 2,
         num_script_local_blocks: int = 1,
@@ -318,7 +328,10 @@ class LipiMoEEncoder(nn.Module):
         }
 
         self.config = {
-            "dim": dim, "backbone": backbone,
+            "dim": dim,
+            "stem_mid_ch": stem_mid_ch, "stem_out_ch": stem_out_ch,
+            "num_shared_a_blocks": num_shared_a_blocks,
+            "num_shared_b_blocks": num_shared_b_blocks,
             "num_group_local_blocks": num_group_local_blocks,
             "num_group_wide_blocks": num_group_wide_blocks,
             "num_script_local_blocks": num_script_local_blocks,
@@ -330,28 +343,32 @@ class LipiMoEEncoder(nn.Module):
             "group_script_names": group_script_names,
         }
 
-        # Pretrained backbone with OCR strides
-        self.backbone = timm.create_model(
-            f'{backbone}.ssld_stage1_in22k_in1k' if 'ssld' not in backbone else backbone,
-            pretrained=True,
-            features_only=True,
-        )
-        for name, mod in self.backbone.named_modules():
-            if name in self._OCR_STRIDES:
-                mod.stride = self._OCR_STRIDES[name]
+        # Convolutional stem: (B, 3, 32, W) → (B, stem_out_ch, 8, W/2)
+        self.stem = ConvStem(in_ch=3, mid_ch=stem_mid_ch, out_ch=stem_out_ch)
 
-        # Remove stage 3's 1024→2048 expansion
-        for block in self.backbone.stages_3.blocks:
-            agg_list = list(block.aggregation.children())
-            block.aggregation = nn.Sequential(agg_list[0])
+        # Shared SWA-A at (h=8, w=W/2), dim=stem_out_ch. Window 8×8 covers
+        # the full height so attention sees vertical character extent.
+        self.shared_a = nn.ModuleList([
+            SWABlock(dim=stem_out_ch, num_heads=max(stem_out_ch // 64, 1),
+                     window_h=8, window_w=8, shift=(i % 2 == 1),
+                     mlp_ratio=mlp_ratio)
+            for i in range(num_shared_a_blocks)
+        ])
 
-        backbone_ch = 1024
+        # Pool h: 8→4 via adaptive avg pool. Project stem_out_ch → dim.
+        self.pool_a = nn.AdaptiveAvgPool2d((4, None))
+        self.proj_a = nn.Linear(stem_out_ch, dim)
 
-        # Project backbone → dim (keep h=2)
-        self.proj = nn.Linear(backbone_ch, dim)
+        # Shared SWA-B at (h=4, w=W/2), dim. Wider window for context.
+        self.shared_b = nn.ModuleList([
+            SWABlock(dim=dim, num_heads=max(dim // 64, 1),
+                     window_h=4, window_w=16, shift=(i % 2 == 1),
+                     mlp_ratio=mlp_ratio)
+            for i in range(num_shared_b_blocks)
+        ])
 
-        # Shared global attention block
-        self.shared_attn = SharedBlock(dim=dim, num_heads=dim // 64, mlp_ratio=mlp_ratio)
+        # Pool h: 4→2. Experts take over from here.
+        self.pool_b = nn.AdaptiveAvgPool2d((2, None))
 
         # LID-1: per-frame group classification
         self.group_h_pool = nn.AdaptiveAvgPool2d((1, None))
@@ -487,17 +504,32 @@ class LipiMoEEncoder(nn.Module):
 
         x = images.float() / 255.0 if images.dtype == torch.uint8 else images
 
-        # Backbone: (B, 1024, 2, W/2)
-        feats = self.backbone(x)
-        backbone_out = feats[-1]
-        _, C, h, w = backbone_out.shape
+        # Stem: (B, 3, 32, W) → (B, stem_out_ch, 8, W/2)
+        x = self.stem(x)
+        _, C, h, w = x.shape  # h=8, w=W/2
 
-        # Project to dim, keep h=2: (B, 2*W/2, dim)
-        x = backbone_out.permute(0, 2, 3, 1).reshape(B, h * w, C)
-        x = self.proj(x)
+        # Shared SWA-A at (h=8, w=W/2)
+        x = x.permute(0, 2, 3, 1).reshape(B, h * w, C)
+        for blk in self.shared_a:
+            x = blk(x, h, w)
 
-        # Shared global attention
-        x = self.shared_attn(x)
+        # Pool h: 8→4 then project to dim
+        x = x.reshape(B, h, w, C).permute(0, 3, 1, 2)  # (B, C, 8, W/2)
+        x = self.pool_a(x)  # (B, C, 4, W/2)
+        h = 4
+        x = x.permute(0, 2, 3, 1).reshape(B, h * w, C)
+        x = self.proj_a(x)  # (B, h*w, dim)
+
+        # Shared SWA-B at (h=4, w=W/2), dim
+        d = x.shape[-1]
+        for blk in self.shared_b:
+            x = blk(x, h, w)
+
+        # Pool h: 4→2. Experts operate at h=2.
+        x = x.reshape(B, h, w, d).permute(0, 3, 1, 2)  # (B, dim, 4, W/2)
+        x = self.pool_b(x)  # (B, dim, 2, W/2)
+        h = 2
+        x = x.permute(0, 2, 3, 1).reshape(B, h * w, d)
 
         # LID-1: per-frame group prediction
         d = x.shape[-1]
