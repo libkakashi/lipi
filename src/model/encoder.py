@@ -6,19 +6,19 @@ Architecture:
     -> ConvStem: two plain strided convs (no ResBlocks, small RF ~5px)
        → (B, 128, 8, W/2)
     -> Shared SWA-A: 2× windowed-attention blocks at (h=8, w=W/2)
-    -> Pool h=8→4, proj 128→dim
-    -> Shared SWA-B: 2× windowed-attention blocks at (h=4, w=W/2, dim)
-    -> Pool h=4→2
+       (window 8×8 covers full vertical extent in a single window,
+        so downstream h>1 wouldn't add new vertical info)
+    -> Pool h=8→1, proj 128→dim
+    -> Shared SWA-B: 2× windowed-attention blocks at (h=1, w=W/2, dim)
     -> Frame-level LID-1: per-frame script group classification
     -> Route frames to group expert blocks by group_id
-    -> 1 local group expert block (h=2, 2×16 windows, 13 experts)
-    -> Pool h=2→1
-    -> 1 wide group expert block (h=1, 1×64 windows, 13 experts)
+    -> 1 local group expert block  (h=1, window 1×16, 13 experts)
+    -> 1 wide  group expert block  (h=1, window 1×64, 13 experts)
     -> Per-group aggregation (concat local + wide → dim)
     -> Frame-level LID-2: per-frame script classification (multi-script groups)
     -> Route frames to script expert blocks by script_id
     -> 1 local script expert block (h=1, 1×16 windows, 26 experts)
-    -> 1 wide script expert block (h=1, 1×64 windows, 26 experts)
+    -> 1 wide  script expert block (h=1, 1×64 windows, 26 experts)
     -> Per-script aggregation (concat local + wide → dim)
     -> Per-script CTC heads (T=W/2)
 """
@@ -355,20 +355,19 @@ class LipiMoEEncoder(nn.Module):
             for i in range(num_shared_a_blocks)
         ])
 
-        # Pool h: 8→4 via adaptive avg pool. Project stem_out_ch → dim.
-        self.pool_a = nn.AdaptiveAvgPool2d((4, None))
+        # Pool h: 8→1. SWA-A's 8×8 windows already fully covered vertical
+        # extent, so collapsing h here saves 8× tokens in every downstream
+        # stage with no loss of vertical context. Project stem_out_ch → dim.
+        self.pool_a = nn.AdaptiveAvgPool2d((1, None))
         self.proj_a = nn.Linear(stem_out_ch, dim)
 
-        # Shared SWA-B at (h=4, w=W/2), dim. Wider window for context.
+        # Shared SWA-B at (h=1, w=W/2), dim. Pure horizontal context.
         self.shared_b = nn.ModuleList([
             SWABlock(dim=dim, num_heads=max(dim // 64, 1),
-                     window_h=4, window_w=16, shift=(i % 2 == 1),
+                     window_h=1, window_w=16, shift=(i % 2 == 1),
                      mlp_ratio=mlp_ratio)
             for i in range(num_shared_b_blocks)
         ])
-
-        # Pool h: 4→2. Experts take over from here.
-        self.pool_b = nn.AdaptiveAvgPool2d((2, None))
 
         # LID-1: per-frame group classification
         self.group_h_pool = nn.AdaptiveAvgPool2d((1, None))
@@ -380,15 +379,15 @@ class LipiMoEEncoder(nn.Module):
 
         # Group expert blocks (routed by group_id, 13 experts)
         # Init output projections near-zero so residual connections pass
-        # backbone features through initially — experts learn to specialize
-        # gradually without destroying features that CTC needs
+        # features through initially — experts learn to specialize gradually
+        # without destroying features that CTC needs.
+        # Both streams run at h=1; local/wide differentiate via window_w.
         self.group_local_blocks = nn.ModuleList([
             ExpertBlock(dim=dim, num_heads=dim // 64, num_experts=num_groups,
-                        window_h=2, window_w=local_window_w, shift=(i % 2 == 1),
+                        window_h=1, window_w=local_window_w, shift=(i % 2 == 1),
                         mlp_ratio=mlp_ratio)
             for i in range(num_group_local_blocks)
         ])
-        self.h_pool = nn.AdaptiveAvgPool2d((1, None))  # pool h=2→1
         self.group_wide_blocks = nn.ModuleList([
             ExpertBlock(dim=dim, num_heads=dim // 64, num_experts=num_groups,
                         window_h=1, window_w=wide_window_w, shift=(i % 2 == 1),
@@ -513,23 +512,17 @@ class LipiMoEEncoder(nn.Module):
         for blk in self.shared_a:
             x = blk(x, h, w)
 
-        # Pool h: 8→4 then project to dim
+        # Pool h: 8→1, project to dim. All downstream stages run at h=1.
         x = x.reshape(B, h, w, C).permute(0, 3, 1, 2)  # (B, C, 8, W/2)
-        x = self.pool_a(x)  # (B, C, 4, W/2)
-        h = 4
+        x = self.pool_a(x)  # (B, C, 1, W/2)
+        h = 1
         x = x.permute(0, 2, 3, 1).reshape(B, h * w, C)
-        x = self.proj_a(x)  # (B, h*w, dim)
+        x = self.proj_a(x)  # (B, w, dim)
 
-        # Shared SWA-B at (h=4, w=W/2), dim
+        # Shared SWA-B at (h=1, w=W/2)
         d = x.shape[-1]
         for blk in self.shared_b:
             x = blk(x, h, w)
-
-        # Pool h: 4→2. Experts operate at h=2.
-        x = x.reshape(B, h, w, d).permute(0, 3, 1, 2)  # (B, dim, 4, W/2)
-        x = self.pool_b(x)  # (B, dim, 2, W/2)
-        h = 2
-        x = x.permute(0, 2, 3, 1).reshape(B, h * w, d)
 
         # LID-1: per-frame group prediction
         d = x.shape[-1]
@@ -571,18 +564,17 @@ class LipiMoEEncoder(nn.Module):
                 if seg_len == 0:
                     continue
 
-                x_2d = x[b_idx].reshape(h, w, d)
-                x_seg = x_2d[:, seg_mask, :].reshape(1, h * seg_len, d)
+                x_seg = x[b_idx, seg_mask].unsqueeze(0)  # (1, seg_len, d)
 
+                local_seg = x_seg
                 for block in self.group_local_blocks:
-                    x_seg = _run_expert_block(block, x_seg, g, h, seg_len, use_ckpt)
+                    local_seg = _run_expert_block(
+                        block, local_seg, g, 1, seg_len, use_ckpt)
 
-                local_seg = x_seg.reshape(1, h, seg_len, d).permute(0, 3, 1, 2)
-                local_seg = self.h_pool(local_seg).squeeze(2).permute(0, 2, 1)
-
-                wide_seg = local_seg
+                wide_seg = x_seg
                 for block in self.group_wide_blocks:
-                    wide_seg = _run_expert_block(block, wide_seg, g, 1, seg_len, use_ckpt)
+                    wide_seg = _run_expert_block(
+                        block, wide_seg, g, 1, seg_len, use_ckpt)
 
                 comb = torch.cat([local_seg, wide_seg], dim=-1)
                 x_after_group[b_idx, seg_mask] = self.group_aggregates[g](comb.squeeze(0))
