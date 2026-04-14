@@ -73,6 +73,9 @@ def parse_args():
     parser.add_argument("--dim", type=int, default=512)
     parser.add_argument("--no-compile", action="store_true")
     parser.add_argument("--lid1-weight", type=float, default=1.0)
+    parser.add_argument("--lid2-weight", type=float, default=1.0,
+                        help="Set to 0 to disable LID-2 loss "
+                             "(useful for CTC warmup with --lid1-weight 0)")
     parser.add_argument("--expert-lr", type=float, default=None,
                         help="Separate learning rate for expert params. Default: same as --lr")
     parser.add_argument("--detach-epochs", type=int, default=0,
@@ -396,7 +399,8 @@ def save_checkpoint(model, optimizer, scheduler, scaler, epoch, args, save_dir):
 def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, scaler,
                     ce_loss_fn, device, device_type, use_amp, amp_dtype,
                     epoch, total_epochs, grad_accum, log_interval,
-                    lid1_weight, group_script_vocabs, group_script_names,
+                    lid1_weight, lid2_weight,
+                    group_script_vocabs, group_script_names,
                     detach_for_experts=False,
                     save_dir=None, args=None):
     model.train()
@@ -488,7 +492,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
 
         loss = (ctc_loss
                 + lid1_weight * lid1_loss.float()
-                + lid2_loss.float())
+                + lid2_weight * lid2_loss.float())
 
         loss = loss * scale
         if grad_accum > 1:
@@ -710,7 +714,7 @@ def main():
     print(f"\n{'=' * 60}")
     print(f"TRAINING: epochs {start_epoch}-{args.epochs}, lr={args.lr}")
     print(f"  Batch: {eff_batch} x {args.grad_accum} (pixel-budgeted)")
-    print(f"  Losses: CTC x1.0 + LID1 x{args.lid1_weight} + LID2 x1.0")
+    print(f"  Losses: CTC x1.0 + LID1 x{args.lid1_weight} + LID2 x{args.lid2_weight}")
     print(f"  Routing: ground truth (CTC on all samples)")
     print(f"  Per-script vocabs: {data['group_script_vocab_sizes']}")
     print(f"{'=' * 60}")
@@ -724,7 +728,8 @@ def main():
             model, train_loader, opt["optimizer"], opt["base_optimizer"],
             opt["scheduler"], opt["scaler"], ce_loss_fn, device, device_type,
             opt["use_amp"], opt["amp_dtype"], epoch, args.epochs, args.grad_accum,
-            args.log_interval, lid1_weight=args.lid1_weight,
+            args.log_interval,
+            lid1_weight=args.lid1_weight, lid2_weight=args.lid2_weight,
             group_script_vocabs=data["group_script_vocab_sizes"],
             group_script_names=data["group_script_names"],
             detach_for_experts=detach,
