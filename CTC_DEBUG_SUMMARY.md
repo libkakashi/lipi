@@ -110,6 +110,29 @@ epoch.
    script. Boundary frames (where pixel-to-frame rounding leaks whitespace)
    add ~1% noise. Acceptable but not perfect.
 
+## Observed Training Behavior
+
+Latest user training (2026-04-14, after all fixes):
+- Step 0:   CTC=104, LID-1=2.56 — random init
+- Step 80:  CTC=10,  LID-1=2.55 — quickly approaching plateau
+- Step 200: CTC=5.5, LID-1=2.28 — near plateau
+- Step 500+: CTC=5.4, LID-1=2.0-2.5 — stuck in all-blank minimum
+
+CTC stuck at ~5/char is the all-blank local minimum (model predicts blank
+for every frame). LID-1 stuck at ~2.0 with label_smoothing=0.1 corresponds
+to ~50% accuracy (much worse than expected — should reach 90% within an epoch).
+
+The LID-1 fluctuating wildly (0% to 100%) per-batch is misleading — it's the
+last-batch accuracy variation due to small per-batch sample sizes. The true
+learning trajectory is the loss value, which IS dropping (slowly).
+
+If after 2-3 epochs the model hasn't escaped these local minima, consider:
+- Higher LR (current 3e-4 may be too conservative)
+- Aggregation Cross-Entropy (ACE) loss as auxiliary signal (already
+  implemented but disabled — pass `--align-ce-weight 0.1`)
+- Lower batch size (smaller batches give noisier gradients that help
+  escape local minima)
+
 ## Files Modified
 - `src/model/encoder.py` — architecture changes, init fixes
 - `src/training/losses.py` — per-frame LID-2, segment skip diagnostics
