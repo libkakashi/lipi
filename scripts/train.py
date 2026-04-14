@@ -87,6 +87,12 @@ def parse_args():
     # Model
     parser.add_argument("--dim", type=int, default=512)
     parser.add_argument("--no-compile", action="store_true")
+    parser.add_argument("--ctc-weight", type=float, default=1.0,
+                        help="Set to 0 to disable CTC loss. Useful for "
+                             "pretraining stem + shared SWA on LID alone "
+                             "before joint training — random features into "
+                             "CTC cause blank collapse, structured features "
+                             "from LID-pretraining let CTC escape cleanly.")
     parser.add_argument("--lid1-weight", type=float, default=1.0)
     parser.add_argument("--lid2-weight", type=float, default=1.0,
                         help="Set to 0 to disable LID-2 loss "
@@ -415,7 +421,7 @@ def save_checkpoint(model, optimizer, scheduler, scaler, epoch, args, save_dir):
 def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, scaler,
                     ce_loss_fn, device, device_type, use_amp, amp_dtype,
                     epoch, total_epochs, grad_accum, log_interval,
-                    lid1_weight, lid2_weight,
+                    ctc_weight, lid1_weight, lid2_weight,
                     group_script_vocabs, group_script_names,
                     detach_for_experts=False,
                     save_dir=None, args=None):
@@ -499,7 +505,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         if lid2_count > 0:
             lid2_loss = lid2_loss / lid2_count
 
-        loss = (ctc_loss
+        loss = (ctc_weight * ctc_loss
                 + lid1_weight * lid1_loss.float()
                 + lid2_weight * lid2_loss.float())
 
@@ -726,7 +732,7 @@ def main():
     print(f"\n{'=' * 60}")
     print(f"TRAINING: epochs {start_epoch}-{args.epochs}, lr={args.lr}")
     print(f"  Batch: {eff_batch} x {args.grad_accum} (pixel-budgeted)")
-    print(f"  Losses: CTC x1.0 + LID1 x{args.lid1_weight} + LID2 x{args.lid2_weight}")
+    print(f"  Losses: CTC x{args.ctc_weight} + LID1 x{args.lid1_weight} + LID2 x{args.lid2_weight}")
     print(f"  Routing: ground truth (CTC on all samples)")
     print(f"  Per-script vocabs: {data['group_script_vocab_sizes']}")
     print(f"{'=' * 60}")
@@ -741,6 +747,7 @@ def main():
             opt["scheduler"], opt["scaler"], ce_loss_fn, device, device_type,
             opt["use_amp"], opt["amp_dtype"], epoch, args.epochs, args.grad_accum,
             args.log_interval,
+            ctc_weight=args.ctc_weight,
             lid1_weight=args.lid1_weight, lid2_weight=args.lid2_weight,
             group_script_vocabs=data["group_script_vocab_sizes"],
             group_script_names=data["group_script_names"],
