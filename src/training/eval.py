@@ -94,27 +94,38 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
                         fe = min((seg["offset"] + seg["width"] + 1) // 2, T_est)
                         sl_frames[b, fs:fe] = seg.get("script_id", 0)
             out_gt = model(imgs, group_ids=gl_for_model, script_ids=sl_frames)
-        ctc_ok = (tgt_lens <= out_gt["lengths"]) & (tgt_lens > 0)
-        if group_script_vocab_sizes and ctc_ok.any():
-            for g, script_vocabs in enumerate(group_script_vocab_sizes):
-                for s, vs in enumerate(script_vocabs):
-                    s_mask = ctc_ok & (gids == g) & (sids_dev == s)
-                    if not s_mask.any():
+        # Per-segment CTC val loss (matches training, works for mixed lines)
+        T_val = out_gt["logits"].shape[1]
+        if batch_segments is not None and group_script_vocab_sizes:
+            from src.encoding.decompose import encode_text as _enc
+            for b in range(B):
+                for seg in batch_segments[b]:
+                    seg_g = seg["group_id"]
+                    seg_s = seg.get("script_id", 0)
+                    if seg_g >= len(group_script_vocab_sizes) or seg_s >= len(group_script_vocab_sizes[seg_g]):
                         continue
-                    s_logits = out_gt["logits"][s_mask]
-                    s_log_probs = (s_logits[:, :, :vs].float()
-                                   .log_softmax(dim=-1).permute(1, 0, 2))
-                    s_tgt_lens = tgt_lens[s_mask]
-                    s_targets_2d = targets[s_mask]
-                    col_idx = torch.arange(s_targets_2d.shape[1], device=device)
-                    s_targets_flat = s_targets_2d[col_idx < s_tgt_lens.unsqueeze(1)]
-                    ctc_l = F.ctc_loss(
-                        s_log_probs, s_targets_flat,
-                        out_gt["lengths"][s_mask], s_tgt_lens,
+                    vs = group_script_vocab_sizes[seg_g][seg_s]
+                    fs = seg["offset"] // 2
+                    fe = min((seg["offset"] + seg["width"] + 1) // 2, T_val)
+                    seg_len = fe - fs
+                    if seg_len < 1:
+                        continue
+                    sname = group_script_names[seg_g][seg_s] if seg_g < len(group_script_names) and seg_s < len(group_script_names[seg_g]) else ""
+                    if not sname:
+                        continue
+                    ids = _enc(seg["text"], sname)
+                    if not ids or len(ids) > seg_len:
+                        continue
+                    seg_logits = out_gt["logits"][b, fs:fe, :vs]
+                    seg_lp = seg_logits.float().log_softmax(dim=-1).unsqueeze(1)
+                    seg_t = torch.tensor(ids, dtype=torch.long, device=device)
+                    seg_l = F.ctc_loss(
+                        seg_lp, seg_t,
+                        torch.tensor([seg_len], dtype=torch.long, device=device),
+                        torch.tensor([len(ids)], dtype=torch.long, device=device),
                         blank=0, reduction="sum", zero_infinity=True)
-                    val_ctc_loss += ctc_l.item()
-                    val_loss_samples += s_tgt_lens.sum().item()
-
+                    val_ctc_loss += seg_l.item()
+                    val_loss_samples += len(ids)
         # Val LID-1 loss (per-frame, -100 padding ignored by default)
         ce_fn = torch.nn.CrossEntropyLoss()
         T_gt = out_gt["group_logits"].shape[1]
