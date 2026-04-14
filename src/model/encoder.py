@@ -511,6 +511,11 @@ class LipiMoEEncoder(nn.Module):
                 frame_groups = group_ids.unsqueeze(1).expand(B, w)
             else:
                 frame_groups = group_ids
+            # Defensive: clamp invalid IDs (e.g. -100 padding) to blank.
+            # Caller should already do this, but bincount/indexing crash otherwise.
+            frame_groups = torch.where(
+                (frame_groups >= 0) & (frame_groups <= self.blank_group_id),
+                frame_groups, torch.full_like(frame_groups, self.blank_group_id))
         else:
             frame_groups = group_logits.argmax(dim=-1)
 
