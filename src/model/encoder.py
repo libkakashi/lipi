@@ -355,11 +355,13 @@ class LipiMoEEncoder(nn.Module):
             for i in range(num_shared_a_blocks)
         ])
 
-        # Pool h: 8→1. SWA-A's 8×8 windows already fully covered vertical
-        # extent, so collapsing h here saves 8× tokens in every downstream
-        # stage with no loss of vertical context. Project stem_out_ch → dim.
-        self.pool_a = nn.AdaptiveAvgPool2d((1, None))
-        self.proj_a = nn.Linear(stem_out_ch, dim)
+        # Collapse h=8 → 1 via Swin-style patch merging: concatenate the 8
+        # vertical tokens channel-wise (dim 128 → 1024) and project back to
+        # dim. Strictly more general than average-pooling — the Linear can
+        # learn per-row weighting (e.g., weight middle rows more for
+        # x-height-dominant scripts).
+        self._post_stem_h = 8  # stem downsamples 32px input by 4x
+        self.proj_a = nn.Linear(stem_out_ch * self._post_stem_h, dim)
 
         # Shared SWA-B at (h=1, w=W/2), dim. Pure horizontal context.
         self.shared_b = nn.ModuleList([
@@ -512,12 +514,13 @@ class LipiMoEEncoder(nn.Module):
         for blk in self.shared_a:
             x = blk(x, h, w)
 
-        # Pool h: 8→1, project to dim. All downstream stages run at h=1.
-        x = x.reshape(B, h, w, C).permute(0, 3, 1, 2)  # (B, C, 8, W/2)
-        x = self.pool_a(x)  # (B, C, 1, W/2)
-        h = 1
-        x = x.permute(0, 2, 3, 1).reshape(B, h * w, C)
+        # Patch-merge h=8 → 1: concatenate vertical tokens channel-wise,
+        # then project to dim. All downstream stages run at h=1.
+        assert h == self._post_stem_h, \
+            f"expected post-stem height {self._post_stem_h}, got {h}"
+        x = x.reshape(B, h, w, C).permute(0, 2, 1, 3).reshape(B, w, h * C)
         x = self.proj_a(x)  # (B, w, dim)
+        h = 1
 
         # Shared SWA-B at (h=1, w=W/2)
         d = x.shape[-1]
