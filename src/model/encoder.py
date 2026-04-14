@@ -613,6 +613,10 @@ class LipiMoEEncoder(nn.Module):
                 frame_scripts = script_ids.unsqueeze(1).expand(B, w)
             else:
                 frame_scripts = script_ids
+            # Defensive: clamp invalid script_ids to 0
+            frame_scripts = torch.where(
+                frame_scripts >= 0, frame_scripts,
+                torch.zeros_like(frame_scripts))
         else:
             # Inference: predict from LID-2 for multi-script groups
             for g, lid2_log in lid2_logits_per_group.items():
