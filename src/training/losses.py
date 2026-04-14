@@ -37,31 +37,6 @@ def compute_lid1_loss(
     return ce_loss_fn(group_logits.reshape(B * T, G), frame_labels.reshape(B * T))
 
 
-def compute_lid2_loss(
-    script_logits_per_group: list[tuple],
-    true_script_ids: Tensor,
-    lid1_ok: Tensor,
-    ce_loss_fn: nn.CrossEntropyLoss,
-) -> Tensor:
-    """LID-2 script classification loss.
-
-    Computed on correctly LID-1-routed samples only (lid1_ok mask).
-    Averaged across groups to prevent multi-group sum from dominating.
-    """
-    lid2_loss = torch.zeros(1, device=true_script_ids.device)
-    lid2_count = 0
-    for _g, script_logits, group_mask in script_logits_per_group:
-        routed_ok = lid1_ok[group_mask]
-        sl = script_logits[routed_ok]
-        if sl.shape[0] > 0:
-            lid2_loss = lid2_loss + ce_loss_fn(
-                sl, true_script_ids[group_mask][routed_ok])
-            lid2_count += 1
-    if lid2_count > 0:
-        lid2_loss = lid2_loss / lid2_count
-    return lid2_loss
-
-
 def compute_ctc_loss(
     logits: Tensor,
     targets: Tensor,

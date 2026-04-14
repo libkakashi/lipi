@@ -32,7 +32,7 @@ from src.training.dataloader import (
     LipiStreamingDataset,
 )
 from src.training.losses import (
-    compute_lid1_loss, compute_lid2_loss, compute_ctc_loss,
+    compute_lid1_loss, compute_ctc_loss,
     compute_ctc_loss_segments, compute_regional_token_loss,
 )
 from src.training.eval import evaluate
