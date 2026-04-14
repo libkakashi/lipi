@@ -443,17 +443,19 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             # both padding and whitespace should skip expert blocks.
             T_est = imgs_.shape[3] // 2
             gl_frames = group_labels_[:, ::2][:, :T_est]
-            gl_for_model = gl_frames.clone()
-            gl_for_model[gl_for_model < 0] = NUM_GROUPS  # padding → blank for routing
 
-            # Build per-frame script labels from segment metadata
-            # so CTC heads use ground truth script routing during training
+            # Build per-frame group/script labels from segment metadata
+            # using the same offset→frame arithmetic as CTC loss, so model
+            # routing and CTC segment ranges agree frame-for-frame.
             B_cur = imgs_.shape[0]
+            gl_for_model = torch.full((B_cur, T_est), NUM_GROUPS,
+                                      dtype=torch.long, device=device)
             sl_frames = torch.zeros(B_cur, T_est, dtype=torch.long, device=device)
             for b in range(B_cur):
                 for seg in segments_[b]:
                     frame_start = seg["offset"] // 2
                     frame_end = min((seg["offset"] + seg["width"] + 1) // 2, T_est)
+                    gl_for_model[b, frame_start:frame_end] = seg["group_id"]
                     sl_frames[b, frame_start:frame_end] = seg["script_id"]
 
             out = model(imgs_, group_ids=gl_for_model, script_ids=sl_frames,

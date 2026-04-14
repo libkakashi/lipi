@@ -153,7 +153,12 @@ def compute_ctc_loss_segments(
             if not ids:
                 skipped_no_ids += 1
                 continue
-            if len(ids) > seg_len:
+            # CTC requires T >= U + (# adjacent repeats, which need blanks
+            # between them). Near-degenerate segments (T ≈ U) produce
+            # extreme finite losses that dominate the batch mean.
+            n_repeats = sum(1 for i in range(1, len(ids)) if ids[i] == ids[i - 1])
+            min_T = len(ids) + n_repeats
+            if seg_len < min_T:
                 skipped_too_long += 1
                 continue
 
