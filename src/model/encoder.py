@@ -32,11 +32,52 @@ from torch import Tensor
 from src.model.lid import NUM_GROUPS
 
 
+class DropPath(nn.Module):
+    """Stochastic depth per sample (drop whole residual branches).
+
+    Improves generalization. Standard in modern ViT/Swin. Zero cost at
+    inference.
+    """
+
+    def __init__(self, drop_prob: float = 0.0):
+        super().__init__()
+        self.drop_prob = drop_prob
+
+    def forward(self, x: Tensor) -> Tensor:
+        if self.drop_prob == 0.0 or not self.training:
+            return x
+        keep = 1.0 - self.drop_prob
+        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+        mask = torch.empty(shape, dtype=x.dtype, device=x.device).bernoulli_(keep)
+        return x * mask / keep
+
+
+class LayerScale(nn.Module):
+    """Learned per-channel scalar applied to a residual branch.
+
+    Init near zero so the block starts near-identity. Stabilizes deep
+    training; standard in CaiT/ConvNeXt.
+    """
+
+    def __init__(self, dim: int, init_value: float = 1e-4):
+        super().__init__()
+        self.gamma = nn.Parameter(init_value * torch.ones(dim))
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.gamma * x
+
+
 class WindowedAttention(nn.Module):
-    """Shifted window attention on flattened 2D sequences (Swin-style)."""
+    """Shifted window attention on flattened 2D sequences (Swin-style).
+
+    Includes a learned relative position bias (per-head, per relative
+    (Δh, Δw) offset within the window) and optional QK-norm on the
+    query/key vectors before the dot product.
+    """
 
     def __init__(self, dim: int, num_heads: int,
-                 window_h: int = 2, window_w: int = 16, shift: bool = False):
+                 window_h: int = 2, window_w: int = 16, shift: bool = False,
+                 qk_norm: bool = True):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
@@ -47,6 +88,32 @@ class WindowedAttention(nn.Module):
         self.shift_w = window_w // 2 if shift else 0
         self.qkv = nn.Linear(dim, 3 * dim)
         self.proj = nn.Linear(dim, dim)
+
+        # QK-norm (applied per-head before the attention dot product)
+        if qk_norm:
+            self.q_norm = nn.LayerNorm(self.head_dim)
+            self.k_norm = nn.LayerNorm(self.head_dim)
+        else:
+            self.q_norm = nn.Identity()
+            self.k_norm = nn.Identity()
+
+        # Learned relative position bias table. Size = (2Wh-1)(2Ww-1) × heads.
+        n_rel = (2 * window_h - 1) * (2 * window_w - 1)
+        self.rel_pos_bias = nn.Parameter(torch.zeros(n_rel, num_heads))
+        nn.init.trunc_normal_(self.rel_pos_bias, std=0.02)
+
+        # Index table (Wh*Ww, Wh*Ww) → offset into rel_pos_bias
+        coords_h = torch.arange(window_h)
+        coords_w = torch.arange(window_w)
+        coords = torch.stack(torch.meshgrid([coords_h, coords_w], indexing="ij"))
+        coords_flat = coords.flatten(1)  # (2, Wh*Ww)
+        rel = coords_flat[:, :, None] - coords_flat[:, None, :]  # (2, N, N)
+        rel = rel.permute(1, 2, 0).contiguous()
+        rel[:, :, 0] += window_h - 1
+        rel[:, :, 1] += window_w - 1
+        rel[:, :, 0] *= 2 * window_w - 1
+        rel_index = rel.sum(-1)  # (N, N)
+        self.register_buffer("rel_pos_index", rel_index, persistent=False)
 
     def forward(self, x: Tensor, h: int, w: int) -> Tensor:
         B, N, C = x.shape
@@ -71,16 +138,28 @@ class WindowedAttention(nn.Module):
         # Attention
         qkv = self.qkv(x).reshape(x.shape[0], x.shape[1], 3, self.num_heads, self.head_dim)
         q, k, v = qkv.unbind(2)
+        q = self.q_norm(q)
+        k = self.k_norm(k)
+
+        # Relative position bias: (win_size, win_size, heads) → (heads, win, win)
+        win_size = self.window_h * self.window_w
+        rel_bias = self.rel_pos_bias[self.rel_pos_index.view(-1)]
+        rel_bias = rel_bias.view(win_size, win_size, -1).permute(2, 0, 1)
+        # Broadcast to (1, heads, win, win) for SDPA
+        rel_bias = rel_bias.unsqueeze(0).to(q.dtype)
 
         attn_mask = self._get_attn_mask(h, wp, x.device) if self.shift else None
         if attn_mask is not None:
             n_windows = nH * nW
             # Expand to (B*nH*nW, 1, win_size, win_size) for head broadcasting
             attn_mask = attn_mask.unsqueeze(1).repeat(x.shape[0] // n_windows, 1, 1, 1)
+            attn_bias = attn_mask.to(rel_bias.dtype) + rel_bias
+        else:
+            attn_bias = rel_bias
 
         out = F.scaled_dot_product_attention(
             q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2),
-            attn_mask=attn_mask)
+            attn_mask=attn_bias)
         out = out.transpose(1, 2).reshape(x.shape[0], x.shape[1], C)
         out = self.proj(out)
 
@@ -129,11 +208,15 @@ class ExpertBlock(nn.Module):
 
     Has N parallel attention+MLP experts. Each sample is routed to
     one expert based on its expert_id.
+
+    LayerScale + DropPath are applied per-sample on the residual branches
+    (shared across experts — they affect the residual, not the expert op).
     """
 
     def __init__(self, dim: int, num_heads: int, num_experts: int,
                  window_h: int = 2, window_w: int = 16, shift: bool = False,
-                 mlp_ratio: int = 2):
+                 mlp_ratio: int = 2, drop_path: float = 0.0,
+                 layer_scale_init: float = 1e-4):
         super().__init__()
         self.num_experts = num_experts
         self.norm1 = nn.LayerNorm(dim)
@@ -145,24 +228,32 @@ class ExpertBlock(nn.Module):
         self.expert_mlps = nn.ModuleList([
             MLP(dim, mlp_ratio) for _ in range(num_experts)
         ])
+        self.ls1 = LayerScale(dim, layer_scale_init)
+        self.ls2 = LayerScale(dim, layer_scale_init)
+        self.drop_path = DropPath(drop_path)
 
 
 class ConvStem(nn.Module):
     """Small plain-conv stem with two strided convs. No ResBlocks.
 
-    (B, 3, 32, W) → (B, out_ch, 8, W/2). Receptive field ~5-7 pixels so
-    boundary contamination is minimal before attention takes over.
+    (B, 3, 32, W) → (B, out_ch, 8, W/2). Kernels are asymmetric (3 high,
+    5 wide) — horizontal character strokes are wider than the vertical
+    downsample budget, so a wider kernel captures more of a stroke in one
+    shot. Receptive field after the stem:
+        height: 7 px (as before)
+        width:  ~9 px (slightly wider than the previous 5 px)
+    Still an order of magnitude smaller than HGNet's ~100-200 px.
     """
 
     def __init__(self, in_ch: int = 3, mid_ch: int = 64, out_ch: int = 128):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Conv2d(in_ch, mid_ch, kernel_size=3, stride=(2, 1),
-                      padding=1, bias=False),
+            nn.Conv2d(in_ch, mid_ch, kernel_size=(3, 5), stride=(2, 1),
+                      padding=(1, 2), bias=False),
             nn.GroupNorm(1, mid_ch),
             nn.GELU(),
-            nn.Conv2d(mid_ch, out_ch, kernel_size=3, stride=(2, 2),
-                      padding=1, bias=False),
+            nn.Conv2d(mid_ch, out_ch, kernel_size=(3, 5), stride=(2, 2),
+                      padding=(1, 2), bias=False),
             nn.GroupNorm(1, out_ch),
             nn.GELU(),
         )
@@ -180,7 +271,8 @@ class SWABlock(nn.Module):
 
     def __init__(self, dim: int, num_heads: int,
                  window_h: int, window_w: int, shift: bool,
-                 mlp_ratio: int = 2):
+                 mlp_ratio: int = 2, drop_path: float = 0.0,
+                 layer_scale_init: float = 1e-4):
         super().__init__()
         self.norm1 = nn.LayerNorm(dim)
         self.attn = WindowedAttention(
@@ -190,10 +282,13 @@ class SWABlock(nn.Module):
         hidden = dim * mlp_ratio
         self.mlp = nn.Sequential(
             nn.Linear(dim, hidden), nn.GELU(), nn.Linear(hidden, dim))
+        self.ls1 = LayerScale(dim, layer_scale_init)
+        self.ls2 = LayerScale(dim, layer_scale_init)
+        self.drop_path = DropPath(drop_path)
 
     def forward(self, x: Tensor, h: int, w: int) -> Tensor:
-        x = x + self.attn(self.norm1(x), h, w)
-        x = x + self.mlp(self.norm2(x))
+        x = x + self.drop_path(self.ls1(self.attn(self.norm1(x), h, w)))
+        x = x + self.drop_path(self.ls2(self.mlp(self.norm2(x))))
         return x
 
 
@@ -248,21 +343,26 @@ class GroupCTCModule(nn.Module):
 
 
 def _run_expert_block(block, x, expert_id, h, w, use_ckpt):
-    """Run one sample through a specific expert in an ExpertBlock."""
+    """Run one sample through a specific expert in an ExpertBlock.
+
+    Applies LayerScale and DropPath on both residual branches (same as a
+    standard modern transformer block, but the attn/mlp ops themselves are
+    expert-specific).
+    """
     normed = block.norm1(x)
     attn = block.expert_attns[expert_id]
     if use_ckpt:
         attn_out = ckpt_util.checkpoint(attn, normed, h, w, use_reentrant=True)
     else:
         attn_out = attn(normed, h, w)
-    x = x + attn_out.to(x.dtype)
+    x = x + block.drop_path(block.ls1(attn_out.to(x.dtype)))
     normed = block.norm2(x)
     mlp = block.expert_mlps[expert_id]
     if use_ckpt:
         mlp_out = ckpt_util.checkpoint(mlp, normed, use_reentrant=True)
     else:
         mlp_out = mlp(normed)
-    x = x + mlp_out.to(x.dtype)
+    x = x + block.drop_path(block.ls2(mlp_out.to(x.dtype)))
     return x
 
 
@@ -296,6 +396,12 @@ class LipiMoEEncoder(nn.Module):
         local_window_w: int = 16,
         wide_window_w: int = 64,
         mlp_ratio: int = 2,
+        drop_path_rate: float = 0.1,
+        # LayerScale init=1.0 is a no-op (identity). Reduce (e.g. 1e-2)
+        # only if you see training instability; on top of identity-init
+        # experts, small values scale expert gradients by the same factor
+        # and can starve MoE experts that already see only 1/N of data.
+        layer_scale_init: float = 1.0,
         num_groups: int = NUM_GROUPS,
         group_script_vocab_sizes: list[list[int]] | None = None,
         group_script_names: list[list[str]] | None = None,
@@ -338,10 +444,24 @@ class LipiMoEEncoder(nn.Module):
             "num_script_wide_blocks": num_script_wide_blocks,
             "local_window_w": local_window_w,
             "wide_window_w": wide_window_w,
-            "mlp_ratio": mlp_ratio, "num_groups": num_groups,
+            "mlp_ratio": mlp_ratio,
+            "drop_path_rate": drop_path_rate,
+            "layer_scale_init": layer_scale_init,
+            "num_groups": num_groups,
             "group_script_vocab_sizes": group_script_vocab_sizes,
             "group_script_names": group_script_names,
         }
+
+        # Drop-path schedule: linearly increase from 0 → drop_path_rate
+        # across all residual stages along a sample's path.
+        # Stages (parallel pairs count as one): shared_a, shared_b,
+        # group (local/wide parallel), script (local/wide parallel).
+        n_stages = (num_shared_a_blocks + num_shared_b_blocks
+                    + max(num_group_local_blocks, num_group_wide_blocks)
+                    + max(num_script_local_blocks, num_script_wide_blocks))
+        dp_schedule = [drop_path_rate * i / max(n_stages - 1, 1)
+                       for i in range(n_stages)]
+        dp_iter = iter(dp_schedule)
 
         # Convolutional stem: (B, 3, 32, W) → (B, stem_out_ch, 8, W/2)
         self.stem = ConvStem(in_ch=3, mid_ch=stem_mid_ch, out_ch=stem_out_ch)
@@ -351,7 +471,8 @@ class LipiMoEEncoder(nn.Module):
         self.shared_a = nn.ModuleList([
             SWABlock(dim=stem_out_ch, num_heads=max(stem_out_ch // 64, 1),
                      window_h=8, window_w=8, shift=(i % 2 == 1),
-                     mlp_ratio=mlp_ratio)
+                     mlp_ratio=mlp_ratio, drop_path=next(dp_iter),
+                     layer_scale_init=layer_scale_init)
             for i in range(num_shared_a_blocks)
         ])
 
@@ -367,9 +488,15 @@ class LipiMoEEncoder(nn.Module):
         self.shared_b = nn.ModuleList([
             SWABlock(dim=dim, num_heads=max(dim // 64, 1),
                      window_h=1, window_w=16, shift=(i % 2 == 1),
-                     mlp_ratio=mlp_ratio)
+                     mlp_ratio=mlp_ratio, drop_path=next(dp_iter),
+                     layer_scale_init=layer_scale_init)
             for i in range(num_shared_b_blocks)
         ])
+
+        # Parallel stages share one drop-path rate per stage so local/wide
+        # streams have matched residual scaling.
+        group_dp = next(dp_iter) if max(num_group_local_blocks, num_group_wide_blocks) > 0 else 0.0
+        script_dp = next(dp_iter) if max(num_script_local_blocks, num_script_wide_blocks) > 0 else 0.0
 
         # LID-1: per-frame group classification
         self.group_h_pool = nn.AdaptiveAvgPool2d((1, None))
@@ -387,13 +514,15 @@ class LipiMoEEncoder(nn.Module):
         self.group_local_blocks = nn.ModuleList([
             ExpertBlock(dim=dim, num_heads=dim // 64, num_experts=num_groups,
                         window_h=1, window_w=local_window_w, shift=(i % 2 == 1),
-                        mlp_ratio=mlp_ratio)
+                        mlp_ratio=mlp_ratio, drop_path=group_dp,
+                        layer_scale_init=layer_scale_init)
             for i in range(num_group_local_blocks)
         ])
         self.group_wide_blocks = nn.ModuleList([
             ExpertBlock(dim=dim, num_heads=dim // 64, num_experts=num_groups,
                         window_h=1, window_w=wide_window_w, shift=(i % 2 == 1),
-                        mlp_ratio=mlp_ratio)
+                        mlp_ratio=mlp_ratio, drop_path=group_dp,
+                        layer_scale_init=layer_scale_init)
             for i in range(num_group_wide_blocks)
         ])
         for block_list in [self.group_local_blocks, self.group_wide_blocks]:
@@ -437,14 +566,16 @@ class LipiMoEEncoder(nn.Module):
             ExpertBlock(dim=dim, num_heads=dim // 64,
                         num_experts=self.total_scripts,
                         window_h=1, window_w=local_window_w, shift=(i % 2 == 1),
-                        mlp_ratio=mlp_ratio)
+                        mlp_ratio=mlp_ratio, drop_path=script_dp,
+                        layer_scale_init=layer_scale_init)
             for i in range(num_script_local_blocks)
         ])
         self.script_wide_blocks = nn.ModuleList([
             ExpertBlock(dim=dim, num_heads=dim // 64,
                         num_experts=self.total_scripts,
                         window_h=1, window_w=wide_window_w, shift=(i % 2 == 1),
-                        mlp_ratio=mlp_ratio)
+                        mlp_ratio=mlp_ratio, drop_path=script_dp,
+                        layer_scale_init=layer_scale_init)
             for i in range(num_script_wide_blocks)
         ])
         for block_list in [self.script_local_blocks, self.script_wide_blocks]:
