@@ -79,19 +79,20 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
 
         with torch.amp.autocast(device_type, enabled=use_amp, dtype=amp_dtype):
             out = model(imgs, group_ids=None)
-            # Also run with ground truth routing to compute val loss
+            # Also run with ground truth routing to compute val loss.
+            # Build gl_for_model and sl_frames from segment metadata using
+            # the same offset→frame arithmetic as compute_ctc_loss_segments,
+            # so routing labels and CTC segment ranges agree frame-for-frame.
             T_est = imgs.shape[3] // 2
-            gl_frames_gt = group_labels[:, ::2][:, :T_est]
-            # Replace padding (-100) with blank for model routing
-            gl_for_model = gl_frames_gt.clone()
-            gl_for_model[gl_for_model < 0] = n_groups  # n_groups = blank/whitespace
-            # Build per-frame script labels from segment metadata
+            gl_for_model = torch.full((B, T_est), n_groups,
+                                      dtype=torch.long, device=device)
             sl_frames = torch.zeros(B, T_est, dtype=torch.long, device=device)
-            for b in range(B):
-                if batch_segments is not None:
+            if batch_segments is not None:
+                for b in range(B):
                     for seg in batch_segments[b]:
                         fs = seg["offset"] // 2
                         fe = min((seg["offset"] + seg["width"] + 1) // 2, T_est)
+                        gl_for_model[b, fs:fe] = seg["group_id"]
                         sl_frames[b, fs:fe] = seg.get("script_id", 0)
             out_gt = model(imgs, group_ids=gl_for_model, script_ids=sl_frames)
         # Per-segment CTC val loss (matches training, works for mixed lines)
@@ -114,7 +115,10 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
                     if not sname:
                         continue
                     ids = _enc(seg["text"], sname)
-                    if not ids or len(ids) > seg_len:
+                    if not ids:
+                        continue
+                    n_repeats = sum(1 for i in range(1, len(ids)) if ids[i] == ids[i - 1])
+                    if seg_len < len(ids) + n_repeats:
                         continue
                     seg_logits = out_gt["logits"][b, fs:fe, :vs]
                     seg_lp = seg_logits.float().log_softmax(dim=-1).unsqueeze(1)
