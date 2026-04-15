@@ -145,17 +145,21 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
                 g_lid_frame_total[g] += g_frame_mask.sum().item()
                 g_lid_frame_correct[g] += (frame_preds[g_frame_mask] == g).sum().item()
 
-        # LID-2 per multi-script group
-        for g_idx, script_logits, group_mask in out["script_logits_per_group"]:
-            if script_logits is None:
+        # LID-2 per-frame accuracy within multi-script groups.
+        # Model emits {g: (B, T, n_scripts)} per-frame logits for multi-
+        # script groups only. Score frames whose GT group is g.
+        T_l2 = frame_preds.shape[1]
+        sl_frames_gt = sl_frames[:, :T_l2]
+        for g_int, lid2_log in out.get("lid2_logits_per_group", {}).items():
+            g_idx = int(g_int)
+            g_mask = (gl_frames == g_idx)  # frames whose GT group is g
+            if not g_mask.any():
                 continue
-            pred_scripts = script_logits.argmax(-1)
-            true_scripts = sids_dev[group_mask]
-            # All samples in this group were routed here by frame predictions —
-            # evaluate LID-2 on all of them
+            pred_scripts = lid2_log[:, :T_l2].argmax(dim=-1)[g_mask]  # (N_frames,)
+            true_scripts = sl_frames_gt[g_mask]
             lid2_correct += (pred_scripts == true_scripts).sum().item()
-            lid2_total += true_scripts.shape[0]
-            for ls in range(script_logits.shape[-1]):
+            lid2_total += true_scripts.numel()
+            for ls in range(lid2_log.shape[-1]):
                 s_mask = (true_scripts == ls)
                 if s_mask.any():
                     key = (g_idx, ls)
