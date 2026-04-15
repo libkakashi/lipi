@@ -292,32 +292,27 @@ class ExpertBlock(nn.Module):
 
 
 class ConvStem(nn.Module):
-    """Three-conv plain stem. No ResBlocks, no inverted bottleneck.
+    """Two-conv plain stem ending at dim=128. No ResBlocks.
 
-    Progressive channel growth with one downsample per conv:
-        Conv 1: 3   → 64,   stride (2, 1), 3×3 kernel  →  H 32→16
-        Conv 2: 64  → 128,  stride (2, 1), 3×3 kernel  →  H 16→8
-        Conv 3: 128 → out,  stride (1, 2), 3×3 kernel  →  W→W/2
+    Spatial feature extraction in 2 convs (dim 3→64→out):
+        Conv 1: 3  → 64,  stride (2, 1), 3×3 kernel  →  H 32→16
+        Conv 2: 64 → out, stride (2, 2), 3×3 kernel  →  H 16→8, W→W/2
 
-    3×3 kernels (not 3×5) keep pixel-mixing tight — essential for clean
-    routing boundaries. Receptive field at output: ~11 px H × 7 px W.
+    3×3 kernels keep RF tight for clean routing boundaries:
+    after stem RF ≈ 7 px H × 5 px W.
 
-    Default out_ch=256 matches the shared SWA dim so no projection is
-    needed at the stem boundary.
+    Default out_ch=128 keeps SWA-A compute modest; capacity is added via
+    shared_mlp_ratio=4 on the attention blocks instead of widening here.
     """
 
-    def __init__(self, in_ch: int = 3, out_ch: int = 256):
+    def __init__(self, in_ch: int = 3, out_ch: int = 128):
         super().__init__()
         self.net = nn.Sequential(
             nn.Conv2d(in_ch, 64, kernel_size=3, stride=(2, 1),
                       padding=1, bias=False),
             nn.GroupNorm(1, 64),
             nn.GELU(),
-            nn.Conv2d(64, 128, kernel_size=3, stride=(2, 1),
-                      padding=1, bias=False),
-            nn.GroupNorm(1, 128),
-            nn.GELU(),
-            nn.Conv2d(128, out_ch, kernel_size=3, stride=(1, 2),
+            nn.Conv2d(64, out_ch, kernel_size=3, stride=(2, 2),
                       padding=1, bias=False),
             nn.GroupNorm(1, out_ch),
             nn.GELU(),
@@ -491,7 +486,7 @@ class LipiMoEEncoder(nn.Module):
     def __init__(
         self,
         dim: int = 256,
-        stem_out_ch: int = 256,
+        stem_out_ch: int = 128,
         num_shared_a_blocks: int = 2,
         num_shared_b_blocks: int = 2,
         num_group_local_blocks: int = 1,
@@ -501,6 +496,7 @@ class LipiMoEEncoder(nn.Module):
         local_window_w: int = 16,
         wide_window_w: int = 64,
         mlp_ratio: int = 2,
+        shared_mlp_ratio: int = 4,
         drop_path_rate: float = 0.1,
         # LayerScale init=1.0 is a no-op (identity). Reduce (e.g. 1e-2)
         # only if you see training instability; on top of identity-init
@@ -550,6 +546,7 @@ class LipiMoEEncoder(nn.Module):
             "local_window_w": local_window_w,
             "wide_window_w": wide_window_w,
             "mlp_ratio": mlp_ratio,
+            "shared_mlp_ratio": shared_mlp_ratio,
             "drop_path_rate": drop_path_rate,
             "layer_scale_init": layer_scale_init,
             "num_groups": num_groups,
@@ -576,7 +573,7 @@ class LipiMoEEncoder(nn.Module):
         self.shared_a = nn.ModuleList([
             SWABlock(dim=stem_out_ch, num_heads=max(stem_out_ch // 64, 1),
                      window_h=8, window_w=8, shift=(i % 2 == 1),
-                     mlp_ratio=mlp_ratio, drop_path=next(dp_iter),
+                     mlp_ratio=shared_mlp_ratio, drop_path=next(dp_iter),
                      layer_scale_init=layer_scale_init)
             for i in range(num_shared_a_blocks)
         ])
@@ -593,7 +590,7 @@ class LipiMoEEncoder(nn.Module):
         self.shared_b = nn.ModuleList([
             SWABlock(dim=dim, num_heads=max(dim // 64, 1),
                      window_h=1, window_w=16, shift=(i % 2 == 1),
-                     mlp_ratio=mlp_ratio, drop_path=next(dp_iter),
+                     mlp_ratio=shared_mlp_ratio, drop_path=next(dp_iter),
                      layer_scale_init=layer_scale_init)
             for i in range(num_shared_b_blocks)
         ])
