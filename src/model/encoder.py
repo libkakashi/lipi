@@ -291,6 +291,23 @@ class ExpertBlock(nn.Module):
         self.drop_path = DropPath(drop_path)
 
 
+def _patch_merge_h(x: Tensor, h: int, w: int, proj: nn.Linear) -> tuple[Tensor, int]:
+    """Halve h by concatenating adjacent vertical row pairs, then project.
+
+    Input:  x of shape (B, h*w, C), h must be even
+    Output: (x_new, new_h) where x_new is (B, (h//2)*w, proj.out_features)
+
+    This is Swin-style patch merging restricted to the H axis — width
+    is preserved. Each new row combines two source rows channel-wise,
+    then the linear projection learns which features to keep.
+    """
+    assert h % 2 == 0, f"h must be even for patch merge, got {h}"
+    B, _, C = x.shape
+    x = x.reshape(B, h // 2, 2, w, C).permute(0, 1, 3, 2, 4)
+    x = x.reshape(B, (h // 2) * w, 2 * C)
+    return proj(x), h // 2
+
+
 class ConvStem(nn.Module):
     """Two-conv plain stem ending at dim=128. No ResBlocks.
 
@@ -568,32 +585,35 @@ class LipiMoEEncoder(nn.Module):
         # Convolutional stem: (B, 3, 32, W) → (B, stem_out_ch, 8, W/2)
         self.stem = ConvStem(in_ch=3, out_ch=stem_out_ch)
 
-        # Shared SWA-A at (h=8, w=W/2), dim=stem_out_ch. Window 8×8 covers
-        # the full height so attention sees vertical character extent.
+        # Shared SWA-A at (h=8, w=W/2), dim=stem_out_ch. Window 8×16:
+        # full vertical extent × 2-character horizontal context.
         self.shared_a = nn.ModuleList([
             SWABlock(dim=stem_out_ch, num_heads=max(stem_out_ch // 64, 1),
-                     window_h=8, window_w=8, shift=(i % 2 == 1),
+                     window_h=8, window_w=16, shift=(i % 2 == 1),
                      mlp_ratio=shared_mlp_ratio, drop_path=next(dp_iter),
                      layer_scale_init=layer_scale_init)
             for i in range(num_shared_a_blocks)
         ])
 
-        # Collapse h=8 → 1 via Swin-style patch merging: concatenate the 8
-        # vertical tokens channel-wise (dim 128 → 1024) and project back to
-        # dim. Strictly more general than average-pooling — the Linear can
-        # learn per-row weighting (e.g., weight middle rows more for
-        # x-height-dominant scripts).
+        # Patch-merge (h=8 → 2): concat 4 adjacent rows channel-wise,
+        # project to dim. Drops vertical resolution by 4× but keeps
+        # learned weighting across the original rows.
         self._post_stem_h = 8  # stem downsamples 32px input by 4x
-        self.proj_a = nn.Linear(stem_out_ch * self._post_stem_h, dim)
+        self.merge_a = nn.Linear(stem_out_ch * 4, dim)  # 4 rows → dim
 
-        # Shared SWA-B at (h=1, w=W/2), dim. Pure horizontal context.
+        # Shared SWA-B at (h=2, w=W/2), dim. Window 2×16:
+        # full vertical extent (top+bottom half of char) × 2-char horizontal.
         self.shared_b = nn.ModuleList([
             SWABlock(dim=dim, num_heads=max(dim // 64, 1),
-                     window_h=1, window_w=16, shift=(i % 2 == 1),
+                     window_h=2, window_w=16, shift=(i % 2 == 1),
                      mlp_ratio=shared_mlp_ratio, drop_path=next(dp_iter),
                      layer_scale_init=layer_scale_init)
             for i in range(num_shared_b_blocks)
         ])
+
+        # Patch-merge (h=2 → 1): concat 2 rows → project. Final collapse
+        # to frame sequence before experts.
+        self.merge_b = nn.Linear(dim * 2, dim)
 
         # Parallel stages share one drop-path rate per stage so local/wide
         # streams have matched residual scaling.
@@ -747,18 +767,22 @@ class LipiMoEEncoder(nn.Module):
         for blk in self.shared_a:
             x = blk(x, h, w)
 
-        # Patch-merge h=8 → 1: concatenate vertical tokens channel-wise,
-        # then project to dim. All downstream stages run at h=1.
+        # Patch-merge 8 → 2 (4× h-downsample): concat 4 adjacent rows,
+        # project to dim. One intermediate stage (h=2) with attention
+        # before the final collapse.
         assert h == self._post_stem_h, \
             f"expected post-stem height {self._post_stem_h}, got {h}"
-        x = x.reshape(B, h, w, C).permute(0, 2, 1, 3).reshape(B, w, h * C)
-        x = self.proj_a(x)  # (B, w, dim)
-        h = 1
+        x = x.reshape(B, 2, 4, w, C).permute(0, 1, 3, 2, 4).reshape(B, 2 * w, 4 * C)
+        x = self.merge_a(x)  # (B, 2*w, dim)
+        h = 2
 
-        # Shared SWA-B at (h=1, w=W/2)
+        # Shared SWA-B at (h=2, w=W/2), dim
         d = x.shape[-1]
         for blk in self.shared_b:
             x = blk(x, h, w)
+
+        # Patch-merge 2 → 1: concat 2 rows, project to dim.
+        x, h = _patch_merge_h(x, h, w, self.merge_b)
 
         # LID-1: per-frame group prediction
         d = x.shape[-1]
