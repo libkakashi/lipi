@@ -26,7 +26,6 @@ Architecture:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.utils.checkpoint as ckpt_util
 from torch import Tensor
 
 from src.model.lid import NUM_GROUPS
@@ -391,7 +390,7 @@ def _scatter_segments(
         x_out[b, mask[b]] = batch_out[i, :sl]
 
 
-def _run_expert_block(block, x, expert_id, h, w, use_ckpt):
+def _run_expert_block(block, x, expert_id, h, w):
     """Run one sample through a specific expert in an ExpertBlock.
 
     Applies LayerScale and DropPath on both residual branches (same as a
@@ -400,17 +399,11 @@ def _run_expert_block(block, x, expert_id, h, w, use_ckpt):
     """
     normed = block.norm1(x)
     attn = block.expert_attns[expert_id]
-    if use_ckpt:
-        attn_out = ckpt_util.checkpoint(attn, normed, h, w, use_reentrant=True)
-    else:
-        attn_out = attn(normed, h, w)
+    attn_out = attn(normed, h, w)
     x = x + block.drop_path(block.ls1(attn_out.to(x.dtype)))
     normed = block.norm2(x)
     mlp = block.expert_mlps[expert_id]
-    if use_ckpt:
-        mlp_out = ckpt_util.checkpoint(mlp, normed, use_reentrant=True)
-    else:
-        mlp_out = mlp(normed)
+    mlp_out = mlp(normed)
     x = x + block.drop_path(block.ls2(mlp_out.to(x.dtype)))
     return x
 
@@ -681,7 +674,6 @@ class LipiMoEEncoder(nn.Module):
         detach_for_experts: bool = False,
     ) -> dict:
         B = images.shape[0]
-        use_ckpt = self.training and torch.is_grad_enabled()
 
         x = images.float() / 255.0 if images.dtype == torch.uint8 else images
 
@@ -750,11 +742,11 @@ class LipiMoEEncoder(nn.Module):
 
             local = batch_x
             for block in self.group_local_blocks:
-                local = _run_expert_block(block, local, g, 1, max_len, use_ckpt)
+                local = _run_expert_block(block, local, g, 1, max_len)
 
             wide = batch_x
             for block in self.group_wide_blocks:
-                wide = _run_expert_block(block, wide, g, 1, max_len, use_ckpt)
+                wide = _run_expert_block(block, wide, g, 1, max_len)
 
             comb = torch.cat([local, wide], dim=-1)
             agg = self.group_aggregates[g](comb)
@@ -814,11 +806,11 @@ class LipiMoEEncoder(nn.Module):
 
             local = batch_x
             for block in self.script_local_blocks:
-                local = _run_expert_block(block, local, s, 1, max_len, use_ckpt)
+                local = _run_expert_block(block, local, s, 1, max_len)
 
             wide = batch_x
             for block in self.script_wide_blocks:
-                wide = _run_expert_block(block, wide, s, 1, max_len, use_ckpt)
+                wide = _run_expert_block(block, wide, s, 1, max_len)
 
             comb = torch.cat([local, wide], dim=-1)
             agg = self.script_aggregates[s](comb)
