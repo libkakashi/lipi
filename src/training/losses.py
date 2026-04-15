@@ -104,26 +104,27 @@ def compute_ctc_loss_segments(
     group_script_names: list[list[str]],
     group_script_vocabs: list[list[int]],
 ) -> Tensor:
-    """Per-segment CTC loss for mixed-script support.
+    """Per-segment CTC loss, batched by (group, script) for speed.
 
     Each image has segments: [{group_id, script_id, text, width, offset}, ...]
     Each segment's text is encoded with its script, and CTC loss is computed
     on the corresponding frame slice using the correct group's vocab.
+
+    Segments with the same (group, script) are padded to max length and
+    processed in a single F.ctc_loss call instead of one call per segment.
     """
     device = logits.device
     B, T, _ = logits.shape
-    ctc_loss = torch.zeros(1, device=device)
-    ctc_chars = 0
 
+    # Group valid segments by (group, script) for batched CTC
+    buckets: dict[tuple[int, int], list[dict]] = {}
     skipped_no_script = 0
     skipped_no_ids = 0
     skipped_too_long = 0
     total_segs = 0
 
     for b in range(B):
-        segs = segments_batch[b]
-
-        for seg in segs:
+        for seg in segments_batch[b]:
             total_segs += 1
             text = seg["text"]
             g = seg["group_id"]
@@ -134,14 +135,12 @@ def compute_ctc_loss_segments(
             if not text or width_px == 0:
                 continue
 
-            # Pixel range → frame range (W → W/2 downsampling)
             frame_start = offset_px // 2
             frame_end = min((offset_px + width_px + 1) // 2, T)
             seg_len = frame_end - frame_start
             if seg_len < 1:
                 continue
 
-            # Encode text with correct script
             if g >= len(group_script_names) or s >= len(group_script_names[g]):
                 skipped_no_script += 1
                 continue
@@ -153,38 +152,66 @@ def compute_ctc_loss_segments(
             if not ids:
                 skipped_no_ids += 1
                 continue
-            # CTC requires T >= U + (# adjacent repeats, which need blanks
-            # between them). Near-degenerate segments (T ≈ U) produce
-            # extreme finite losses that dominate the batch mean.
             n_repeats = sum(1 for i in range(1, len(ids)) if ids[i] == ids[i - 1])
-            min_T = len(ids) + n_repeats
-            if seg_len < min_T:
+            if seg_len < len(ids) + n_repeats:
                 skipped_too_long += 1
                 continue
-
             vs = group_script_vocabs[g][s] if g < len(group_script_vocabs) and s < len(group_script_vocabs[g]) else 0
             if vs == 0:
                 continue
 
-            # CTC on this segment's frames
-            seg_logits = logits[b, frame_start:frame_end, :vs]  # (seg_len, vs)
-            seg_log_probs = seg_logits.float().log_softmax(dim=-1).unsqueeze(1)  # (seg_len, 1, vs)
-            seg_targets = torch.tensor(ids, dtype=torch.long, device=device)
-            seg_input_len = torch.tensor([seg_len], dtype=torch.long, device=device)
-            seg_target_len = torch.tensor([len(ids)], dtype=torch.long, device=device)
+            buckets.setdefault((g, s), []).append({
+                "b": b, "frame_start": frame_start, "frame_end": frame_end,
+                "seg_len": seg_len, "ids": ids, "vs": vs,
+            })
 
-            # PyTorch CTC isn't on MPS — use pure-PyTorch fallback there
-            if seg_log_probs.device.type == "mps":
-                seg_ctc = _ctc_loss_pure(seg_log_probs, seg_targets, blank=0)
-            else:
-                seg_ctc = F.ctc_loss(
-                    seg_log_probs, seg_targets, seg_input_len, seg_target_len,
-                    blank=0, reduction="sum", zero_infinity=True)
-            ctc_loss = ctc_loss + seg_ctc
-            ctc_chars += len(ids)
+    ctc_loss = torch.zeros(1, device=device)
+    ctc_chars = 0
+
+    for (g, s), segs in buckets.items():
+        vs = segs[0]["vs"]  # all segments in this bucket share vs
+        N = len(segs)
+        max_T = max(sg["seg_len"] for sg in segs)
+        max_U = max(len(sg["ids"]) for sg in segs)
+
+        # Stack logits: (max_T, N, vs) — CTC expects (T, N, V)
+        batched_logits = torch.zeros(max_T, N, vs, device=device, dtype=logits.dtype)
+        input_lens = torch.zeros(N, dtype=torch.long, device=device)
+        target_lens = torch.zeros(N, dtype=torch.long, device=device)
+        # Concatenated targets (1-D) — CTC uses target_lens to know boundaries
+        concat_targets = []
+        for i, sg in enumerate(segs):
+            b = sg["b"]
+            fs, fe = sg["frame_start"], sg["frame_end"]
+            seg_len = sg["seg_len"]
+            batched_logits[:seg_len, i, :] = logits[b, fs:fe, :vs]
+            input_lens[i] = seg_len
+            target_lens[i] = len(sg["ids"])
+            concat_targets.extend(sg["ids"])
+
+        log_probs = batched_logits.float().log_softmax(dim=-1)
+        targets = torch.tensor(concat_targets, dtype=torch.long, device=device)
+
+        if device.type == "mps":
+            # MPS fallback: loop (pure-PyTorch CTC isn't easily batched)
+            offset = 0
+            for i in range(N):
+                U = target_lens[i].item()
+                T_i = input_lens[i].item()
+                lp_i = log_probs[:T_i, i:i+1, :]
+                tgt_i = targets[offset:offset + U]
+                offset += U
+                ctc_loss = ctc_loss + _ctc_loss_pure(lp_i, tgt_i, blank=0)
+        else:
+            # Batched CTC — single kernel call for all segments in this bucket
+            ctc_loss = ctc_loss + F.ctc_loss(
+                log_probs, targets, input_lens, target_lens,
+                blank=0, reduction="sum", zero_infinity=True)
+
+        ctc_chars += sum(len(sg["ids"]) for sg in segs)
 
     skip_total = skipped_no_script + skipped_no_ids + skipped_too_long
-    if skip_total > total_segs * 0.05:  # only warn if >5% skipped
+    if skip_total > total_segs * 0.05:
         print(f"    [CTC segments] {ctc_chars} chars from {total_segs} segs | "
               f"skipped: {skipped_no_script} no_script, {skipped_no_ids} no_ids, "
               f"{skipped_too_long} too_long", flush=True)
