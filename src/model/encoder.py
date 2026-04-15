@@ -29,7 +29,11 @@ import torch.nn.functional as F
 from torch import Tensor
 
 try:
-    from torch.nn.attention.flex_attention import flex_attention
+    from torch.nn.attention.flex_attention import flex_attention as _raw_flex_attention
+    # flex_attention requires torch.compile to generate the fused flash-style
+    # kernel — without compile it materializes the full score matrix (slow
+    # and defeats the purpose). dynamic=True so variable W doesn't recompile.
+    flex_attention = torch.compile(_raw_flex_attention, dynamic=True)
     _HAS_FLEX_ATTENTION = True
 except ImportError:
     flex_attention = None
