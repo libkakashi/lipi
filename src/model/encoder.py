@@ -30,9 +30,15 @@ from torch import Tensor
 
 try:
     from torch.nn.attention.flex_attention import flex_attention as _raw_flex_attention
+    import torch._dynamo.config as _dynamo_cfg
     # flex_attention requires torch.compile to generate the fused flash-style
-    # kernel — without compile it materializes the full score matrix (slow
-    # and defeats the purpose). dynamic=True so variable W doesn't recompile.
+    # kernel — without compile it materializes the full score matrix.
+    # dynamic=True so variable W doesn't recompile, and bump the recompile
+    # limit because each distinct (window_h, window_w, shift) combination
+    # specializes the compiled function. We have ~8 unique attention shapes
+    # across the model (stem SWA 8×16, 2×16, experts 1×16, 1×64) × shift
+    # on/off = up to 16 variants.
+    _dynamo_cfg.recompile_limit = max(getattr(_dynamo_cfg, "recompile_limit", 8), 32)
     flex_attention = torch.compile(_raw_flex_attention, dynamic=True)
     _HAS_FLEX_ATTENTION = True
 except ImportError:
