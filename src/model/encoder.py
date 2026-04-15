@@ -28,6 +28,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
+try:
+    from torch.nn.attention.flex_attention import flex_attention
+    _HAS_FLEX_ATTENTION = True
+except ImportError:
+    flex_attention = None
+    _HAS_FLEX_ATTENTION = False
+
 from src.model.lid import NUM_GROUPS
 
 
@@ -134,34 +141,23 @@ class WindowedAttention(nn.Module):
         nH = h // self.window_h
         nW = wp // self.window_w
         x = x.reshape(B, nH, self.window_h, nW, self.window_w, C)
-        x = x.permute(0, 1, 3, 2, 4, 5).reshape(B * nH * nW, self.window_h * self.window_w, C)
+        x = x.permute(0, 1, 3, 2, 4, 5).reshape(
+            B * nH * nW, self.window_h * self.window_w, C)
 
         # Attention
-        qkv = self.qkv(x).reshape(x.shape[0], x.shape[1], 3, self.num_heads, self.head_dim)
+        qkv = self.qkv(x).reshape(
+            x.shape[0], x.shape[1], 3, self.num_heads, self.head_dim)
         q, k, v = qkv.unbind(2)
         q = self.q_norm(q)
         k = self.k_norm(k)
 
-        # Relative position bias: (win_size, win_size, heads) → (heads, win, win)
-        win_size = self.window_h * self.window_w
-        rel_bias = self.rel_pos_bias[self.rel_pos_index.view(-1)]
-        rel_bias = rel_bias.view(win_size, win_size, -1).permute(2, 0, 1)
-        # Broadcast to (1, heads, win, win) for SDPA
-        rel_bias = rel_bias.unsqueeze(0).to(q.dtype)
+        # flex_attention expects (B, H, S, D)
+        q_fa = q.transpose(1, 2).contiguous()
+        k_fa = k.transpose(1, 2).contiguous()
+        v_fa = v.transpose(1, 2).contiguous()
 
-        attn_mask = self._get_attn_mask(h, wp, x.device) if self.shift else None
-        if attn_mask is not None:
-            n_windows = nH * nW
-            # Expand to (B*nH*nW, 1, win_size, win_size) for head broadcasting
-            attn_mask = attn_mask.unsqueeze(1).repeat(x.shape[0] // n_windows, 1, 1, 1)
-            attn_bias = attn_mask.to(rel_bias.dtype) + rel_bias
-        else:
-            attn_bias = rel_bias
-
-        out = F.scaled_dot_product_attention(
-            q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2),
-            attn_mask=attn_bias)
-        out = out.transpose(1, 2).reshape(x.shape[0], x.shape[1], C)
+        out_fa = self._attend(q_fa, k_fa, v_fa, nW)
+        out = out_fa.transpose(1, 2).reshape(x.shape[0], x.shape[1], C)
         out = self.proj(out)
 
         # Reverse window partition
@@ -178,18 +174,79 @@ class WindowedAttention(nn.Module):
 
         return out.reshape(B, N, C)
 
-    def _get_attn_mask(self, h: int, wp: int, device) -> Tensor | None:
-        if not self.shift:
-            return None
-        mask = torch.zeros(1, h, wp, device=device)
-        mask[:, :, -self.shift_w:] = 1
-        nH = h // self.window_h
-        nW = wp // self.window_w
-        mask = mask.reshape(1, nH, self.window_h, nW, self.window_w, 1)
-        mask = mask.permute(0, 1, 3, 2, 4, 5).reshape(nH * nW, self.window_h * self.window_w)
-        attn_mask = mask.unsqueeze(2) - mask.unsqueeze(1)
-        attn_mask = attn_mask.masked_fill(attn_mask != 0, -100.0).masked_fill(attn_mask == 0, 0.0)
-        return attn_mask
+    def _attend(self, q: Tensor, k: Tensor, v: Tensor, nW: int) -> Tensor:
+        """Run attention with relpos bias + (optional) shifted-window mask.
+
+        Uses flex_attention so the relpos bias goes through a score_mod
+        closure and the mask goes through a mask_mod closure — both
+        compile-friendly and let the flash-attention fast path stay on.
+
+        Falls back to SDPA with an explicit attn_mask if flex_attention
+        isn't available (older PyTorch).
+        """
+        rel_pos_bias = self.rel_pos_bias  # (n_rel, heads)
+        rel_pos_index = self.rel_pos_index  # (win_size, win_size) long
+        win_w = self.window_w
+        shift_w = self.shift_w
+        shift = self.shift
+
+        # flex_attention requires CUDA for backward. Fall back to SDPA on CPU.
+        use_flex = _HAS_FLEX_ATTENTION and q.device.type == "cuda"
+
+        if use_flex:
+            # Score mod: add per-head relative position bias at (q_idx, kv_idx).
+            def score_mod(score, b, h_idx, q_idx, kv_idx):
+                idx = rel_pos_index[q_idx, kv_idx]
+                return score + rel_pos_bias[idx, h_idx].to(score.dtype)
+
+            if shift and shift_w > 0:
+                # Wrapped columns (came from the opposite side via torch.roll)
+                # are the last shift_w positions of each row in each window.
+                # Only the last window in a row contains wrapped positions —
+                # i.e., the window whose index along width is nW-1. We flatten
+                # batch so b encodes (image, window_col). nH is always 1 in v5,
+                # so b % nW = window column.
+                def mask_mod(b, h_idx, q_idx, kv_idx):
+                    col_q = q_idx % win_w
+                    col_k = kv_idx % win_w
+                    # "Wrapped" if this is the last window AND col ∈ [win_w-shift_w, win_w)
+                    is_last_window = (b % nW) == (nW - 1)
+                    q_wrapped = is_last_window & (col_q >= (win_w - shift_w))
+                    k_wrapped = is_last_window & (col_k >= (win_w - shift_w))
+                    return q_wrapped == k_wrapped
+
+                from torch.nn.attention.flex_attention import create_block_mask
+                B, H, S, _ = q.shape
+                block_mask = create_block_mask(
+                    mask_mod, B=B, H=None, Q_LEN=S, KV_LEN=S, device=q.device)
+                return flex_attention(q, k, v, score_mod=score_mod,
+                                      block_mask=block_mask)
+
+            return flex_attention(q, k, v, score_mod=score_mod)
+
+        # Fallback: SDPA with explicit additive mask (math backend).
+        win_size = self.window_h * self.window_w
+        rel_bias = rel_pos_bias[rel_pos_index.view(-1)]
+        rel_bias = rel_bias.view(win_size, win_size, -1).permute(2, 0, 1)
+        rel_bias = rel_bias.unsqueeze(0).to(q.dtype)
+
+        if shift and shift_w > 0:
+            # Build per-window shift mask as before
+            # Wrapped positions: last shift_w columns of the last window.
+            N_b = q.shape[0]  # B*nW*nH
+            device = q.device
+            mask = torch.zeros(nW, win_size, device=device, dtype=q.dtype)
+            mask[-1, -shift_w:] = 1  # last window, last shift_w columns wrapped
+            diff = mask.unsqueeze(2) - mask.unsqueeze(1)  # (nW, W, W)
+            shift_bias = diff.masked_fill(diff != 0, -100.0).masked_fill(
+                diff == 0, 0.0).to(q.dtype)
+            # Repeat across sample batches: (B*nW, 1, W, W)
+            reps = N_b // nW
+            full_bias = rel_bias + shift_bias.unsqueeze(1).repeat(reps, 1, 1, 1)
+        else:
+            full_bias = rel_bias
+
+        return F.scaled_dot_product_attention(q, k, v, attn_mask=full_bias)
 
 
 class MLP(nn.Module):
