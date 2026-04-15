@@ -292,26 +292,33 @@ class ExpertBlock(nn.Module):
 
 
 class ConvStem(nn.Module):
-    """Small plain-conv stem with two strided convs. No ResBlocks.
+    """Three-conv plain stem. No ResBlocks, no inverted bottleneck.
 
-    (B, 3, 32, W) → (B, out_ch, 8, W/2). Kernels are asymmetric (3 high,
-    5 wide) — horizontal character strokes are wider than the vertical
-    downsample budget, so a wider kernel captures more of a stroke in one
-    shot. Receptive field after the stem:
-        height: 7 px (as before)
-        width:  ~9 px (slightly wider than the previous 5 px)
-    Still an order of magnitude smaller than HGNet's ~100-200 px.
+    Progressive channel growth with one downsample per conv:
+        Conv 1: 3   → 64,   stride (2, 1), 3×3 kernel  →  H 32→16
+        Conv 2: 64  → 128,  stride (2, 1), 3×3 kernel  →  H 16→8
+        Conv 3: 128 → out,  stride (1, 2), 3×3 kernel  →  W→W/2
+
+    3×3 kernels (not 3×5) keep pixel-mixing tight — essential for clean
+    routing boundaries. Receptive field at output: ~11 px H × 7 px W.
+
+    Default out_ch=256 matches the shared SWA dim so no projection is
+    needed at the stem boundary.
     """
 
-    def __init__(self, in_ch: int = 3, mid_ch: int = 64, out_ch: int = 128):
+    def __init__(self, in_ch: int = 3, out_ch: int = 256):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Conv2d(in_ch, mid_ch, kernel_size=(3, 5), stride=(2, 1),
-                      padding=(1, 2), bias=False),
-            nn.GroupNorm(1, mid_ch),
+            nn.Conv2d(in_ch, 64, kernel_size=3, stride=(2, 1),
+                      padding=1, bias=False),
+            nn.GroupNorm(1, 64),
             nn.GELU(),
-            nn.Conv2d(mid_ch, out_ch, kernel_size=(3, 5), stride=(2, 2),
-                      padding=(1, 2), bias=False),
+            nn.Conv2d(64, 128, kernel_size=3, stride=(2, 1),
+                      padding=1, bias=False),
+            nn.GroupNorm(1, 128),
+            nn.GELU(),
+            nn.Conv2d(128, out_ch, kernel_size=3, stride=(1, 2),
+                      padding=1, bias=False),
             nn.GroupNorm(1, out_ch),
             nn.GELU(),
         )
@@ -484,8 +491,7 @@ class LipiMoEEncoder(nn.Module):
     def __init__(
         self,
         dim: int = 256,
-        stem_mid_ch: int = 64,
-        stem_out_ch: int = 128,
+        stem_out_ch: int = 256,
         num_shared_a_blocks: int = 2,
         num_shared_b_blocks: int = 2,
         num_group_local_blocks: int = 1,
@@ -534,7 +540,7 @@ class LipiMoEEncoder(nn.Module):
 
         self.config = {
             "dim": dim,
-            "stem_mid_ch": stem_mid_ch, "stem_out_ch": stem_out_ch,
+            "stem_out_ch": stem_out_ch,
             "num_shared_a_blocks": num_shared_a_blocks,
             "num_shared_b_blocks": num_shared_b_blocks,
             "num_group_local_blocks": num_group_local_blocks,
@@ -563,7 +569,7 @@ class LipiMoEEncoder(nn.Module):
         dp_iter = iter(dp_schedule)
 
         # Convolutional stem: (B, 3, 32, W) → (B, stem_out_ch, 8, W/2)
-        self.stem = ConvStem(in_ch=3, mid_ch=stem_mid_ch, out_ch=stem_out_ch)
+        self.stem = ConvStem(in_ch=3, out_ch=stem_out_ch)
 
         # Shared SWA-A at (h=8, w=W/2), dim=stem_out_ch. Window 8×8 covers
         # the full height so attention sees vertical character extent.
