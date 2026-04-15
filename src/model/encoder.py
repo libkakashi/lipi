@@ -344,6 +344,53 @@ class GroupCTCModule(nn.Module):
         return logits, script_ids
 
 
+def _collect_segments(
+    x: Tensor,
+    mask: Tensor,
+) -> tuple[Tensor | None, list[tuple[int, int]] | None]:
+    """Collect per-sample frames matching `mask` into a padded batch.
+
+    Args:
+        x:    (B, T, d)
+        mask: (B, T) boolean — which frames belong to this expert
+
+    Returns:
+        batch_x:   (N, max_seg_len, d)  — N = # samples with any frames in
+                   this expert. Padded with zeros.
+        batch_info: list of (b_idx, seg_len) — for scatter_segments.
+        Both None if no samples have any frames in this expert.
+    """
+    B = x.shape[0]
+    seg_lens = mask.sum(dim=1)  # (B,) — per-sample frame count
+    has_g = seg_lens > 0
+    b_indices = has_g.nonzero(as_tuple=True)[0]
+    if b_indices.numel() == 0:
+        return None, None
+
+    lens_list = seg_lens[b_indices].tolist()
+    b_list = b_indices.tolist()
+    max_len = max(lens_list)
+    N = len(b_list)
+    d = x.shape[-1]
+
+    batch_x = torch.zeros(N, max_len, d, device=x.device, dtype=x.dtype)
+    for i, (b, sl) in enumerate(zip(b_list, lens_list)):
+        batch_x[i, :sl] = x[b][mask[b]]
+
+    return batch_x, list(zip(b_list, lens_list))
+
+
+def _scatter_segments(
+    x_out: Tensor,
+    batch_out: Tensor,
+    mask: Tensor,
+    batch_info: list[tuple[int, int]],
+) -> None:
+    """Scatter packed batch results back to per-sample positions."""
+    for i, (b, sl) in enumerate(batch_info):
+        x_out[b, mask[b]] = batch_out[i, :sl]
+
+
 def _run_expert_block(block, x, expert_id, h, w, use_ckpt):
     """Run one sample through a specific expert in an ExpertBlock.
 
@@ -685,35 +732,33 @@ class LipiMoEEncoder(nn.Module):
 
         # =====================================================================
         # STAGE 1: Group expert blocks (routed per-segment by group_id)
+        # Iterates by group (≤ num_groups = 13) instead of (B, unique_groups)
+        # to amortize kernel-launch overhead — all samples with the same
+        # group are padded and processed in one batched call per expert.
         # =====================================================================
 
         x_after_group = torch.zeros(B, w, d, device=x.device, dtype=x.dtype)
 
-        # Per-image, per-group-segment processing
-        for b_idx in range(B):
-            fg = frame_groups[b_idx]
-            for g in fg.unique().tolist():
-                if g == self.blank_group_id:
-                    continue
-                seg_mask = (fg == g)
-                seg_len = seg_mask.sum().item()
-                if seg_len == 0:
-                    continue
+        for g in range(self.num_groups):
+            mask_g = (frame_groups == g)  # (B, w)
+            if not mask_g.any():
+                continue
+            batch_x, batch_info = _collect_segments(x, mask_g)
+            if batch_x is None:
+                continue
+            max_len = batch_x.shape[1]
 
-                x_seg = x[b_idx, seg_mask].unsqueeze(0)  # (1, seg_len, d)
+            local = batch_x
+            for block in self.group_local_blocks:
+                local = _run_expert_block(block, local, g, 1, max_len, use_ckpt)
 
-                local_seg = x_seg
-                for block in self.group_local_blocks:
-                    local_seg = _run_expert_block(
-                        block, local_seg, g, 1, seg_len, use_ckpt)
+            wide = batch_x
+            for block in self.group_wide_blocks:
+                wide = _run_expert_block(block, wide, g, 1, max_len, use_ckpt)
 
-                wide_seg = x_seg
-                for block in self.group_wide_blocks:
-                    wide_seg = _run_expert_block(
-                        block, wide_seg, g, 1, seg_len, use_ckpt)
-
-                comb = torch.cat([local_seg, wide_seg], dim=-1)
-                x_after_group[b_idx, seg_mask] = self.group_aggregates[g](comb.squeeze(0))
+            comb = torch.cat([local, wide], dim=-1)
+            agg = self.group_aggregates[g](comb)
+            _scatter_segments(x_after_group, agg, mask_g, batch_info)
 
         # =====================================================================
         # LID-2: per-frame script classification
@@ -756,29 +801,28 @@ class LipiMoEEncoder(nn.Module):
 
         x_after_script = torch.zeros(B, w, d, device=x.device, dtype=x.dtype)
 
-        # Per-image, per-script-segment processing
-        for b_idx in range(B):
-            fs = flat_scripts[b_idx]
-            for s in fs.unique().tolist():
-                if s < 0:  # blank/whitespace frame
-                    continue
-                seg_mask = (fs == s)
-                seg_len = seg_mask.sum().item()
-                if seg_len == 0:
-                    continue
+        # Iterate by flat script-id (≤ total_scripts = 26) instead of
+        # (B, unique_scripts). Same batching pattern as group experts.
+        for s in range(self.total_scripts):
+            mask_s = (flat_scripts == s)  # (B, w)
+            if not mask_s.any():
+                continue
+            batch_x, batch_info = _collect_segments(x_after_group, mask_s)
+            if batch_x is None:
+                continue
+            max_len = batch_x.shape[1]
 
-                x_seg = x_after_group[b_idx, seg_mask].unsqueeze(0)  # (1, seg_len, dim)
+            local = batch_x
+            for block in self.script_local_blocks:
+                local = _run_expert_block(block, local, s, 1, max_len, use_ckpt)
 
-                local_seg = x_seg
-                for block in self.script_local_blocks:
-                    local_seg = _run_expert_block(block, local_seg, s, 1, seg_len, use_ckpt)
+            wide = batch_x
+            for block in self.script_wide_blocks:
+                wide = _run_expert_block(block, wide, s, 1, max_len, use_ckpt)
 
-                wide_seg = x_seg
-                for block in self.script_wide_blocks:
-                    wide_seg = _run_expert_block(block, wide_seg, s, 1, seg_len, use_ckpt)
-
-                comb = torch.cat([local_seg, wide_seg], dim=-1)
-                x_after_script[b_idx, seg_mask] = self.script_aggregates[s](comb.squeeze(0))
+            comb = torch.cat([local, wide], dim=-1)
+            agg = self.script_aggregates[s](comb)
+            _scatter_segments(x_after_script, agg, mask_s, batch_info)
 
         # =====================================================================
         # CTC heads (per-segment routing)
@@ -790,22 +834,26 @@ class LipiMoEEncoder(nn.Module):
         max_vocab = max(m.max_vocab for m in self.ctc_modules)
         logits = torch.zeros(B, T, max_vocab, device=x.device, dtype=x.dtype)
 
-        # Per-image, per-group-segment CTC routing
-        for b_idx in range(B):
-            fg = frame_groups[b_idx]
-            for g in fg.unique().tolist():
-                if g == self.blank_group_id:
-                    continue
-                f_mask = (fg == g)
-                seg_len = f_mask.sum().item()
-                if seg_len == 0:
-                    continue
-                seg_features = x[b_idx, f_mask].unsqueeze(0)  # (1, seg_len, dim)
-                # Use first frame's script id (segments have uniform script within group)
-                s_id = frame_scripts[b_idx][f_mask][0].unsqueeze(0)
-                seg_logits, _ = self.ctc_modules[g](seg_features, script_ids=s_id)
-                logits[b_idx, f_mask, :seg_logits.shape[-1]] = \
-                    seg_logits.squeeze(0).to(logits.dtype)
+        # CTC routing: iterate by group (≤ num_groups = 13). Within each
+        # group, per-sample script_ids are passed to the GroupCTCModule
+        # which handles per-script head routing internally.
+        for g in range(self.num_groups):
+            mask_g = (frame_groups == g)  # (B, T)
+            if not mask_g.any():
+                continue
+            batch_feats, batch_info = _collect_segments(x, mask_g)
+            if batch_feats is None:
+                continue
+
+            # One script_id per segment (all frames in a group segment share a script)
+            batch_sids = torch.tensor(
+                [frame_scripts[b][mask_g[b]][0].item() for b, _ in batch_info],
+                dtype=torch.long, device=x.device)
+
+            seg_logits, _ = self.ctc_modules[g](batch_feats, script_ids=batch_sids)
+            vs = seg_logits.shape[-1]
+            for i, (b, sl) in enumerate(batch_info):
+                logits[b, mask_g[b], :vs] = seg_logits[i, :sl].to(logits.dtype)
 
         lengths = torch.full((B,), T, dtype=torch.long, device=x.device)
 
