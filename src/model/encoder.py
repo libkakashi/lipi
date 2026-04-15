@@ -791,14 +791,19 @@ class LipiMoEEncoder(nn.Module):
         for blk in self.shared_b:
             x = blk(x, h, w)
 
-        # Patch-merge 2 → 1: concat 2 rows, project to dim.
-        x, h = _patch_merge_h(x, h, w, self.merge_b)
-
-        # LID-1: per-frame group prediction
-        d = x.shape[-1]
-        x_for_group = x.reshape(B, h, w, d).permute(0, 3, 1, 2)
+        # LID-1 branches off BEFORE the final 2→1 merge. Two consequences:
+        #   1. LID sees h=2 features (upper + lower half of each character)
+        #      — richer script-identifying signal than a flattened h=1 view.
+        #   2. merge_b below then only receives CTC gradient, so it can
+        #      specialize for character discriminability without having to
+        #      simultaneously serve LID's script-discrimination objective.
+        x_for_group = x.reshape(B, h, w, d).permute(0, 3, 1, 2)  # (B, d, 2, w)
         x_for_group = self.group_h_pool(x_for_group).squeeze(2).permute(0, 2, 1)
         group_logits = self.group_head(x_for_group)  # (B, W/2, num_groups+1)
+
+        # Patch-merge 2 → 1: concat 2 rows, project to dim. Only touches
+        # the CTC path from here on.
+        x, h = _patch_merge_h(x, h, w, self.merge_b)
 
         # Determine per-frame group assignments
         if group_ids is not None:
