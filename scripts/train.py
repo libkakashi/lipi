@@ -472,7 +472,8 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                 segments_, T_est, NUM_GROUPS, device)
 
             out = model(imgs_, group_ids=gl_for_model, script_ids=sl_frames,
-                        detach_for_experts=detach_for_experts)
+                        detach_for_experts=detach_for_experts,
+                        compute_ctc=(ctc_weight != 0))
 
         # LID-1 loss (gl_frames has -100 for padding → ignored by CE)
         T = out["group_logits"].shape[1]
@@ -480,9 +481,15 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         lid1_loss = compute_lid1_loss(out["group_logits"], gl_frames, ce_loss_fn)
 
         # CTC loss: per-segment for all lines (handles both single and mixed script)
-        ctc_loss = compute_ctc_loss_segments(
-            out["logits"], segments_, out["lengths"],
-            group_script_names, group_script_vocabs)
+        # Skip CTC loss computation entirely when its weight is 0
+        # (LID-only pretraining) — the Python-heavy per-segment loop is
+        # wasted work otherwise.
+        if ctc_weight != 0:
+            ctc_loss = compute_ctc_loss_segments(
+                out["logits"], segments_, out["lengths"],
+                group_script_names, group_script_vocabs)
+        else:
+            ctc_loss = torch.zeros(1, device=device)
 
         # LID-2 loss: per-frame CE within multi-script groups
         # Uses ground truth sl_frames as targets, same ignore_index=-100 as LID-1

@@ -672,6 +672,7 @@ class LipiMoEEncoder(nn.Module):
         group_ids: Tensor | None = None,
         script_ids: Tensor | None = None,
         detach_for_experts: bool = False,
+        compute_ctc: bool = True,
     ) -> dict:
         B = images.shape[0]
 
@@ -786,6 +787,25 @@ class LipiMoEEncoder(nn.Module):
 
         # Convert to flat script IDs for script expert routing
         flat_scripts = self._get_flat_script_ids(frame_groups, frame_scripts)
+
+        # Skip the whole script-expert + CTC pipeline if the caller isn't
+        # going to use CTC logits (e.g., LID-only pretraining with
+        # --ctc-weight 0). Script experts, the final norm, and the CTC
+        # heads have no gradient path to the loss in that case, so the
+        # forward pass is pure waste otherwise.
+        if not compute_ctc:
+            T = w
+            max_vocab = max(m.max_vocab for m in self.ctc_modules)
+            return {
+                "logits": torch.zeros(B, T, max_vocab,
+                                      device=x.device, dtype=x.dtype),
+                "lengths": torch.full((B,), T, dtype=torch.long, device=x.device),
+                "group_logits": group_logits,
+                "group_ids": frame_groups,
+                "lid2_logits_per_group": lid2_logits_per_group,
+                "frame_scripts": frame_scripts,
+                "flat_scripts": flat_scripts,
+            }
 
         # =====================================================================
         # STAGE 2: Script expert blocks (routed per-segment by flat script_id)
