@@ -957,13 +957,13 @@ class LipiMoEEncoder(nn.Module):
                 continue
 
             # One script_id per segment (all frames in a group segment share
-            # a script). Gather via per-row first-true index, stacked across
-            # segments. Avoids the vectorized advanced-index gather because
-            # torch.compile/Inductor mishandles the pattern.
-            first_frame_idx = mask_g.int().argmax(dim=1)  # (B,) first True per row
-            batch_sids = torch.stack([
-                frame_scripts[b, first_frame_idx[b]] for b, _ in batch_info
-            ])
+            # a script). The per-row indexing variants confuse
+            # torch.compile's Inductor pass (bounds analysis crashes), so
+            # use .item() calls. N syncs per group is negligible vs compile
+            # gains; only called once per (group, batch).
+            batch_sids = torch.tensor(
+                [frame_scripts[b][mask_g[b]][0].item() for b, _ in batch_info],
+                dtype=torch.long, device=x.device)
 
             seg_logits, _ = self.ctc_modules[g](batch_feats, script_ids=batch_sids)
             vs = seg_logits.shape[-1]
