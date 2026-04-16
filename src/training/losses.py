@@ -168,24 +168,21 @@ def compute_ctc_loss_segments(
     ctc_loss = torch.zeros(1, device=device)
     ctc_chars = 0
 
-    for (g, s), segs in buckets.items():
-        vs = segs[0]["vs"]  # all segments in this bucket share vs
-        N = len(segs)
-        max_T = max(sg["seg_len"] for sg in segs)
-        max_U = max(len(sg["ids"]) for sg in segs)
+    # Cap per-call tensor size to limit peak memory for big-vocab buckets
+    # (e.g. han_kana vs=4000 with many segments at long max_T).
+    MAX_BUCKET_ELEMS = 32 * 1024 * 1024  # 32M fp32 = 128MB per padded tensor
 
-        # Stack logits: (max_T, N, vs) — CTC expects (T, N, V)
+    def _run_chunk(chunk_segs, max_T, vs):
+        """Run batched CTC on one chunk, return (loss, n_chars)."""
+        N = len(chunk_segs)
         batched_logits = torch.zeros(max_T, N, vs, device=device, dtype=logits.dtype)
         input_lens = torch.zeros(N, dtype=torch.long, device=device)
         target_lens = torch.zeros(N, dtype=torch.long, device=device)
-        # Concatenated targets (1-D) — CTC uses target_lens to know boundaries
         concat_targets = []
-        for i, sg in enumerate(segs):
-            b = sg["b"]
-            fs, fe = sg["frame_start"], sg["frame_end"]
-            seg_len = sg["seg_len"]
-            batched_logits[:seg_len, i, :] = logits[b, fs:fe, :vs]
-            input_lens[i] = seg_len
+        for i, sg in enumerate(chunk_segs):
+            b, fs, fe = sg["b"], sg["frame_start"], sg["frame_end"]
+            batched_logits[:sg["seg_len"], i, :] = logits[b, fs:fe, :vs]
+            input_lens[i] = sg["seg_len"]
             target_lens[i] = len(sg["ids"])
             concat_targets.extend(sg["ids"])
 
@@ -193,22 +190,42 @@ def compute_ctc_loss_segments(
         targets = torch.tensor(concat_targets, dtype=torch.long, device=device)
 
         if device.type == "mps":
-            # MPS fallback: loop (pure-PyTorch CTC isn't easily batched)
             offset = 0
+            loss = torch.zeros(1, device=device)
             for i in range(N):
                 U = target_lens[i].item()
                 T_i = input_lens[i].item()
                 lp_i = log_probs[:T_i, i:i+1, :]
                 tgt_i = targets[offset:offset + U]
                 offset += U
-                ctc_loss = ctc_loss + _ctc_loss_pure(lp_i, tgt_i, blank=0)
+                loss = loss + _ctc_loss_pure(lp_i, tgt_i, blank=0)
+            return loss, len(concat_targets)
         else:
-            # Batched CTC — single kernel call for all segments in this bucket
-            ctc_loss = ctc_loss + F.ctc_loss(
-                log_probs, targets, input_lens, target_lens,
-                blank=0, reduction="sum", zero_infinity=True)
+            loss = F.ctc_loss(log_probs, targets, input_lens, target_lens,
+                              blank=0, reduction="sum", zero_infinity=True)
+            return loss, len(concat_targets)
 
-        ctc_chars += sum(len(sg["ids"]) for sg in segs)
+    for (g, s), segs in buckets.items():
+        vs = segs[0]["vs"]
+        # Sort by seg_len so chunks have similar padding waste
+        segs = sorted(segs, key=lambda sg: sg["seg_len"])
+        chunk: list[dict] = []
+        chunk_max_T = 0
+        for sg in segs:
+            new_max_T = max(chunk_max_T, sg["seg_len"])
+            new_elems = new_max_T * (len(chunk) + 1) * vs
+            if chunk and new_elems > MAX_BUCKET_ELEMS:
+                loss, n = _run_chunk(chunk, chunk_max_T, vs)
+                ctc_loss = ctc_loss + loss
+                ctc_chars += n
+                chunk = []
+                chunk_max_T = 0
+            chunk.append(sg)
+            chunk_max_T = max(chunk_max_T, sg["seg_len"])
+        if chunk:
+            loss, n = _run_chunk(chunk, chunk_max_T, vs)
+            ctc_loss = ctc_loss + loss
+            ctc_chars += n
 
     skip_total = skipped_no_script + skipped_no_ids + skipped_too_long
     if skip_total > total_segs * 0.05:
