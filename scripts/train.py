@@ -84,9 +84,10 @@ def parse_args():
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--val-split", type=float, default=0.1)
     parser.add_argument("--log-interval", type=int, default=20)
-    parser.add_argument("--num-workers", type=int, default=4,
+    parser.add_argument("--num-workers", type=int, default=12,
                         help="DataLoader worker processes. Set 0 to disable "
-                             "multiprocessing (useful for debugging).")
+                             "multiprocessing (useful for debugging). Lower "
+                             "this if you have <16 CPU cores.")
     # Model
     parser.add_argument("--dim", type=int, default=256)
     parser.add_argument("--no-compile", action="store_true")
