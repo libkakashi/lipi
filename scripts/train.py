@@ -84,6 +84,9 @@ def parse_args():
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--val-split", type=float, default=0.1)
     parser.add_argument("--log-interval", type=int, default=20)
+    parser.add_argument("--num-workers", type=int, default=4,
+                        help="DataLoader worker processes. Set 0 to disable "
+                             "multiprocessing (useful for debugging).")
     # Model
     parser.add_argument("--dim", type=int, default=256)
     parser.add_argument("--no-compile", action="store_true")
@@ -710,6 +713,8 @@ def main():
 
     train_loader = DataLoader(data["train_dataset"], batch_sampler=train_batch_sampler,
                               collate_fn=collate_moe,
+                              num_workers=args.num_workers,
+                              persistent_workers=args.num_workers > 0,
                               pin_memory=(device_type == "cuda"))
 
     steps_per_epoch = len(train_loader)
