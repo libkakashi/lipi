@@ -11,12 +11,27 @@ Losses:
   - Regional token: spatial partial credit for multi-token characters
 """
 
+import functools
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-from src.encoding.decompose import encode_text, script_vocab_size
+from src.encoding.decompose import encode_text as _encode_text, script_vocab_size
+
+
+# Cache encoded token sequences — segments repeat the same (text, script)
+# pairs across batches (e.g. char-level data uses same 1-char texts), and
+# encode_text is pure-Python with unicode normalization and codec lookups.
+# Cache size 100K fits typical dedup factor of 10-100x.
+@functools.lru_cache(maxsize=100_000)
+def _encode_text_cached(text: str, script: str) -> tuple:
+    return tuple(_encode_text(text, script))
+
+
+def encode_text(text: str, script: str) -> list:
+    return list(_encode_text_cached(text, script))
 
 
 def _ctc_loss_pure(
