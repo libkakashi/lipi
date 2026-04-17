@@ -501,7 +501,7 @@ class LipiMoEEncoder(nn.Module):
     boundary contamination minimal before attention layers take over.
 
     Two-level expert routing:
-      1. LID-1 classifies each frame into a script group (13 groups + blank)
+      1. LID-1 classifies each frame into a script group (14 groups + blank)
       2. Group expert blocks process frames per-group (2 local + 2 wide)
       3. LID-2 classifies each frame into a script within its group
       4. Script expert blocks process frames per-script (1 local + 1 wide)

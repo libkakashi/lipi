@@ -171,11 +171,8 @@ NO_FUSION_SCRIPTS: dict[str, NoFusionCodec] = {
         _TYPOGRAPHIC_COMMON,
     )),
 
-    # Kana: hiragana + katakana + common punctuation.
-    # ~92 hiragana + ~96 katakana + ASCII + CJK punct = ~220 tokens.
     "kana": NoFusionCodec(_build_char_list(
         _ASCII_COMMON,
-        [(0x3000, 0x303F)],     # CJK Symbols and Punctuation
         [(0x3040, 0x309F)],     # Hiragana
         [(0x30A0, 0x30FF)],     # Katakana
         [(0x31F0, 0x31FF)],     # Katakana Phonetic Extensions
@@ -673,11 +670,11 @@ _CJK_N_ALT = 24
 
 
 class CJKCodec:
-    """Codec for CJK (Chinese + Japanese).
+    """Codec for Han (Chinese/Japanese kanji).
 
     Token layout:
       0 = BLANK
-      1..N_base = base chars (kana, ASCII, CJK punct, fullwidth)
+      1..N_base = base chars (ASCII, CJK punct, radicals, fullwidth)
       N_base+1..N_base+N_freq = frequent CJK chars (single token)
       N_base+N_freq+1..+24 = ALT00-ALT23 tokens
 

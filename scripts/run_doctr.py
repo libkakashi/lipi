@@ -31,7 +31,7 @@ IMG_HEIGHT = 32
 
 
 def build_vocab_tables():
-    """Build group_script_vocab_sizes and group_script_names for all 13 groups."""
+    """Build group_script_vocab_sizes and group_script_names for all groups."""
     group_script_vocab_sizes = []
     group_script_names = []
     for group_name in GROUPS:

@@ -194,6 +194,61 @@ def get_renderable_chars(script: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Japanese kana/kanji boundary splitting
+# ---------------------------------------------------------------------------
+
+def _is_kana_cp(cp):
+    return 0x3040 <= cp <= 0x30FF or 0x31F0 <= cp <= 0x31FF
+
+def _is_kanji_cp(cp):
+    return 0x4E00 <= cp <= 0x9FFF or 0x3400 <= cp <= 0x4DBF
+
+def _is_cjk_punct_cp(cp):
+    return 0x3000 <= cp <= 0x303F
+
+def split_japanese(text):
+    """Split Japanese text at kana/kanji boundaries.
+
+    Returns [(chunk_text, script_name), ...] where script_name is "han" or "kana".
+    Non-CJK characters (ASCII punctuation, digits) attach to the current segment.
+    CJK punctuation (0x3000-0x303F) routes to "han" since the kana codec can't encode it.
+    """
+    if not text:
+        return []
+
+    segments = []
+    current = []
+    current_script = None
+
+    for ch in text:
+        cp = ord(ch)
+        if _is_kana_cp(cp):
+            script = "kana"
+        elif _is_kanji_cp(cp) or _is_cjk_punct_cp(cp):
+            script = "han"
+        else:
+            script = current_script
+
+        if script != current_script and current_script is not None and script is not None:
+            segments.append(("".join(current), current_script))
+            current = []
+        if script is not None:
+            current_script = script
+        current.append(ch)
+
+    if current and current_script is not None:
+        segments.append(("".join(current), current_script))
+
+    return segments
+
+
+def _is_mixed_japanese(text):
+    has_kana = any(_is_kana_cp(ord(c)) for c in text)
+    has_kanji = any(_is_kanji_cp(ord(c)) for c in text)
+    return has_kana and has_kanji
+
+
+# ---------------------------------------------------------------------------
 # Punctuation / number mixing
 # ---------------------------------------------------------------------------
 
@@ -671,6 +726,10 @@ def _get_word_pool(style, script, fonts, words, h=32, punct_prob=0.15):
     while len(pool) < target and attempts < target * 3:
         attempts += 1
         word = random.choice(words)
+        # Skip mixed kana/kanji words — they'd corrupt CTC labels since
+        # the pool renders whole words through a single codec.
+        if script in ("han", "kana") and _is_mixed_japanese(word):
+            continue
         word = mix_punctuation(word, p=punct_prob, script=script)
         font = random.choice(fonts)
         if not font_covers_text(font, word):
@@ -937,7 +996,12 @@ def _build_single_line_plan(script_info):
     for i in range(n_words):
         if i > 0:
             plan.append({"text": " ", "script": "whitespace"})
-        plan.append({"text": random.choice(words), "script": script})
+        word = random.choice(words)
+        if script in ("han", "kana") and _is_mixed_japanese(word):
+            for seg_text, seg_script in split_japanese(word):
+                plan.append({"text": seg_text, "script": seg_script})
+        else:
+            plan.append({"text": word, "script": script})
     return plan
 
 
@@ -974,7 +1038,12 @@ def _build_mixed_line_plan(group_index):
     for i, (script, _fonts, words, _gid) in enumerate(chosen):
         if i > 0:
             plan.append({"text": " ", "script": "whitespace"})
-        plan.append({"text": random.choice(words), "script": script})
+        word = random.choice(words)
+        if script in ("han", "kana") and _is_mixed_japanese(word):
+            for seg_text, seg_script in split_japanese(word):
+                plan.append({"text": seg_text, "script": seg_script})
+        else:
+            plan.append({"text": word, "script": script})
     return plan
 
 

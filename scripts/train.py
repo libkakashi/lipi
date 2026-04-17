@@ -107,7 +107,7 @@ def parse_args():
                         help="Number of epochs to detach shared→expert gradient. "
                              "LID-1 gets undivided shared encoder, CTC trains experts only.")
     parser.add_argument("--freeze-except", type=str, default=None,
-                        choices=["experts", "experts+ctc", "ctc", "backbone"],
+                        choices=["experts", "experts+ctc", "ctc", "backbone", "lid"],
                         help="Freeze everything except specified components")
     args = parser.parse_args()
 
@@ -174,7 +174,7 @@ def load_and_prepare_data(args, device):
     assert active_data_groups, "No active groups found"
     print(f"Data groups: {sorted(active_data_groups)}")
 
-    # Always build model with ALL 13 groups for checkpoint compatibility.
+    # Always build model with ALL groups for checkpoint compatibility.
     active_groups = list(GROUPS)
     all_scripts = list(SCRIPT_TO_GROUP.keys())
     n_groups = NUM_GROUPS
@@ -685,6 +685,9 @@ def main():
                 param.requires_grad = any(
                     k in name for k in ("stem.", "shared_a.", "shared_b.",
                                         "proj_a.", "pool_a.", "pool_b."))
+            elif args.freeze_except == "lid":
+                param.requires_grad = any(
+                    k in name for k in ("group_head.", "lid2_heads."))
             if param.requires_grad:
                 trainable += param.numel()
             else:
