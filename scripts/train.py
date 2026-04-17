@@ -785,7 +785,19 @@ def main():
     train_widths = data["train_widths"]
     max_width = int(train_widths.max())
 
-    pixel_budget = estimate_pixel_budget(model, vram_gb=args.vram)
+    # Match the VRAM calibration to the actual training forward: zero-weight
+    # losses mean the corresponding stages are skipped, so the activation
+    # footprint is much smaller. Mirrors the logic in _forward_backward.
+    if args.ctc_weight != 0:
+        budget_stage = "all"
+    elif args.lid2_weight != 0:
+        budget_stage = "lid2"
+    elif args.lid1_weight != 0:
+        budget_stage = "lid1"
+    else:
+        budget_stage = "lid0"
+    pixel_budget = estimate_pixel_budget(
+        model, vram_gb=args.vram, compute_until=budget_stage)
     max_batch_at_widest = pixel_budget // max_width
     # Cap at --batch-size: pixel budget handles width scaling, but there's
     # per-sample overhead (autograd nodes, CTC loss, routing) that doesn't
