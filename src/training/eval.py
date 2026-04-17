@@ -2,14 +2,14 @@
 MoE model evaluation.
 
 Computes LID-1, LID-2, word accuracy, and character accuracy
-per-group and per-script.
+per-group and per-script. Single inference forward pass (no GT routing).
 """
 
 import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from src.encoding.decompose import decode_ids, script_vocab_size
+from src.encoding.decompose import decode_ids, encode_text, script_vocab_size
 from src.training.losses import compute_lid1_loss
 from src.training.routing import build_frame_labels_from_segments
 
@@ -33,6 +33,75 @@ def _edit_distance(a: str, b: str) -> int:
     return prev[-1]
 
 
+def _batched_ctc_val_loss(logits, segments_batch, group_script_names,
+                          group_script_vocab_sizes, device):
+    """Compute batched CTC val loss without per-segment kernel launches."""
+    B, T, _ = logits.shape
+    buckets: dict[tuple[int, int], list] = {}
+
+    for b in range(B):
+        for seg in segments_batch[b]:
+            text = seg["text"]
+            g = seg["group_id"]
+            s = seg.get("script_id", 0)
+            if not text or seg["width"] == 0:
+                continue
+            if g >= len(group_script_names) or s >= len(group_script_names[g]):
+                continue
+            script_name = group_script_names[g][s]
+            if not script_name:
+                continue
+
+            fs = seg["offset"] // 2
+            fe = min((seg["offset"] + seg["width"] + 1) // 2, T)
+            seg_len = fe - fs
+            if seg_len < 1:
+                continue
+
+            ids = encode_text(text, script_name)
+            if not ids:
+                continue
+            n_repeats = sum(1 for i in range(1, len(ids)) if ids[i] == ids[i - 1])
+            if seg_len < len(ids) + n_repeats:
+                continue
+
+            vs = group_script_vocab_sizes[g][s]
+            buckets.setdefault((g, s), []).append({
+                "b": b, "fs": fs, "fe": fe, "seg_len": seg_len,
+                "ids": ids, "vs": vs,
+            })
+
+    total_loss = 0.0
+    total_chars = 0
+
+    for (g, s), segs in buckets.items():
+        segs.sort(key=lambda x: x["seg_len"])
+        vs = segs[0]["vs"]
+        max_T = segs[-1]["seg_len"]
+        N = len(segs)
+
+        batched_logits = torch.zeros(max_T, N, vs, device=device, dtype=logits.dtype)
+        input_lens = torch.zeros(N, dtype=torch.long, device=device)
+        target_lens = torch.zeros(N, dtype=torch.long, device=device)
+        concat_targets = []
+
+        for i, sg in enumerate(segs):
+            batched_logits[:sg["seg_len"], i, :] = logits[sg["b"], sg["fs"]:sg["fe"], :vs]
+            input_lens[i] = sg["seg_len"]
+            target_lens[i] = len(sg["ids"])
+            concat_targets.extend(sg["ids"])
+
+        log_probs = batched_logits.float().log_softmax(dim=-1)
+        targets = torch.tensor(concat_targets, dtype=torch.long, device=device)
+
+        loss = F.ctc_loss(log_probs, targets, input_lens, target_lens,
+                          blank=0, reduction="sum", zero_infinity=True)
+        total_loss += loss.item()
+        total_chars += len(concat_targets)
+
+    return total_loss, total_chars
+
+
 @torch.no_grad()
 def evaluate(model, val_loader, group_tokenizers, group_script_names,
              active_groups, device, device_type, use_amp, amp_dtype,
@@ -40,10 +109,11 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
     model.eval()
     n_groups = len(group_tokenizers)
 
-    # Val loss accumulators
+    # Val loss
     val_ctc_loss = 0.0
+    val_ctc_chars = 0
     val_lid1_loss = 0.0
-    val_loss_samples = 0
+    val_lid1_frames = 0
 
     # Global stats
     lid1_frame_correct = lid1_frame_total = 0
@@ -66,78 +136,41 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
     s_lid2_correct: dict[tuple[int, int], int] = {}
     s_lid2_total: dict[tuple[int, int], int] = {}
 
+    ce_fn = torch.nn.CrossEntropyLoss()
+
     for batch_idx, batch in enumerate(val_loader):
         imgs, targets, tgt_lens, gids, sids, labels, group_labels, batch_segments = batch
         group_labels = group_labels.to(device, non_blocking=True)
         imgs = imgs.to(device, non_blocking=True)
         gids = gids.to(device, non_blocking=True)
-        sids_dev = sids.to(device, non_blocking=True)
-
-        targets = targets.to(device, non_blocking=True)
-        tgt_lens = tgt_lens.to(device, non_blocking=True)
 
         B = imgs.shape[0]
 
         with torch.amp.autocast(device_type, enabled=use_amp, dtype=amp_dtype):
             out = model(imgs, group_ids=None)
-            # Also run with ground truth routing to compute val loss.
-            T_est = imgs.shape[3] // 2
-            segs = batch_segments if batch_segments is not None else [[] for _ in range(B)]
-            gl_for_model, sl_frames = build_frame_labels_from_segments(
-                segs, T_est, n_groups, device)
-            out_gt = model(imgs, group_ids=gl_for_model, script_ids=sl_frames)
-        # Per-segment CTC val loss (matches training, works for mixed lines)
-        T_val = out_gt["logits"].shape[1]
+
+        T = out["group_logits"].shape[1]
+        gl_frames = group_labels[:, ::2][:, :T]
+
+        # --- LID-1 val loss ---
+        lid1_l = compute_lid1_loss(out["group_logits"], gl_frames, ce_fn)
+        non_pad = (gl_frames >= 0)
+        n_frames = non_pad.sum().item()
+        val_lid1_loss += lid1_l.item() * n_frames
+        val_lid1_frames += n_frames
+
+        # --- Batched CTC val loss (one call per (group, script) bucket) ---
         if batch_segments is not None and group_script_vocab_sizes:
-            from src.encoding.decompose import encode_text as _enc
-            for b in range(B):
-                for seg in batch_segments[b]:
-                    seg_g = seg["group_id"]
-                    seg_s = seg.get("script_id", 0)
-                    if seg_g >= len(group_script_vocab_sizes) or seg_s >= len(group_script_vocab_sizes[seg_g]):
-                        continue
-                    vs = group_script_vocab_sizes[seg_g][seg_s]
-                    fs = seg["offset"] // 2
-                    fe = min((seg["offset"] + seg["width"] + 1) // 2, T_val)
-                    seg_len = fe - fs
-                    if seg_len < 1:
-                        continue
-                    sname = group_script_names[seg_g][seg_s] if seg_g < len(group_script_names) and seg_s < len(group_script_names[seg_g]) else ""
-                    if not sname:
-                        continue
-                    ids = _enc(seg["text"], sname)
-                    if not ids:
-                        continue
-                    n_repeats = sum(1 for i in range(1, len(ids)) if ids[i] == ids[i - 1])
-                    if seg_len < len(ids) + n_repeats:
-                        continue
-                    seg_logits = out_gt["logits"][b, fs:fe, :vs]
-                    seg_lp = seg_logits.float().log_softmax(dim=-1).unsqueeze(1)
-                    seg_t = torch.tensor(ids, dtype=torch.long, device=device)
-                    seg_l = F.ctc_loss(
-                        seg_lp, seg_t,
-                        torch.tensor([seg_len], dtype=torch.long, device=device),
-                        torch.tensor([len(ids)], dtype=torch.long, device=device),
-                        blank=0, reduction="sum", zero_infinity=True)
-                    val_ctc_loss += seg_l.item()
-                    val_loss_samples += len(ids)
-        # Val LID-1 loss (per-frame, -100 padding ignored by default)
-        ce_fn = torch.nn.CrossEntropyLoss()
-        T_gt = out_gt["group_logits"].shape[1]
-        gl_frames = group_labels[:, ::2][:, :T_gt]
-        lid1_l = compute_lid1_loss(out_gt["group_logits"], gl_frames, ce_fn)
-        val_lid1_loss += lid1_l.item() * imgs.shape[0]
+            ctc_l, ctc_c = _batched_ctc_val_loss(
+                out["logits"], batch_segments, group_script_names,
+                group_script_vocab_sizes, device)
+            val_ctc_loss += ctc_l
+            val_ctc_chars += ctc_c
 
-        del out_gt
-
-        # LID-1 frame-level accuracy (exclude padding, include whitespace)
-        frame_preds = out["group_logits"].argmax(dim=-1)  # (B, T)
-        T_lid = frame_preds.shape[1]
-        gl_frames = group_labels[:, ::2][:, :T_lid]
-
-        non_pad = (gl_frames >= 0)  # exclude -100 padding
+        # --- LID-1 frame-level accuracy ---
+        frame_preds = out["group_logits"].argmax(dim=-1)
         lid1_frame_correct += (frame_preds[non_pad] == gl_frames[non_pad]).sum().item()
-        lid1_frame_total += non_pad.sum().item()
+        lid1_frame_total += n_frames
 
         for g in range(n_groups):
             g_frame_mask = (gl_frames == g)
@@ -145,17 +178,18 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
                 g_lid_frame_total[g] += g_frame_mask.sum().item()
                 g_lid_frame_correct[g] += (frame_preds[g_frame_mask] == g).sum().item()
 
-        # LID-2 per-frame accuracy within multi-script groups.
-        # Model emits {g: (B, T, n_scripts)} per-frame logits for multi-
-        # script groups only. Score frames whose GT group is g.
-        T_l2 = frame_preds.shape[1]
-        sl_frames_gt = sl_frames[:, :T_l2]
+        # --- LID-2 per-frame accuracy ---
+        T_est = imgs.shape[3] // 2
+        segs = batch_segments if batch_segments is not None else [[] for _ in range(B)]
+        _, sl_frames = build_frame_labels_from_segments(segs, T_est, n_groups, device)
+        sl_frames_gt = sl_frames[:, :T]
+
         for g_int, lid2_log in out.get("lid2_logits_per_group", {}).items():
             g_idx = int(g_int)
-            g_mask = (gl_frames == g_idx)  # frames whose GT group is g
+            g_mask = (gl_frames == g_idx)
             if not g_mask.any():
                 continue
-            pred_scripts = lid2_log[:, :T_l2].argmax(dim=-1)[g_mask]  # (N_frames,)
+            pred_scripts = lid2_log[:, :T].argmax(dim=-1)[g_mask]
             true_scripts = sl_frames_gt[g_mask]
             lid2_correct += (pred_scripts == true_scripts).sum().item()
             lid2_total += true_scripts.numel()
@@ -167,58 +201,47 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
                     s_lid2_correct[key] = s_lid2_correct.get(key, 0) + (
                         pred_scripts[s_mask] == ls).sum().item()
 
-        # Per-segment CTC decode and eval
-        all_logits = out["logits"].float().cpu()
-        gl_cpu = out["group_logits"].cpu()
+        # --- Per-segment CTC decode (CPU, one transfer) ---
+        all_preds = out["logits"].float().cpu()
+        T_logits = all_preds.shape[1]
         gids_cpu = gids.cpu().tolist()
         sids_cpu = sids.cpu().tolist()
-
-        # batch_segments already set from batch unpacking above
 
         for i, (label, true_g, local_sid) in enumerate(
                 zip(labels, gids_cpu, sids_cpu)):
 
-            frame_preds = gl_cpu[i].argmax(dim=-1)  # (T,)
-
-            # Get ground truth segments for this image
             if batch_segments is not None:
                 img_segs = batch_segments[i]
             else:
                 img_segs = [{"group_id": true_g, "script_id": local_sid,
-                             "text": label, "width": all_logits.shape[1] * 2, "offset": 0}]
+                             "text": label, "width": T_logits * 2, "offset": 0}]
 
-            # Decode and evaluate each segment
-            T_img = frame_preds.shape[0]
             for seg in img_segs:
                 seg_text = seg["text"]
                 seg_g = seg["group_id"]
                 seg_s = seg.get("script_id", 0)
-                seg_offset = seg["offset"]
-                seg_width = seg["width"]
 
                 ref_s = str(seg_text).strip().lower()
                 if not ref_s:
                     continue
 
                 key = (seg_g, seg_s)
-
-                # Frame range for this segment
-                frame_start = seg_offset // 2
-                frame_end = min((seg_offset + seg_width + 1) // 2, T_img)
+                frame_start = seg["offset"] // 2
+                frame_end = min((seg["offset"] + seg["width"] + 1) // 2, T_logits)
                 if frame_end <= frame_start:
                     continue
 
-                # Decode this segment's frames using its group's vocab
-                # (no mode/rounding — per-frame CTC logits already come from
-                # the correct group's head, so just decode directly)
                 s_idx = min(seg_s, len(group_script_names[seg_g]) - 1) if seg_g < len(group_script_names) else 0
+                script_name = group_script_names[seg_g][s_idx] if seg_g < len(group_script_names) else ""
+                if not script_name:
+                    continue
+
                 if group_script_vocab_sizes:
                     vs = group_script_vocab_sizes[seg_g][s_idx]
                 else:
-                    vs = script_vocab_size(group_script_names[seg_g][s_idx])
+                    vs = script_vocab_size(script_name)
 
-                seg_logits = all_logits[i, frame_start:frame_end, :vs]
-                seq = seg_logits.argmax(dim=-1).tolist()
+                seq = all_preds[i, frame_start:frame_end, :vs].argmax(dim=-1).tolist()
                 ids = []
                 prev = -1
                 for tok in seq:
@@ -226,8 +249,7 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
                         ids.append(tok)
                     prev = tok
 
-                script_name = group_script_names[seg_g][s_idx] if seg_g < len(group_script_names) else ""
-                dec_s = decode_ids(ids, script_name).strip().lower() if script_name and ids else ""
+                dec_s = decode_ids(ids, script_name).strip().lower() if ids else ""
 
                 ctc_total += 1
                 g_word_total[seg_g] += 1
@@ -251,8 +273,8 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
     ctc_acc = 100 * ctc_correct / max(ctc_total, 1)
     char_acc = 100 * correct_chars / max(total_chars, 1)
 
-    avg_ctc_loss = val_ctc_loss / max(val_loss_samples, 1)
-    avg_lid1_loss = val_lid1_loss / max(lid1_frame_total, 1)
+    avg_ctc_loss = val_ctc_loss / max(val_ctc_chars, 1)
+    avg_lid1_loss = val_lid1_loss / max(val_lid1_frames, 1)
 
     print(f"\n  ┌──────────────────────────────────────────────┐")
     print(f"  │  LID-1: {lid1_frame_acc:5.1f}%   LID-2: {lid2_acc:5.1f}%              │")
