@@ -726,10 +726,16 @@ def _get_word_pool(style, script, fonts, words, h=32, punct_prob=0.15):
     while len(pool) < target and attempts < target * 3:
         attempts += 1
         word = random.choice(words)
-        # Skip mixed kana/kanji words — they'd corrupt CTC labels since
-        # the pool renders whole words through a single codec.
-        if script in ("han", "kana") and _is_mixed_japanese(word):
-            continue
+        # Skip any word that isn't STRICTLY the requested script. The pool
+        # labels every entry as `script`, so admitting e.g. a pure-katakana
+        # word to the "han" pool would label visual kana as han — exactly
+        # the mislabel that hurt LID-1 han accuracy previously. Using
+        # split_japanese catches mixed AND pure-mismatched words in one
+        # check (japanese.txt is ~52% pure-kana, ~3% pure-kanji).
+        if script in ("han", "kana"):
+            segs = split_japanese(word)
+            if len(segs) != 1 or segs[0][1] != script:
+                continue
         word = mix_punctuation(word, p=punct_prob, script=script)
         font = random.choice(fonts)
         if not font_covers_text(font, word):
@@ -997,7 +1003,11 @@ def _build_single_line_plan(script_info):
         if i > 0:
             plan.append({"text": " ", "script": "whitespace"})
         word = random.choice(words)
-        if script in ("han", "kana") and _is_mixed_japanese(word):
+        if script in ("han", "kana"):
+            # Always split: pure-kana words picked for a "han" line (or vice
+            # versa) get re-labeled correctly per-segment. split_japanese
+            # returns a single segment for pure inputs, so it's a no-op for
+            # already-uniform words.
             for seg_text, seg_script in split_japanese(word):
                 plan.append({"text": seg_text, "script": seg_script})
         else:
@@ -1039,7 +1049,11 @@ def _build_mixed_line_plan(group_index):
         if i > 0:
             plan.append({"text": " ", "script": "whitespace"})
         word = random.choice(words)
-        if script in ("han", "kana") and _is_mixed_japanese(word):
+        if script in ("han", "kana"):
+            # Always split: pure-kana words picked for a "han" line (or vice
+            # versa) get re-labeled correctly per-segment. split_japanese
+            # returns a single segment for pure inputs, so it's a no-op for
+            # already-uniform words.
             for seg_text, seg_script in split_japanese(word):
                 plan.append({"text": seg_text, "script": seg_script})
         else:
