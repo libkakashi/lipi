@@ -105,7 +105,7 @@ def _batched_ctc_val_loss(logits, segments_batch, group_script_names,
 @torch.no_grad()
 def evaluate(model, val_loader, group_tokenizers, group_script_names,
              active_groups, device, device_type, use_amp, amp_dtype,
-             group_script_vocab_sizes=None):
+             group_script_vocab_sizes=None, max_batches=50):
     model.eval()
     n_groups = len(group_tokenizers)
 
@@ -139,6 +139,8 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
     ce_fn = torch.nn.CrossEntropyLoss()
 
     for batch_idx, batch in enumerate(val_loader):
+        if max_batches and batch_idx >= max_batches:
+            break
         imgs, targets, tgt_lens, gids, sids, labels, group_labels, batch_segments = batch
         group_labels = group_labels.to(device, non_blocking=True)
         imgs = imgs.to(device, non_blocking=True)
