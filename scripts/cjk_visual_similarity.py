@@ -56,15 +56,15 @@ def main():
 
     # Rank by raw corpus frequency, skip base chars
     import sys; sys.path.insert(0, ".")
-    from src.encoding.config import _CJK_BASE, _CJK_N_ALT, _CJK_VOCAB_SIZE
-    base_set = set(_CJK_BASE)
-    n_freq = _CJK_VOCAB_SIZE - 1 - len(_CJK_BASE) - _CJK_N_ALT  # BLANK + base + ALT
+    from src.encoding.config import _HAN_BASE, _CJK_N_ALT, _CJK_VOCAB_SIZE
+    base_set = set(_HAN_BASE)
+    n_freq = _CJK_VOCAB_SIZE - 1 - len(_HAN_BASE) - _CJK_N_ALT  # BLANK + base + ALT
 
     vocab_chars = [c for c, _ in char_freq.most_common() if c not in base_set][:n_freq]
 
     vocab_set = set(vocab_chars) | base_set
     need_chars = [c for c in all_cjk if c not in vocab_set]
-    print(f"Vocab (freq): {len(vocab_chars):,}, Base: {len(_CJK_BASE)}, Need coverage: {len(need_chars):,}")
+    print(f"Vocab (freq): {len(vocab_chars):,}, Base: {len(_HAN_BASE)}, Need coverage: {len(need_chars):,}")
 
     # Render all chars with multiple fonts
     print(f"Rendering {len(all_cjk):,} chars × {len(FONTS)} fonts...", flush=True)
@@ -133,7 +133,7 @@ def main():
     # Only include chars that were rendered (i.e. in all_cjk)
     leaf_seen = set()
     leaf_chars = []
-    for c in _CJK_BASE:
+    for c in _HAN_BASE:
         if c in char_to_idx and c not in leaf_seen:
             leaf_chars.append(c)
             leaf_seen.add(c)

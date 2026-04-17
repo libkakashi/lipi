@@ -41,13 +41,17 @@ _SCRIPT_RANGES = {
         (0x0590, 0x05FF),  # Hebrew
         (0xFB1D, 0xFB4F),  # Hebrew Presentation Forms
     ],
-    "han_kana": [
+    "han": [
         (0x4E00, 0x9FFF),   # CJK Unified Ideographs
         (0x3400, 0x4DBF),   # CJK Extension A
+        (0x3000, 0x303F),   # CJK Symbols/Punctuation (also valid in kana regions;
+                            # majority-vote in detect_script handles mixed segments)
+        (0xFF00, 0xFFEF),   # Fullwidth Forms (CJK punctuation)
+    ],
+    "kana": [
         (0x3040, 0x309F),   # Hiragana
         (0x30A0, 0x30FF),   # Katakana
-        (0x3000, 0x303F),   # CJK Symbols
-        (0xFF00, 0xFFEF),   # Fullwidth Forms (CJK punctuation)
+        (0x31F0, 0x31FF),   # Katakana Phonetic Extensions (rare Ainu)
     ],
     "korean": [
         (0xAC00, 0xD7AF),  # Hangul Syllables

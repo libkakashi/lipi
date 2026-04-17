@@ -792,6 +792,7 @@ class TestDataQuality:
         full word but the target has missing characters.
         """
         from src.encoding.decompose import encode_text
+        from src.data.script_detect import _char_to_script
 
         failures = []
         for script in SCRIPTS:
@@ -804,14 +805,18 @@ class TestDataQuality:
             total_chars = 0
             encoded_chars = 0
             for w in words[:2000]:
+                # han/kana share japanese.txt; generator splits at script boundaries,
+                # so only count chars that belong to the target script.
+                if script in ("han", "kana"):
+                    w = "".join(c for c in w if _char_to_script(c) == script)
+                    if not w:
+                        continue
                 total_chars += len(w)
                 ids = encode_text(w, script)
-                # Each ID represents at least one character encoded
                 encoded_chars += len(w) if ids else 0
 
             if total_chars == 0:
                 continue
-            # All scripts should encode most of their word list
             enc_pct = 100 * encoded_chars / total_chars
             if enc_pct < 95:
                 failures.append(f"{script}: only {enc_pct:.1f}% chars encoded")

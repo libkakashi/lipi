@@ -21,7 +21,7 @@ WORD_LIST_DIR = Path(__file__).parent.parent / "training_data" / "word_lists"
 # Format: http://pcai056.informatik.uni-leipzig.de/downloads/corpora/{lang}_wikipedia_2021_10K-words.txt
 # These are frequency-sorted word lists from Wikipedia + news + web
 LEIPZIG_LANGS = {
-    "zho_simpl": "han_kana.txt",     # Chinese Simplified
+    "zho_simpl": "chinese.txt",      # Chinese Simplified
     "jpn": "japanese.txt",            # Japanese
     "kor": "korean.txt",             # Korean
     "hin": "devanagari.txt",         # Hindi
@@ -121,7 +121,7 @@ def fetch_tatoeba_sentences(lang: str, limit: int = 500) -> list[str]:
 # Tatoeba language codes
 import json
 TATOEBA_LANGS = {
-    "cmn": "han_kana.txt",     # Chinese
+    "cmn": "chinese.txt",      # Chinese
     "jpn": "japanese.txt",
     "kor": "korean.txt",
     "hin": "devanagari.txt",

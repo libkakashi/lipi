@@ -26,7 +26,12 @@ _SCRIPT_EXTRA_FILES = {
     "cyrillic": ["ukrainian.txt"],
     "devanagari": ["marathi.txt", "hindi_legal.txt"],
     "arabic": ["persian.txt", "urdu.txt"],
-    "han_kana": ["chinese.txt", "japanese.txt"],
+    # Han reads Chinese and Japanese (generator will split Japanese at kana/kanji
+    # boundaries and emit kana chunks as separate segments).
+    "han": ["chinese.txt", "japanese.txt"],
+    # Kana uses Japanese word lists — words get split at script boundaries;
+    # kana portions become kana segments.
+    "kana": ["japanese.txt"],
 }
 
 

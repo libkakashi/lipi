@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from src.encoding.config import (
     NO_FUSION_SCRIPTS, FUSION_BASE_CHARS, get_fusion_codec,
-    get_korean_codec, get_cjk_codec,
+    get_korean_codec, get_han_codec,
 )
 
 
@@ -29,8 +29,8 @@ def encode_text(text: str, script: str) -> list[int]:
         return get_fusion_codec(script).encode_text(text)
     if script == "korean":
         return get_korean_codec().encode_text(text)
-    if script == "han_kana":
-        return get_cjk_codec().encode_text(text)
+    if script == "han":
+        return get_han_codec().encode_text(text)
     return []
 
 
@@ -42,8 +42,8 @@ def decode_ids(ids: list[int], script: str) -> str:
         return get_fusion_codec(script).decode_ids(ids)
     if script == "korean":
         return get_korean_codec().decode_ids(ids)
-    if script == "han_kana":
-        return get_cjk_codec().decode_ids(ids)
+    if script == "han":
+        return get_han_codec().decode_ids(ids)
     return ""
 
 
@@ -55,6 +55,6 @@ def script_vocab_size(script: str) -> int:
         return get_fusion_codec(script).vocab_size
     if script == "korean":
         return get_korean_codec().vocab_size
-    if script == "han_kana":
-        return get_cjk_codec().vocab_size
+    if script == "han":
+        return get_han_codec().vocab_size
     return 0

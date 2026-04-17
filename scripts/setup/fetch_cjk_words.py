@@ -30,7 +30,7 @@ from pathlib import Path
 
 WORD_LIST_DIR = Path(__file__).resolve().parent.parent / "training_data" / "word_lists"
 CACHE_DIR = WORD_LIST_DIR / "raw_chinese"
-TARGET_FILE = WORD_LIST_DIR / "han_kana.txt"
+CHINESE_FILE = WORD_LIST_DIR / "chinese.txt"
 JAPANESE_FILE = WORD_LIST_DIR / "japanese.txt"
 
 CJK_UNIFIED = range(0x4E00, 0x9FFF + 1)
@@ -453,7 +453,7 @@ def main():
 
     # Load existing words
     existing_words: set[str] = set()
-    for path in [TARGET_FILE, JAPANESE_FILE]:
+    for path in [CHINESE_FILE, JAPANESE_FILE]:
         if path.exists():
             for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
                 w = line.strip()
@@ -538,23 +538,23 @@ def main():
     all_words = existing_words | new_words
     print_coverage(all_words, "FINAL — ")
 
-    # Write new words to han_kana.txt
-    # Separate Japanese-only words into japanese.txt
-    han_kana_new: list[str] = []
+    # Route words: any kana present → japanese.txt (Japanese text,
+    # needs kana/kanji segmentation at training time). CJK-only → chinese.txt.
+    chinese_new: list[str] = []
     japanese_new: list[str] = []
 
     for w in sorted(new_words):
         has_c = any(is_cjk(c) for c in w)
         has_k = any(is_kana(c) for c in w)
-        if has_k and not has_c:
+        if has_k:
             japanese_new.append(w)
-        else:
-            han_kana_new.append(w)
+        elif has_c:
+            chinese_new.append(w)
 
-    if han_kana_new:
-        print(f"\nAppending {len(han_kana_new):,} words to {TARGET_FILE.name}")
-        with open(TARGET_FILE, "a", encoding="utf-8") as f:
-            for w in han_kana_new:
+    if chinese_new:
+        print(f"\nAppending {len(chinese_new):,} words to {CHINESE_FILE.name}")
+        with open(CHINESE_FILE, "a", encoding="utf-8") as f:
+            for w in chinese_new:
                 f.write(w + "\n")
 
     if japanese_new:
@@ -563,11 +563,11 @@ def main():
             for w in japanese_new:
                 f.write(w + "\n")
 
-    total_added = len(han_kana_new) + len(japanese_new)
+    total_added = len(chinese_new) + len(japanese_new)
     print(f"\nTotal: +{total_added:,} new words")
 
     # Final line counts
-    for path in [TARGET_FILE, JAPANESE_FILE]:
+    for path in [CHINESE_FILE, JAPANESE_FILE]:
         if path.exists():
             lines = sum(1 for _ in open(path, encoding="utf-8"))
             print(f"  {path.name}: {lines:,} words")

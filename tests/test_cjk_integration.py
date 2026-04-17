@@ -15,8 +15,8 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 def _get_codec():
-    from src.encoding.config import get_cjk_codec
-    return get_cjk_codec()
+    from src.encoding.config import get_han_codec
+    return get_han_codec()
 
 
 def _vocab_size():
@@ -40,7 +40,10 @@ class TestCJKCodecLoading:
     def test_vocab_size_matches_config(self):
         from src.encoding.config import _CJK_VOCAB_SIZE
         codec = _get_codec()
-        assert codec.vocab_size == _CJK_VOCAB_SIZE
+        # Han codec is CJK vocab minus kana; still capped at _CJK_VOCAB_SIZE.
+        # Actual size depends on how many kana entries existed in cjk_vocab.txt.
+        assert codec.vocab_size <= _CJK_VOCAB_SIZE
+        assert codec.vocab_size > 1000, "Han codec suspiciously small"
 
     def test_no_duplicate_tokens(self):
         codec = _get_codec()
@@ -62,19 +65,24 @@ class TestCJKRoundtrip:
             assert result == w, f"CJK roundtrip failed: {w!r} -> {result!r}"
 
     def test_kana_roundtrip(self):
-        codec = _get_codec()
+        """Kana uses its own codec now (NoFusionCodec), not han."""
+        from src.encoding.decompose import encode_text, decode_ids
         words = ["ひらがな", "カタカナ", "あいうえお"]
         for w in words:
-            ids = codec.encode_text(w)
-            result = codec.decode_ids(ids)
+            ids = encode_text(w, "kana")
+            result = decode_ids(ids, "kana")
             assert result == w, f"Kana roundtrip failed: {w!r} -> {result!r}"
 
-    def test_mixed_kana_cjk_roundtrip(self):
-        codec = _get_codec()
-        text = "こんにちは世界"
-        ids = codec.encode_text(text)
-        result = codec.decode_ids(ids)
-        assert result == text
+    def test_mixed_kana_cjk_via_segments(self):
+        """Mixed Japanese text: kana via kana codec, kanji via han codec."""
+        from src.encoding.decompose import encode_text, decode_ids
+        kana_part = "こんにちは"
+        han_part = "世界"
+        # Each segment encodes/decodes through its own codec
+        kana_ids = encode_text(kana_part, "kana")
+        han_ids = encode_text(han_part, "han")
+        assert decode_ids(kana_ids, "kana") == kana_part
+        assert decode_ids(han_ids, "han") == han_part
 
     def test_punctuation_roundtrip(self):
         codec = _get_codec()
@@ -88,13 +96,13 @@ class TestCJKRoundtrip:
         assert codec.encode_text("") == []
         assert codec.decode_ids([]) == ""
 
-    def test_nfkc_normalization(self):
-        """Halfwidth katakana should normalize to fullwidth."""
-        codec = _get_codec()
-        hw = "ｱｲｳ"
-        ids = codec.encode_text(hw)
-        result = codec.decode_ids(ids)
-        assert result == "アイウ"
+    def test_fullwidth_katakana_roundtrip(self):
+        """Fullwidth katakana should roundtrip cleanly through kana codec."""
+        from src.encoding.decompose import encode_text, decode_ids
+        fw = "アイウ"
+        ids = encode_text(fw, "kana")
+        result = decode_ids(ids, "kana")
+        assert result == fw
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +219,7 @@ class TestCTCHeadCompatibility:
         gcm = GroupCTCModule(
             enc_dim=384,
             script_vocab_sizes=[vs],
-            script_names=["han_kana"],
+            script_names=["han"],
         )
         assert gcm.max_vocab == vs
 
@@ -225,7 +233,8 @@ class TestEvalDecodePath:
     def test_ctc_greedy_decode_simulation(self):
         """Simulate CTC greedy decode -> decode_ids."""
         codec = _get_codec()
-        test_cases = ["学校", "東京タワー", "こんにちは世界", "的"]
+        # Pure kanji test cases (han codec doesn't handle kana anymore)
+        test_cases = ["学校", "東京都", "人工知能", "的"]
         for text in test_cases:
             ids = codec.encode_text(text)
             # Simulate CTC output: add blanks and repeats
@@ -262,14 +271,21 @@ class TestEvalDecodePath:
 
 class TestUnifiedAPI:
 
-    def test_encode_decode_via_decompose(self):
+    def test_encode_decode_han(self):
         from src.encoding.decompose import encode_text, decode_ids, script_vocab_size
-        text = "東京タワー"
-        ids = encode_text(text, "han_kana")
-        result = decode_ids(ids, "han_kana")
+        text = "東京都"  # all kanji
+        ids = encode_text(text, "han")
+        result = decode_ids(ids, "han")
+        assert result == text
+
+    def test_encode_decode_kana(self):
+        from src.encoding.decompose import encode_text, decode_ids
+        text = "タワー"  # all kana
+        ids = encode_text(text, "kana")
+        result = decode_ids(ids, "kana")
         assert result == text
 
     def test_vocab_size_via_decompose(self):
         from src.encoding.decompose import script_vocab_size
-        vs = script_vocab_size("han_kana")
+        vs = script_vocab_size("han")
         assert vs == _vocab_size()

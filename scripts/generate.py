@@ -141,7 +141,8 @@ def filter_fonts_by_style(fonts: list[str], style: str) -> list[str]:
 def get_renderable_chars(script: str) -> list[str]:
     """Get standalone-renderable characters/clusters for training image generation.
 
-    For han_kana: returns all CJK Unified + Ext-A characters plus kana.
+    For han: returns all CJK Unified + Ext-A characters (kanji/hanzi).
+    For kana: returns hiragana + katakana characters.
     For fusion scripts: returns base chars + all fusion clusters.
     For no-fusion scripts: returns chars from the codec.
     For korean: returns chars from the codec.
@@ -152,21 +153,25 @@ def get_renderable_chars(script: str) -> list[str]:
         get_korean_codec,
     )
 
-    if script == "han_kana":
+    if script == "han":
         chars = []
-        for cp in range(0x3400, 0x4DC0):
+        for cp in range(0x3400, 0x4DC0):      # CJK Ext A
             c = chr(cp)
             if unicodedata.category(c) != 'Cn':
                 chars.append(c)
-        for cp in range(0x4E00, 0xA000):
+        for cp in range(0x4E00, 0xA000):      # CJK Unified
             c = chr(cp)
             if unicodedata.category(c) != 'Cn':
                 chars.append(c)
-        for cp in range(0x3041, 0x3097):
+        return chars
+
+    if script == "kana":
+        chars = []
+        for cp in range(0x3041, 0x3097):      # Hiragana
             chars.append(chr(cp))
-        for cp in range(0x30A1, 0x30FB):
+        for cp in range(0x30A1, 0x30FB):      # Katakana
             chars.append(chr(cp))
-        chars.append('\u30FC')
+        chars.append('\u30FC')                # Prolonged sound mark
         return chars
 
     if script in FUSION_BASE_CHARS:

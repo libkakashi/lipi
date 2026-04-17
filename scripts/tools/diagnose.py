@@ -70,34 +70,24 @@ def main():
         if tgt_lens[i] > 0 and (targets[i, :tgt_lens[i]] == 0).any())
     print(f"  Samples with blank ID in targets: {blank_count}")
 
-    # ── 3. Verify decomposition ──
+    # ── 3. Verify encoding ──
     print("\n" + "=" * 60)
-    print("3. DECOMPOSITION CHECK")
+    print("3. ENCODING ROUNDTRIP CHECK")
     print("=" * 60)
 
-    from src.encoding.decompose import (
-        decompose_han_kana, reconstruct_han_kana,
-        _load_arbitrary_encoding,
-    )
-    enc = _load_arbitrary_encoding("han_kana")
+    from src.encoding.decompose import encode_text, decode_ids
+    from src.data.script_detect import detect_script
 
-    if enc["char_to_tokens"]:
-        print(f"  Decomposition table loaded: {len(enc['char_to_tokens'])} chars")
-    else:
-        print("  *** DECOMPOSITION TABLE EMPTY — THIS IS THE BUG ***")
-        print("  Check that training_data/word_lists/cjk_char_codes.tsv exists")
-        sys.exit(1)
-
-    # Check roundtrip on actual labels
     rt_fail = 0
     for i in range(min(1000, len(labels))):
         label = labels[i]
-        dec = decompose_han_kana(label)
-        rec = reconstruct_han_kana(list(dec))
+        script = detect_script(label)
+        ids = encode_text(label, script)
+        rec = decode_ids(ids, script)
         if rec != label:
             rt_fail += 1
             if rt_fail <= 3:
-                print(f"  ROUNDTRIP FAIL: '{label}' -> '{rec}'")
+                print(f"  ROUNDTRIP FAIL ({script}): '{label}' -> '{rec}'")
     print(f"  Roundtrip failures: {rt_fail}/1000")
 
     # ── 4. Image check ──
@@ -120,7 +110,6 @@ def main():
 
     for i in range(min(10, len(labels))):
         label = labels[i]
-        dec = decompose_han_kana(label)
         ids = targets[i, :tgt_lens[i]].tolist()
         img_ink = images[i].abs().sum().item()
         print(f"  [{i}] label='{label}' tgt_len={tgt_lens[i]} "

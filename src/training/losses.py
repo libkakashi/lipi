@@ -184,7 +184,7 @@ def compute_ctc_loss_segments(
     ctc_chars = 0
 
     # Cap per-call tensor size to limit peak memory for big-vocab buckets
-    # (e.g. han_kana vs=4000 with many segments at long max_T).
+    # (e.g. han vs~3800 with many segments at long max_T).
     MAX_BUCKET_ELEMS = 32 * 1024 * 1024  # 32M fp32 = 128MB per padded tensor
 
     def _run_chunk(chunk_segs, max_T, vs):

@@ -2,10 +2,11 @@
 Vocabulary loading for all scripts.
 
 All scripts derive their vocab from config.py:
-  - No-fusion scripts: NoFusionCodec
-  - Fusion scripts: FusionCodec
+  - No-fusion scripts: NoFusionCodec (latin, cyrillic, greek, hebrew,
+    armenian, georgian, ethiopic, emoji, kana)
+  - Fusion scripts: FusionCodec (arabic, brahmic scripts, thai, lao, etc.)
   - Korean: KoreanCodec
-  - CJK: CJKCodec
+  - Han: CJKCodec (kanji/hanzi, Chinese + Japanese kanji)
 """
 
 from src.encoding.tokenizer import BLANK_TOKEN
@@ -20,7 +21,7 @@ def build_script_vocab(script: str) -> list[str]:
     """
     from src.encoding.config import (
         NO_FUSION_SCRIPTS, FUSION_BASE_CHARS, get_fusion_codec,
-        get_korean_codec, get_cjk_codec,
+        get_korean_codec, get_han_codec,
     )
 
     if script in NO_FUSION_SCRIPTS:
@@ -29,6 +30,6 @@ def build_script_vocab(script: str) -> list[str]:
         return [BLANK_TOKEN] + get_fusion_codec(script).tokens
     if script == "korean":
         return [BLANK_TOKEN] + get_korean_codec().tokens
-    if script == "han_kana":
-        return [BLANK_TOKEN] + get_cjk_codec().tokens
+    if script == "han":
+        return [BLANK_TOKEN] + get_han_codec().tokens
     raise ValueError(f"Unknown script: {script}")

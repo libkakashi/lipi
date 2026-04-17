@@ -142,7 +142,7 @@ def download_iam(out_dir):
 
 
 @register("casia-hwdb",
-          ["han_kana"],
+          ["han"],
           "CASIA-HWDB2: Chinese handwritten text lines (HuggingFace)")
 def download_casia(out_dir):
     check_hf()
@@ -274,7 +274,7 @@ def download_bengali(out_dir):
 
 
 @register("chinese-text",
-          ["han_kana"],
+          ["han"],
           "Chinese text recognition: 500K line images")
 def download_chinese_text(out_dir):
     check_hf()
@@ -350,7 +350,7 @@ def download_tibetan(out_dir):
 
 @register("scene-text",
           ["latin", "cyrillic", "arabic", "devanagari", "bengali",
-           "han_kana", "korean"],
+           "han", "kana", "korean"],
           "ICDAR 2019 MLT + TextOCR: multilingual scene text")
 def download_scene_text(out_dir):
     dest = out_dir / "scene-text"
@@ -430,7 +430,7 @@ def download_cyrillic(out_dir):
 
 
 @register("chinese-scene",
-          ["han_kana"],
+          ["han"],
           "RCTW-17 + CTW: Chinese scene text in the wild")
 def download_chinese_scene(out_dir):
     dest = out_dir / "chinese-scene"

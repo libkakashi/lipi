@@ -242,7 +242,7 @@ def convert_casia(out_dir):
                     if image_has_ink(img):
                         images.append(rgb_to_input(img))
                         labels.append(label)
-        total = save_shards(images, labels, "han_kana", out_dir, prefix="casia")
+        total = save_shards(images, labels, "han", out_dir, prefix="casia")
         print(f"  CASIA-HWDB: {total} line images converted")
         return
     except ImportError:
@@ -269,7 +269,7 @@ def convert_casia(out_dir):
                             labels.append(label)
                     break
 
-    total = save_shards(images, labels, "han_kana", out_dir, prefix="casia")
+    total = save_shards(images, labels, "han", out_dir, prefix="casia")
     print(f"  CASIA-HWDB: {total} line images converted")
 
 

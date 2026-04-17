@@ -20,7 +20,7 @@ WORD_LIST_DIR = Path(__file__).parent.parent / "training_data" / "word_lists"
 
 # Google News RSS feeds by language
 GOOGLE_NEWS = {
-    "zh-CN": "han_kana.txt",     # Chinese
+    "zh-CN": "chinese.txt",      # Chinese
     "ja": "japanese.txt",         # Japanese
     "ko": "korean.txt",          # Korean
     "hi": "devanagari.txt",      # Hindi
@@ -61,8 +61,10 @@ GOOGLE_NEWS = {
 
 # Additional RSS feeds (public news sources)
 EXTRA_FEEDS = {
-    "han_kana.txt": [
+    "japanese.txt": [
         "https://www3.nhk.or.jp/rss/news/cat0.xml",  # NHK Japanese
+    ],
+    "chinese.txt": [
         "http://www.people.com.cn/rss/politics.xml",   # People's Daily Chinese
     ],
     "korean.txt": [

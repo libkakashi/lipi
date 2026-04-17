@@ -254,19 +254,9 @@ def fill_lao() -> list[str]:
 
 # ---- CJK / Korean ----
 
-def fill_cjk() -> list[str]:
-    """Add common CJK characters as 2-char pairs."""
-    words = []
-    # HSK-style frequency bands — add missing common characters
-    important_ranges = [
-        (0x4E00, 0x5FFF),  # most common CJK block
-        (0x6000, 0x7FFF),
-        (0x8000, 0x9FFF),
-        (0x3040, 0x309F),  # hiragana (all)
-        (0x30A0, 0x30FF),  # katakana (all)
-    ]
+def _pairs_from_ranges(ranges, seed=42) -> list[str]:
     chars = []
-    for start, end in important_ranges:
+    for start, end in ranges:
         for cp in range(start, end + 1):
             try:
                 c = chr(cp)
@@ -274,12 +264,26 @@ def fill_cjk() -> list[str]:
                     chars.append(c)
             except:
                 pass
-    # Create pairs from consecutive characters
-    random.seed(42)
+    random.seed(seed)
     random.shuffle(chars)
-    for i in range(0, len(chars) - 1, 2):
-        words.append(chars[i] + chars[i + 1])
-    return words
+    return [chars[i] + chars[i + 1] for i in range(0, len(chars) - 1, 2)]
+
+
+def fill_han() -> list[str]:
+    """Add common kanji/hanzi characters as 2-char pairs."""
+    return _pairs_from_ranges([
+        (0x4E00, 0x5FFF),  # most common CJK block
+        (0x6000, 0x7FFF),
+        (0x8000, 0x9FFF),
+    ])
+
+
+def fill_kana() -> list[str]:
+    """Add hiragana + katakana characters as 2-char pairs."""
+    return _pairs_from_ranges([
+        (0x3040, 0x309F),  # hiragana
+        (0x30A0, 0x30FF),  # katakana
+    ])
 
 
 def fill_korean() -> list[str]:
@@ -394,7 +398,8 @@ SCRIPT_FILLERS = {
     "gurmukhi":    (["gurmukhi.txt"], fill_gurmukhi),
     "thai":        (["thai.txt"], fill_thai),
     "lao":         (["lao.txt"], fill_lao),
-    "han_kana":         (["han_kana.txt", "japanese.txt"], fill_cjk),
+    "han":         (["chinese.txt", "japanese.txt"], fill_han),
+    "kana":        (["japanese.txt"], fill_kana),
     "korean":      (["korean.txt"], fill_korean),
     "arabic":      (["arabic.txt"], fill_arabic),
     "hebrew":      (["hebrew.txt"], fill_hebrew),

@@ -170,6 +170,17 @@ NO_FUSION_SCRIPTS: dict[str, NoFusionCodec] = {
         [(0x00BB, 0x00BB)],     # »
         _TYPOGRAPHIC_COMMON,
     )),
+
+    # Kana: hiragana + katakana + common punctuation.
+    # ~92 hiragana + ~96 katakana + ASCII + CJK punct = ~220 tokens.
+    "kana": NoFusionCodec(_build_char_list(
+        _ASCII_COMMON,
+        [(0x3000, 0x303F)],     # CJK Symbols and Punctuation
+        [(0x3040, 0x309F)],     # Hiragana
+        [(0x30A0, 0x30FF)],     # Katakana
+        [(0x31F0, 0x31FF)],     # Katakana Phonetic Extensions
+        _TYPOGRAPHIC_COMMON,
+    )),
 }
 
 
@@ -751,6 +762,10 @@ class CJKCodec:
                 f"single={len(self.tokens)}, alt_mapped={len(self._char_to_pair)})")
 
 
+# ── Han codec (kanji / hanzi) ───────────────────────────────────────
+# Same CJK encoding machinery, but kana excluded from base.
+# Kana is now a separate script/codec.
+
 # 214 CJK radicals (the CJK unified codepoints corresponding to Kangxi radicals)
 _CJK_RADICALS: list[tuple[int, int]] = [
     (ord(unicodedata.normalize("NFKC", chr(cp))),
@@ -758,35 +773,33 @@ _CJK_RADICALS: list[tuple[int, int]] = [
     for cp in range(0x2F00, 0x2FD6)
 ]
 
-# CJK base chars: kana + ASCII + CJK punctuation + 214 radicals
-_CJK_BASE = _build_char_list(
+# Han base chars: ASCII + CJK punctuation + 214 radicals (NO kana here)
+_HAN_BASE = _build_char_list(
     _ASCII_COMMON,
     [(0x3000, 0x303F)],     # CJK Symbols and Punctuation
-    [(0x3040, 0x309F)],     # Hiragana
-    [(0x30A0, 0x30FF)],     # Katakana
     _CJK_RADICALS,          # 214 radicals
     _TYPOGRAPHIC_COMMON,
 )
 
+# Kana range set — used to filter kana out of cjk_vocab / cjk_visual_mapping
+_KANA_CPS = set(range(0x3040, 0x3100)) | set(range(0x31F0, 0x3200))
 
-def _build_cjk_codec() -> CJKCodec:
-    """Build CJKCodec from saved vocab list and visual similarity mapping.
 
-    Both files are produced by scripts/cjk_visual_similarity.py:
-      cjk_vocab.txt — the exact freq-ranked vocab (single-token chars)
-      cjk_visual_mapping.tsv — ALT assignments for non-vocab chars
-    """
-    # Load exact vocab list (produced by the similarity script)
+def _is_kana(char: str) -> bool:
+    return any(ord(c) in _KANA_CPS for c in char)
+
+
+def _build_han_codec() -> CJKCodec:
+    """Build han codec from cjk_vocab.txt / cjk_visual_mapping.tsv with kana filtered out."""
     vocab_path = _FUSIONS_DIR / "cjk_vocab.txt"
-    base_set = set(_CJK_BASE)
+    base_set = set(_HAN_BASE)
     freq_chars: list[str] = []
     if vocab_path.exists():
         for line in vocab_path.read_text(encoding="utf-8").splitlines():
             char = line.strip()
-            if char and char not in base_set:
+            if char and char not in base_set and not _is_kana(char):
                 freq_chars.append(char)
 
-    # Load visual similarity mapping
     mapping_path = _FUSIONS_DIR / "cjk_visual_mapping.tsv"
     alt_mapping: dict[str, tuple[int, str]] = {}
     if mapping_path.exists():
@@ -794,17 +807,19 @@ def _build_cjk_codec() -> CJKCodec:
             parts = line.split("\t")
             if len(parts) >= 3:
                 char, slot, match = parts[0], int(parts[1]), parts[2]
+                # Skip kana entries (target char or match char being kana)
+                if _is_kana(char) or _is_kana(match):
+                    continue
                 alt_mapping[char] = (slot, match)
 
-    return CJKCodec(_CJK_BASE, freq_chars, alt_mapping)
+    return CJKCodec(_HAN_BASE, freq_chars, alt_mapping)
 
 
-# Lazy-loaded
-_cjk_codec: CJKCodec | None = None
+_han_codec: CJKCodec | None = None
 
 
-def get_cjk_codec() -> CJKCodec:
-    global _cjk_codec
-    if _cjk_codec is None:
-        _cjk_codec = _build_cjk_codec()
-    return _cjk_codec
+def get_han_codec() -> CJKCodec:
+    global _han_codec
+    if _han_codec is None:
+        _han_codec = _build_han_codec()
+    return _han_codec
