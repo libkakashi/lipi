@@ -113,7 +113,9 @@ def parse_args():
                              "LID-1 gets undivided shared encoder, CTC trains experts only.")
     parser.add_argument("--freeze-except", type=str, default=None,
                         help="Freeze everything except specified components. "
-                             "Comma-separated: lid,ctc,experts,backbone")
+                             "Comma-separated. Valid: experts, ctc, backbone, "
+                             "lid (all three heads), lid0 / lid1 / lid2 "
+                             "(individual heads).")
     args = parser.parse_args()
 
     # Validation
@@ -720,14 +722,21 @@ def main():
     # Selective freezing
     if args.freeze_except:
         components = set(c.strip() for c in args.freeze_except.split(","))
-        valid = {"experts", "ctc", "backbone", "lid"}
+        valid = {"experts", "ctc", "backbone",
+                 "lid", "lid0", "lid1", "lid2"}
         bad = components - valid
         assert not bad, f"Unknown --freeze-except components: {bad}. Valid: {valid}"
 
         # Build set of prefixes to unfreeze
         unfreeze_prefixes = []
-        if "lid" in components:
-            unfreeze_prefixes.extend(["lid0_head.", "group_head.", "lid2_heads."])
+        # `lid` is an alias for all three heads; `lid0`/`lid1`/`lid2` target
+        # individual heads (e.g. warm-up just the freshly-initialized LID-0).
+        if "lid" in components or "lid0" in components:
+            unfreeze_prefixes.append("lid0_head.")
+        if "lid" in components or "lid1" in components:
+            unfreeze_prefixes.append("group_head.")
+        if "lid" in components or "lid2" in components:
+            unfreeze_prefixes.append("lid2_heads.")
         if "ctc" in components:
             unfreeze_prefixes.append("ctc_modules.")
         if "experts" in components:
