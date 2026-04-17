@@ -10,6 +10,9 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from src.encoding.decompose import decode_ids, encode_text, script_vocab_size
+from src.model.lid import (
+    SUPER_GROUPS, SUPER_GROUP_GROUPS, GROUP_TO_ID,
+)
 from src.training.losses import compute_lid0_loss, compute_lid1_loss
 from src.training.routing import (
     build_frame_labels_from_segments, derive_super_group_labels,
@@ -128,6 +131,8 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
     # Per-group stats
     g_lid_frame_correct = [0] * n_groups
     g_lid_frame_total = [0] * n_groups
+    g_lid0_frame_correct = [0] * n_groups  # per-group LID-0 routing accuracy
+    g_lid0_frame_total = [0] * n_groups
     g_word_correct = [0] * n_groups
     g_word_total = [0] * n_groups
     g_char_correct = [0] * n_groups
@@ -191,12 +196,24 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
                 g_lid_frame_total[g] += g_frame_mask.sum().item()
                 g_lid_frame_correct[g] += (frame_preds[g_frame_mask] == g).sum().item()
 
-        # --- LID-0 frame-level accuracy ---
+        # --- LID-0 frame-level accuracy (global + per-group) ---
         sg_preds = out["super_group_logits"].argmax(dim=-1)
         sg_non_pad = (sgl_frames >= 0)
         if sg_non_pad.any():
             lid0_frame_correct += (sg_preds[sg_non_pad] == sgl_frames[sg_non_pad]).sum().item()
             lid0_frame_total += sg_non_pad.sum().item()
+
+        # Per-group LID-0 tracking: for each group, fraction of frames whose
+        # LID-0 argmax equals the GT super-group. All member groups of a
+        # super-group share the same GT super-id, so this also aggregates
+        # naturally up to per-super-group LID-0 accuracy.
+        for g in range(n_groups):
+            g_frame_mask = (gl_frames == g)
+            if g_frame_mask.any():
+                true_sg = sgl_frames[g_frame_mask]
+                pred_sg = sg_preds[g_frame_mask]
+                g_lid0_frame_total[g] += true_sg.numel()
+                g_lid0_frame_correct[g] += (pred_sg == true_sg).sum().item()
 
         # --- LID-2 per-frame accuracy ---
         T_est = imgs.shape[3] // 2
@@ -332,31 +349,65 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
     print(f"  │  Val loss: ctc={avg_ctc_loss:.4f}  lid0={avg_lid0_loss:.4f}  lid1={avg_lid1_loss:.4f}  │")
     print(f"  └──────────────────────────────────────────────────────┘")
 
-    print(f"\n  {'Group / Script':<20s} {'LID1':>6s} {'Word':>6s} {'Char':>6s} {'LID2':>6s}")
-    print(f"  {'─' * 50}")
+    # Grouped table: super-group → group → script.
+    # Super-group row shows LID-0 routing accuracy (aggregated over its
+    # member groups) + aggregated Word/Char. Group rows show per-group
+    # LID-0 + LID-1 routing. Script rows show Word/Char/LID-2 as before.
+    print(f"\n  {'Group / Script':<22s} {'LID0':>6s} {'LID1':>6s} "
+          f"{'Word':>6s} {'Char':>6s} {'LID2':>6s}")
+    print(f"  {'─' * 60}")
 
-    for g in range(n_groups):
-        frame_g = 100 * g_lid_frame_correct[g] / max(g_lid_frame_total[g], 1)
-        word_g = 100 * g_word_correct[g] / max(g_word_total[g], 1)
-        char_g = 100 * g_char_correct[g] / max(g_char_total[g], 1)
-        name = active_groups[g] if g < len(active_groups) else f"group{g}"
-        print(f"  {name:<20s} {frame_g:5.1f}% {word_g:5.1f}% {char_g:5.1f}%")
+    name_to_idx = {name: i for i, name in enumerate(active_groups)}
 
-        scripts = group_script_names[g] if g < len(group_script_names) else []
-        for ls, sname in enumerate(scripts):
-            key = (g, ls)
-            sw = s_word_total.get(key, 0)
-            if sw == 0:
-                continue
-            word_s = 100 * s_word_correct.get(key, 0) / max(sw, 1)
-            char_s = 100 * s_char_correct.get(key, 0) / max(s_char_total.get(key, 0), 1)
-            lid2_str = ""
-            if key in s_lid2_total:
-                lid2_s = 100 * s_lid2_correct.get(key, 0) / max(s_lid2_total[key], 1)
-                lid2_str = f"{lid2_s:5.1f}%"
-            print(f"    {sname:<18s} {'':>6s} {word_s:5.1f}% {char_s:5.1f}% {lid2_str}")
+    for sg_name in SUPER_GROUPS:
+        member_group_names = SUPER_GROUP_GROUPS[sg_name]
+        member_idxs = [name_to_idx[g] for g in member_group_names
+                       if g in name_to_idx]
+        if not member_idxs:
+            continue
 
-    print(f"  {'─' * 56}")
+        # Aggregate LID-0 (sum of per-group frames routed to correct super),
+        # plus aggregated Word / Char across member groups.
+        sg_lid0_c = sum(g_lid0_frame_correct[g] for g in member_idxs)
+        sg_lid0_t = sum(g_lid0_frame_total[g] for g in member_idxs)
+        sg_word_c = sum(g_word_correct[g] for g in member_idxs)
+        sg_word_t = sum(g_word_total[g] for g in member_idxs)
+        sg_char_c = sum(g_char_correct[g] for g in member_idxs)
+        sg_char_t = sum(g_char_total[g] for g in member_idxs)
+        if sg_lid0_t == 0 and sg_word_t == 0:
+            continue  # no samples for this super-group in this eval
+
+        sg_lid0_pct = 100 * sg_lid0_c / max(sg_lid0_t, 1)
+        sg_word_pct = 100 * sg_word_c / max(sg_word_t, 1)
+        sg_char_pct = 100 * sg_char_c / max(sg_char_t, 1)
+        print(f"  {sg_name:<22s} {sg_lid0_pct:5.1f}% {'':>6s} "
+              f"{sg_word_pct:5.1f}% {sg_char_pct:5.1f}%")
+
+        for g in member_idxs:
+            name = active_groups[g]
+            lid0_g = 100 * g_lid0_frame_correct[g] / max(g_lid0_frame_total[g], 1)
+            frame_g = 100 * g_lid_frame_correct[g] / max(g_lid_frame_total[g], 1)
+            word_g = 100 * g_word_correct[g] / max(g_word_total[g], 1)
+            char_g = 100 * g_char_correct[g] / max(g_char_total[g], 1)
+            print(f"    {name:<20s} {lid0_g:5.1f}% {frame_g:5.1f}% "
+                  f"{word_g:5.1f}% {char_g:5.1f}%")
+
+            scripts = group_script_names[g] if g < len(group_script_names) else []
+            for ls, sname in enumerate(scripts):
+                key = (g, ls)
+                sw = s_word_total.get(key, 0)
+                if sw == 0:
+                    continue
+                word_s = 100 * s_word_correct.get(key, 0) / max(sw, 1)
+                char_s = 100 * s_char_correct.get(key, 0) / max(s_char_total.get(key, 0), 1)
+                lid2_str = ""
+                if key in s_lid2_total:
+                    lid2_s = 100 * s_lid2_correct.get(key, 0) / max(s_lid2_total[key], 1)
+                    lid2_str = f"{lid2_s:5.1f}%"
+                print(f"      {sname:<18s} {'':>6s} {'':>6s} "
+                      f"{word_s:5.1f}% {char_s:5.1f}% {lid2_str}")
+
+    print(f"  {'─' * 60}")
 
     return {"lid0_acc": lid0_frame_acc,
             "lid1_acc": lid1_frame_acc, "lid2_acc": lid2_acc,
