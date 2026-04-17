@@ -1,20 +1,13 @@
 """
-Migrate a 13-group checkpoint to 15-group (han/kana split + dravidian split).
+Migrate checkpoints to 15-group layout (han/kana split + dravidian split).
+
+Auto-detects source layout from checkpoint's model_config:
+  - 13 groups (original): applies han/kana split + dravidian split
+  - 14 groups (post han/kana): applies dravidian split only
 
 Usage:
     python scripts/migrate_checkpoint.py --input checkpoints/moe/moe_epoch20.pt \
-                                         --output checkpoints/moe/moe_epoch20_migrated.pt
-
-Changes from old 13 groups → new 15 groups:
-  - Group 4 (sino_japanese) → Group 4 (han). Kana expert at group 5 = NEW.
-  - Group 7 (south_indic: kannada,telugu,malayalam,tamil,sinhala) →
-    Group 8 (dravidian_north: kannada,telugu,sinhala) +
-    Group 9 (dravidian_south: malayalam,tamil) = SPLIT.
-  - Groups after the splits shift up accordingly.
-  - LID-1 head dropped (shape changes 14→16).
-  - LID-2 for old south_indic dropped (script count changes).
-  - CTC heads for south_indic split across two new groups.
-  - CTC head for sino_japanese dropped (vocab changed).
+                                         --output checkpoints/moe/moe_migrated.pt
 """
 
 import argparse
@@ -25,37 +18,15 @@ import torch
 
 
 # =========================================================================
-# Old 13 groups → New 15 groups
+# 13 → 15 migration (han/kana split + dravidian split)
 # =========================================================================
-#
-# Old:                          New:
-# 0  latin                      0  latin
-# 1  cyrillic_greek             1  cyrillic_greek
-# 2  arabic                     2  arabic
-# 3  hebrew                     3  hebrew
-# 4  sino_japanese              4  han
-#                                5  kana (NEW)
-# 5  korean                     6  korean
-# 6  ne_indic                   7  ne_indic
-# 7  south_indic                8  dravidian_north (kannada,telugu,sinhala)
-#                                9  dravidian_south (malayalam,tamil) (NEW)
-# 8  se_asian                   10 se_asian
-# 9  emoji                      11 emoji
-# 10 caucasus                   12 caucasus
-# 11 ethiopic                   13 ethiopic
-# 12 tibetan                    14 tibetan
 
-OLD_TO_NEW_GROUP = {
-    0: 0,   # latin
-    1: 1,   # cyrillic_greek
-    2: 2,   # arabic
-    3: 3,   # hebrew
+_13_TO_15_GROUP = {
+    0: 0, 1: 1, 2: 2, 3: 3,
     4: 4,   # sino_japanese → han
-    # 5 = kana (NEW)
     5: 6,   # korean
     6: 7,   # ne_indic
     7: 8,   # south_indic → dravidian_north
-    # 9 = dravidian_south (NEW)
     8: 10,  # se_asian
     9: 11,  # emoji
     10: 12, # caucasus
@@ -63,52 +34,77 @@ OLD_TO_NEW_GROUP = {
     12: 14, # tibetan
 }
 
-# Old 26 flat scripts → new 27 flat scripts
-# Old south_indic had: kannada(12), telugu(13), malayalam(14), tamil(15), sinhala(16)
-# New dravidian_north: kannada(13), telugu(14), sinhala(15)
-# New dravidian_south: malayalam(16), tamil(17)
-OLD_TO_NEW_SCRIPT = {
+_13_TO_15_SCRIPT = {
     0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5,  # latin..han_kana→han
-    # 6 = kana (NEW)
     6: 7,                                    # korean
-    7: 8, 8: 9, 9: 10, 10: 11, 11: 12,     # ne_indic (shifted +1)
-    12: 13,  # kannada → dravidian_north[0]
-    13: 14,  # telugu → dravidian_north[1]
-    14: 16,  # malayalam → dravidian_south[0]
-    15: 17,  # tamil → dravidian_south[1]
-    16: 15,  # sinhala → dravidian_north[2]
+    7: 8, 8: 9, 9: 10, 10: 11, 11: 12,     # ne_indic
+    12: 13, 13: 14,                          # kannada, telugu → drav_north
+    14: 16, 15: 17,                          # malayalam, tamil → drav_south
+    16: 15,                                  # sinhala → drav_north[2]
     17: 18, 18: 19, 19: 20, 20: 21,         # se_asian
-    21: 22,                                   # emoji
-    22: 23, 23: 24,                           # caucasus
-    24: 25,                                   # ethiopic
-    25: 26,                                   # tibetan
+    21: 22, 22: 23, 23: 24, 24: 25, 25: 26, # emoji..tibetan
 }
 
-# Old LID-2 group keys → new LID-2 group keys
-# Old group 7 (south_indic) is DROPPED — split changes script count
-OLD_TO_NEW_LID2 = {
-    1: 1,    # cyrillic_greek (2 scripts → 2 scripts)
-    6: 7,    # ne_indic (5 → 5)
+_13_TO_15_LID2 = {
+    1: 1,    # cyrillic_greek
+    6: 7,    # ne_indic
     # 7: SKIP (south_indic split)
-    8: 10,   # se_asian (4 → 4)
-    10: 12,  # caucasus (2 → 2)
+    8: 10,   # se_asian
+    10: 12,  # caucasus
 }
 
-# Old CTC group → new CTC group (simple groups that don't change structure)
-OLD_TO_NEW_CTC_SIMPLE = {
+_13_TO_15_CTC_SIMPLE = {
     0: 0, 1: 1, 2: 2, 3: 3,
-    # 4: SKIP (sino_japanese vocab changed)
+    # 4: SKIP (han_kana vocab changed)
     5: 6, 6: 7,
-    # 7: SPECIAL (south_indic splits — handled separately)
+    # 7: SPECIAL (south_indic splits)
     8: 10, 9: 11, 10: 12, 11: 13, 12: 14,
 }
 
-# South_indic CTC head split: old heads → new groups+heads
-# Old group 7 heads: 0=kannada, 1=telugu, 2=malayalam, 3=tamil, 4=sinhala
-# New group 8 (dravidian_north): 0=kannada, 1=telugu, 2=sinhala
-# New group 9 (dravidian_south): 0=malayalam, 1=tamil
+# =========================================================================
+# 14 → 15 migration (dravidian split only)
+# =========================================================================
+
+_14_TO_15_GROUP = {
+    0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7,
+    8: 8,   # south_indic → dravidian_north
+    9: 10,  # se_asian
+    10: 11, # emoji
+    11: 12, # caucasus
+    12: 13, # ethiopic
+    13: 14, # tibetan
+}
+
+_14_TO_15_SCRIPT = {
+    **{i: i for i in range(13)},  # 0-12 unchanged (latin..odia)
+    13: 13, 14: 14,               # kannada, telugu → same flat IDs
+    15: 16, 16: 17,               # malayalam, tamil → shifted
+    17: 15,                        # sinhala → drav_north[2]
+    **{i: i for i in range(18, 27)},  # 18-26 unchanged (se_asian..tibetan)
+}
+
+_14_TO_15_LID2 = {
+    1: 1,    # cyrillic_greek
+    7: 7,    # ne_indic
+    # 8: SKIP (south_indic split)
+    9: 10,   # se_asian
+    11: 12,  # caucasus
+}
+
+_14_TO_15_CTC_SIMPLE = {
+    0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7,
+    # 8: SPECIAL (south_indic splits)
+    9: 10, 10: 11, 11: 12, 12: 13, 13: 14,
+}
+
+# =========================================================================
+# South_indic CTC head split (same for both 13→15 and 14→15)
+# Old heads: 0=kannada, 1=telugu, 2=malayalam, 3=tamil, 4=sinhala
+# New drav_north (group 8): 0=kannada, 1=telugu, 2=sinhala
+# New drav_south (group 9): 0=malayalam, 1=tamil
+# =========================================================================
+
 SOUTH_INDIC_CTC_REMAP = {
-    # (old_head_idx): (new_group, new_head_idx)
     0: (8, 0),   # kannada
     1: (8, 1),   # telugu
     2: (9, 0),   # malayalam
@@ -116,6 +112,10 @@ SOUTH_INDIC_CTC_REMAP = {
     4: (8, 2),   # sinhala
 }
 
+
+# =========================================================================
+# Remapping helpers
+# =========================================================================
 
 def _remap_indexed_key(key, prefix, old_to_new):
     pattern = rf'^({re.escape(prefix)}\.)(\d+)(\..*)?$'
@@ -145,7 +145,23 @@ def _remap_expert_key(key, block_prefix, old_to_new):
     return key, True
 
 
-def migrate(old_state):
+def migrate(old_state, source_groups):
+    """Migrate state dict to 15-group layout."""
+    if source_groups == 13:
+        GROUP_MAP = _13_TO_15_GROUP
+        SCRIPT_MAP = _13_TO_15_SCRIPT
+        LID2_MAP = _13_TO_15_LID2
+        CTC_SIMPLE = _13_TO_15_CTC_SIMPLE
+        south_indic_group = 7
+    elif source_groups == 14:
+        GROUP_MAP = _14_TO_15_GROUP
+        SCRIPT_MAP = _14_TO_15_SCRIPT
+        LID2_MAP = _14_TO_15_LID2
+        CTC_SIMPLE = _14_TO_15_CTC_SIMPLE
+        south_indic_group = 8
+    else:
+        raise ValueError(f"Unsupported source_groups={source_groups}")
+
     new_state = {}
     skipped = []
     remapped = []
@@ -154,7 +170,7 @@ def migrate(old_state):
         new_key = key
         keep = True
 
-        # --- LID-1: drop (shape changes 14 → 16) ---
+        # --- LID-1: drop (output size changes) ---
         if key.startswith('group_head.'):
             skipped.append(key)
             continue
@@ -162,38 +178,36 @@ def migrate(old_state):
         # --- Group expert blocks ---
         if key.startswith('group_local_blocks.') or key.startswith('group_wide_blocks.'):
             prefix = 'group_local_blocks' if 'group_local' in key else 'group_wide_blocks'
-            new_key, keep = _remap_expert_key(key, prefix, OLD_TO_NEW_GROUP)
+            new_key, keep = _remap_expert_key(key, prefix, GROUP_MAP)
 
         # --- Group aggregates ---
         elif key.startswith('group_aggregates.'):
-            new_key, keep = _remap_indexed_key(key, 'group_aggregates', OLD_TO_NEW_GROUP)
+            new_key, keep = _remap_indexed_key(key, 'group_aggregates', GROUP_MAP)
 
         # --- LID-2 heads ---
         elif key.startswith('lid2_heads.'):
-            new_key, keep = _remap_indexed_key(key, 'lid2_heads', OLD_TO_NEW_LID2)
+            new_key, keep = _remap_indexed_key(key, 'lid2_heads', LID2_MAP)
 
         # --- Script expert blocks ---
         elif key.startswith('script_local_blocks.') or key.startswith('script_wide_blocks.'):
             prefix = 'script_local_blocks' if 'script_local' in key else 'script_wide_blocks'
-            new_key, keep = _remap_expert_key(key, prefix, OLD_TO_NEW_SCRIPT)
+            new_key, keep = _remap_expert_key(key, prefix, SCRIPT_MAP)
 
         # --- Script aggregates ---
         elif key.startswith('script_aggregates.'):
-            new_key, keep = _remap_indexed_key(key, 'script_aggregates', OLD_TO_NEW_SCRIPT)
+            new_key, keep = _remap_indexed_key(key, 'script_aggregates', SCRIPT_MAP)
 
-        # --- CTC modules (complex: south_indic splits) ---
+        # --- CTC modules ---
         elif key.startswith('ctc_modules.'):
-            # Parse: ctc_modules.{group}.{rest}
             m = re.match(r'^(ctc_modules\.)(\d+)(\..*)?$', key)
             if m:
                 old_g = int(m.group(2))
                 suffix = m.group(3) or ''
 
-                if old_g in OLD_TO_NEW_CTC_SIMPLE:
-                    new_g = OLD_TO_NEW_CTC_SIMPLE[old_g]
+                if old_g in CTC_SIMPLE:
+                    new_g = CTC_SIMPLE[old_g]
                     new_key = f'ctc_modules.{new_g}{suffix}'
-                elif old_g == 7:
-                    # South_indic split: remap per-head
+                elif old_g == south_indic_group:
                     head_match = re.match(r'\.heads\.(\d+)(\..*)', suffix)
                     if head_match:
                         old_head = int(head_match.group(1))
@@ -204,14 +218,9 @@ def migrate(old_state):
                         else:
                             keep = False
                     else:
-                        # Non-head params (e.g. max_vocab buffer) — skip, will reinit
                         keep = False
-                elif old_g == 4:
-                    keep = False  # sino_japanese vocab changed
                 else:
                     keep = False
-            else:
-                pass  # non-matching key, pass through
 
         if not keep:
             skipped.append(key)
@@ -225,7 +234,7 @@ def migrate(old_state):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Migrate 13-group checkpoint to 15-group")
+    parser = argparse.ArgumentParser(description="Migrate checkpoint to 15-group layout")
     parser.add_argument("--input", required=True, help="Path to old checkpoint")
     parser.add_argument("--output", required=True, help="Path to save migrated checkpoint")
     args = parser.parse_args()
@@ -235,10 +244,30 @@ def main():
     print(f"Loading {args.input}...")
     ckpt = torch.load(args.input, map_location="cpu", weights_only=False)
 
-    old_state = ckpt["model"]
-    print(f"  {len(old_state)} parameters in old checkpoint")
+    source_groups = ckpt.get("model_config", {}).get("num_groups")
+    if source_groups is None:
+        # Fallback: count group experts
+        keys = list(ckpt["model"].keys())
+        group_ids = set()
+        for k in keys:
+            m = re.match(r'group_local_blocks\.\d+\.expert_attns\.(\d+)\.', k)
+            if m:
+                group_ids.add(int(m.group(1)))
+        source_groups = max(group_ids) + 1 if group_ids else 13
+    print(f"  Source: {source_groups} groups")
 
-    new_state, skipped, remapped = migrate(old_state)
+    if source_groups == 15:
+        print("  Already at 15 groups — nothing to migrate.")
+        return
+
+    if source_groups not in (13, 14):
+        print(f"  ERROR: Unsupported source layout ({source_groups} groups)")
+        return
+
+    old_state = ckpt["model"]
+    print(f"  {len(old_state)} parameters")
+
+    new_state, skipped, remapped = migrate(old_state, source_groups)
 
     print(f"\n  Remapped: {len(remapped)} keys")
     for r in remapped[:15]:
@@ -266,25 +295,15 @@ def main():
 
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     torch.save(out, args.output)
-    print(f"\nSaved migrated checkpoint to {args.output}")
-    print("\nWhat will reinitialize on load:")
-    print("  - group_head (LID-1): 14→16 outputs")
-    print("  - kana group expert (group 5): identity-init")
-    print("  - kana script expert (flat 6): identity-init")
-    print("  - dravidian_south group expert (group 9): identity-init")
-    print("  - han CTC head (group 4): vocab changed")
-    print("  - kana CTC head (group 5): new")
-    print("  - LID-2 for dravidian_north (group 8): new (3 scripts vs old 5)")
-    print("  - LID-2 for dravidian_south (group 9): new (2 scripts)")
-    print("  - Optimizer/scheduler: dropped")
-    print("\nPreserved from old south_indic:")
-    print("  - Group expert → dravidian_north (group 8)")
-    print("  - CTC heads: kannada,telugu → drav_north; malayalam,tamil → drav_south")
-    print("  - sinhala CTC head → dravidian_north heads.2")
-    print("\nRecommended training:")
-    print("  1. python scripts/train.py --resume <migrated.pt> --freeze-except lid \\")
-    print("       --ctc-weight 0 --epochs 3 --lr 1e-3")
-    print("  2. python scripts/train.py --resume <lid_done.pt> --epochs 20 --lr 5e-5")
+    print(f"\nSaved to {args.output}")
+
+    if source_groups == 13:
+        print("\nApplied: han/kana split + dravidian split (13 → 15)")
+        print("  Reinit: LID-1, kana expert/CTC, han CTC, dravidian LID-2s")
+    else:
+        print("\nApplied: dravidian split only (14 → 15)")
+        print("  Reinit: LID-1, dravidian_south expert, dravidian LID-2s")
+    print("  Preserved: south_indic CTC heads split across dravidian_north/south")
 
 
 if __name__ == "__main__":
