@@ -32,11 +32,9 @@ from src.training.dataloader import (
     LipiStreamingDataset,
 )
 from src.training.losses import (
-    compute_lid0_loss, compute_lid1_loss, compute_ctc_loss_segments,
+    compute_lid1_loss, compute_ctc_loss_segments,
 )
-from src.training.routing import (
-    build_frame_labels_from_segments, derive_super_group_labels,
-)
+from src.training.routing import build_frame_labels_from_segments
 from src.training.eval import evaluate
 
 
@@ -99,9 +97,6 @@ def parse_args():
                              "before joint training — random features into "
                              "CTC cause blank collapse, structured features "
                              "from LID-pretraining let CTC escape cleanly.")
-    parser.add_argument("--lid0-weight", type=float, default=1.0,
-                        help="Super-group classification loss weight. "
-                             "Set to 0 to freeze LID-0 routing signal.")
     parser.add_argument("--lid1-weight", type=float, default=1.0)
     parser.add_argument("--lid2-weight", type=float, default=1.0,
                         help="Set to 0 to disable LID-2 loss "
@@ -114,8 +109,7 @@ def parse_args():
     parser.add_argument("--freeze-except", type=str, default=None,
                         help="Freeze everything except specified components. "
                              "Comma-separated. Valid: experts, ctc, backbone, "
-                             "lid (all three heads), lid0 / lid1 / lid2 "
-                             "(individual heads).")
+                             "lid (both heads), lid1 / lid2 (individual heads).")
     args = parser.parse_args()
 
     # Validation
@@ -434,7 +428,7 @@ def save_checkpoint(model, optimizer, scheduler, scaler, epoch, args, save_dir):
 def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, scaler,
                     ce_loss_fn, device, device_type, use_amp, amp_dtype,
                     epoch, total_epochs, grad_accum, log_interval,
-                    ctc_weight, lid0_weight, lid1_weight, lid2_weight,
+                    ctc_weight, lid1_weight, lid2_weight,
                     group_script_vocabs, group_script_names,
                     detach_for_experts=False,
                     save_dir=None, args=None):
@@ -456,17 +450,13 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
     # All *_accum / log_* tensors are 0-d GPU longs/floats; we sync to CPU
     # only at log interval / epoch end.
     ctc_loss_accum = torch.zeros(1, device=device)
-    lid0_loss_accum = torch.zeros(1, device=device)
     lid1_loss_accum = torch.zeros(1, device=device)
     total_loss_accum = torch.zeros(1, device=device)
     log_ctc = torch.zeros(1, device=device)
-    log_lid0 = torch.zeros(1, device=device)
     log_lid1 = torch.zeros(1, device=device)
     log_lid2 = torch.zeros(1, device=device)
     log_total = torch.zeros(1, device=device)
     log_count = 0
-    log_lid0_correct = torch.zeros((), dtype=torch.long, device=device)
-    log_lid0_total = torch.zeros((), dtype=torch.long, device=device)
     log_lid1_correct = torch.zeros((), dtype=torch.long, device=device)
     log_lid1_total = torch.zeros((), dtype=torch.long, device=device)
     log_lid2_correct = torch.zeros((), dtype=torch.long, device=device)
@@ -490,34 +480,13 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             gl_for_model, sl_frames = build_frame_labels_from_segments(
                 segments_, T_est, NUM_GROUPS, device)
 
-            # Pick the deepest forward stage any active loss actually
-            # needs. Any loss with weight=0 contributes nothing, so we can
-            # skip every stage whose output would only feed into it.
-            #   ctc_weight > 0    → need "all" (full forward)
-            #   lid2_weight > 0   → need "lid2" (up to LID-2 heads)
-            #   lid1_weight > 0   → need "lid1" (up to group_head)
-            #   otherwise         → need "lid0" only
-            if ctc_weight != 0:
-                compute_until = "all"
-            elif lid2_weight != 0:
-                compute_until = "lid2"
-            elif lid1_weight != 0:
-                compute_until = "lid1"
-            else:
-                compute_until = "lid0"
             out = model(imgs_, group_ids=gl_for_model, script_ids=sl_frames,
                         detach_for_experts=detach_for_experts,
-                        compute_until=compute_until)
+                        compute_ctc=(ctc_weight != 0))
 
-        # LID-0 loss: map group labels → super-group labels (preserving -100)
-        T = out["super_group_logits"].shape[1]
+        # LID-1 loss. Skip when weight is 0.
+        T = out["group_logits"].shape[1]
         gl_frames = gl_frames[:, :T]
-        sgl_frames = derive_super_group_labels(gl_frames)
-        lid0_loss = compute_lid0_loss(
-            out["super_group_logits"], sgl_frames, ce_loss_fn)
-
-        # LID-1 loss. Skip when weight is 0 — group_logits is a zero-stub
-        # in that case and the loss value is meaningless anyway.
         if lid1_weight != 0:
             lid1_loss = compute_lid1_loss(
                 out["group_logits"], gl_frames, ce_loss_fn)
@@ -536,12 +505,11 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             ctc_loss = torch.zeros(1, device=device)
 
         # LID-2 loss: per-frame CE within multi-script groups. Skip when
-        # weight is 0 or when lid2_logits_per_group is empty (which is the
-        # case under compute_post_lid0=False).
+        # weight is 0 or when lid2_logits_per_group is empty.
         lid2_loss = torch.zeros(1, device=device)
         if lid2_weight != 0:
             lid2_count = 0
-            T_lid2 = out["super_group_logits"].shape[1]
+            T_lid2 = out["group_logits"].shape[1]
             sl_for_loss = sl_frames[:, :T_lid2]
             gl_for_loss = gl_for_model[:, :T_lid2]
             for g_str, lid2_logits in out.get("lid2_logits_per_group", {}).items():
@@ -558,7 +526,6 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                 lid2_loss = lid2_loss / lid2_count
 
         loss = (ctc_weight * ctc_loss
-                + lid0_weight * lid0_loss.float()
                 + lid1_weight * lid1_loss.float()
                 + lid2_weight * lid2_loss.float())
 
@@ -572,10 +539,9 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         detached_lid2 = {
             g: lg.detach() for g, lg in out.get("lid2_logits_per_group", {}).items()
         }
-        return (ctc_loss, lid0_loss, lid1_loss, lid2_loss, loss,
-                out["super_group_logits"].detach(),
+        return (ctc_loss, lid1_loss, lid2_loss, loss,
                 out["group_logits"].detach(), detached_lid2,
-                gl_for_model.detach(), sl_frames.detach(), sgl_frames.detach())
+                gl_for_model.detach(), sl_frames.detach())
 
     for batch_idx, batch in enumerate(train_loader):
         imgs, targets, tgt_lens, gids, sids, _labels, group_labels, segments = batch
@@ -595,9 +561,9 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             group_labels = group_labels.to(device, non_blocking=True)
 
         try:
-            (ctc_loss, lid0_loss, lid1_loss, lid2_loss, loss,
-             super_group_logits, group_logits, lid2_logits,
-             gt_groups, gt_scripts, gt_super_groups) = \
+            (ctc_loss, lid1_loss, lid2_loss, loss,
+             group_logits, lid2_logits,
+             gt_groups, gt_scripts) = \
                 _forward_backward(imgs, targets, tgt_lens, gids, sids, scale=1.0,
                                   group_labels_=group_labels, segments_=segments)
         except torch.cuda.OutOfMemoryError:
@@ -623,30 +589,19 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         # Accumulate on GPU — no sync
         mult = float(grad_accum)
         ctc_loss_accum += ctc_loss.detach()
-        lid0_loss_accum += lid0_loss.detach()
         lid1_loss_accum += lid1_loss.detach()
         total_loss_accum += loss.detach() * mult
         log_ctc += ctc_loss.detach()
-        log_lid0 += lid0_loss.detach()
         log_lid1 += lid1_loss.detach()
         log_lid2 += lid2_loss.detach()
         log_total += loss.detach() * mult
         n_batches += 1
         log_count += 1
 
-        # Accumulate LID-0, LID-1 and LID-2 accuracy on GPU — no per-batch
-        # sync. Skip trackers whose loss weight is 0: the corresponding
-        # logits are zero-stubs (from the early-exit forward), so argmax
-        # would always be 0 and the number would be meaningless.
+        # Accumulate LID-1 and LID-2 accuracy on GPU — no per-batch sync.
+        # Skip trackers whose loss weight is 0.
         with torch.no_grad():
-            T_acc = super_group_logits.shape[1]
-
-            # LID-0: always tracked (it's why we're training)
-            sgp = super_group_logits.argmax(dim=-1)
-            sgl = gt_super_groups[:, :T_acc]
-            sg_non_pad = (sgl >= 0)
-            log_lid0_correct += ((sgp == sgl) & sg_non_pad).sum()
-            log_lid0_total += sg_non_pad.sum()
+            T_acc = group_logits.shape[1]
 
             if lid1_weight != 0:
                 fp = group_logits.argmax(dim=-1)
@@ -671,22 +626,18 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
 
         if n_batches % log_interval == 0:
             # Batch all the per-interval counters into one GPU→CPU transfer.
-            # Order: losses (5) + accuracy numerators/denominators (6).
             stats = torch.stack([
-                log_ctc.squeeze(), log_lid0.squeeze(), log_lid1.squeeze(),
+                log_ctc.squeeze(), log_lid1.squeeze(),
                 log_lid2.squeeze(), log_total.squeeze(),
-                log_lid0_correct.float(), log_lid0_total.float(),
                 log_lid1_correct.float(), log_lid1_total.float(),
                 log_lid2_correct.float(), log_lid2_total.float(),
             ]).tolist()
-            (avg_ctc, avg_lid0, avg_lid1, avg_lid2, avg_total,
-             lid0_c, lid0_t, lid1_c, lid1_t, lid2_c, lid2_t) = stats
+            (avg_ctc, avg_lid1, avg_lid2, avg_total,
+             lid1_c, lid1_t, lid2_c, lid2_t) = stats
             avg_ctc /= log_count
-            avg_lid0 /= log_count
             avg_lid1 /= log_count
             avg_lid2 /= log_count
             avg_total /= log_count
-            lid0_acc = 100 * lid0_c / max(lid0_t, 1)
             lid1_acc = 100 * lid1_c / max(lid1_t, 1)
             lid2_acc = 100 * lid2_c / max(lid2_t, 1)
             elapsed = time.time() - log_time
@@ -696,21 +647,17 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             print(
                 f"  [{epoch:>2}/{total_epochs}] {batch_str:>9}  "
                 f"loss {avg_total:.4f}  "
-                f"ctc {avg_ctc:.4f}  lid0 {avg_lid0:.4f}  "
-                f"lid1 {avg_lid1:.4f}  lid2 {avg_lid2:.4f}  "
-                f"| acc {lid0_acc:5.1f}% {lid1_acc:5.1f}% {lid2_acc:5.1f}%  "
+                f"ctc {avg_ctc:.4f}  lid1 {avg_lid1:.4f}  lid2 {avg_lid2:.4f}  "
+                f"| acc {lid1_acc:5.1f}% {lid2_acc:5.1f}%  "
                 f"| {samples_per_sec:.0f} img/s  {ms_per_step:.0f}ms/step  "
                 f"gnorm {shared_norm:.1f}/{expert_norm:.1f}"
             )
             log_time = time.time()
             log_ctc.zero_()
-            log_lid0.zero_()
             log_lid1.zero_()
             log_lid2.zero_()
             log_total.zero_()
             log_count = 0
-            log_lid0_correct.zero_()
-            log_lid0_total.zero_()
             log_lid1_correct.zero_()
             log_lid1_total.zero_()
             log_lid2_correct.zero_()
@@ -724,7 +671,6 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
 
     return {
         "ctc": ctc_loss_accum.item() / n_batches,
-        "lid0": lid0_loss_accum.item() / n_batches,
         "lid1": lid1_loss_accum.item() / n_batches,
         "total": total_loss_accum.item() / n_batches,
     }
@@ -745,19 +691,17 @@ def main():
     # Selective freezing
     if args.freeze_except:
         components = set(c.strip() for c in args.freeze_except.split(","))
-        valid = {"experts", "ctc", "backbone",
-                 "lid", "lid0", "lid1", "lid2"}
+        valid = {"experts", "ctc", "backbone", "lid", "lid1", "lid2"}
         bad = components - valid
         assert not bad, f"Unknown --freeze-except components: {bad}. Valid: {valid}"
 
-        # Build set of prefixes to unfreeze
+        # Build set of prefixes to unfreeze. `lid` is an alias for both
+        # heads; `lid1` and `lid2` target individual heads. lid1_attn
+        # rides with lid1 since it's a pre-classifier attention block
+        # dedicated to LID-1 script-family extraction.
         unfreeze_prefixes = []
-        # `lid` is an alias for all three heads; `lid0`/`lid1`/`lid2` target
-        # individual heads (e.g. warm-up just the freshly-initialized LID-0).
-        if "lid" in components or "lid0" in components:
-            unfreeze_prefixes.append("lid0_head.")
         if "lid" in components or "lid1" in components:
-            unfreeze_prefixes.append("group_head.")
+            unfreeze_prefixes.extend(["lid1_attn.", "group_head."])
         if "lid" in components or "lid2" in components:
             unfreeze_prefixes.append("lid2_heads.")
         if "ctc" in components:
@@ -767,7 +711,7 @@ def main():
                 k for k in EXPERT_PARAM_PREFIXES if k != "ctc_modules."])
         if "backbone" in components:
             unfreeze_prefixes.extend([
-                "stem.", "shared_a.", "super_b.", "merge_a.", "merge_b."])
+                "stem.", "shared_a.", "shared_b.", "merge_a.", "merge_b."])
 
         frozen = 0
         trainable = 0
@@ -785,19 +729,11 @@ def main():
     train_widths = data["train_widths"]
     max_width = int(train_widths.max())
 
-    # Match the VRAM calibration to the actual training forward: zero-weight
-    # losses mean the corresponding stages are skipped, so the activation
-    # footprint is much smaller. Mirrors the logic in _forward_backward.
-    if args.ctc_weight != 0:
-        budget_stage = "all"
-    elif args.lid2_weight != 0:
-        budget_stage = "lid2"
-    elif args.lid1_weight != 0:
-        budget_stage = "lid1"
-    else:
-        budget_stage = "lid0"
+    # Match the VRAM calibration to the actual training forward: when
+    # ctc_weight=0 the CTC path is skipped, so the activation footprint
+    # is smaller.
     pixel_budget = estimate_pixel_budget(
-        model, vram_gb=args.vram, compute_until=budget_stage)
+        model, vram_gb=args.vram, compute_ctc=(args.ctc_weight != 0))
     max_batch_at_widest = pixel_budget // max_width
     # Cap at --batch-size: pixel budget handles width scaling, but there's
     # per-sample overhead (autograd nodes, CTC loss, routing) that doesn't
@@ -846,8 +782,8 @@ def main():
     print(f"\n{'=' * 60}")
     print(f"TRAINING: epochs {start_epoch}-{args.epochs}, lr={args.lr}")
     print(f"  Batch: {eff_batch} x {args.grad_accum} (pixel-budgeted)")
-    print(f"  Losses: CTC x{args.ctc_weight} + LID0 x{args.lid0_weight} "
-          f"+ LID1 x{args.lid1_weight} + LID2 x{args.lid2_weight}")
+    print(f"  Losses: CTC x{args.ctc_weight} + LID1 x{args.lid1_weight} "
+          f"+ LID2 x{args.lid2_weight}")
     print(f"  Routing: ground truth (CTC on all samples)")
     print(f"  Per-script vocabs: {data['group_script_vocab_sizes']}")
     print(f"{'=' * 60}")
@@ -863,7 +799,6 @@ def main():
             opt["use_amp"], opt["amp_dtype"], epoch, args.epochs, args.grad_accum,
             args.log_interval,
             ctc_weight=args.ctc_weight,
-            lid0_weight=args.lid0_weight,
             lid1_weight=args.lid1_weight, lid2_weight=args.lid2_weight,
             group_script_vocabs=data["group_script_vocab_sizes"],
             group_script_names=data["group_script_names"],
@@ -873,8 +808,8 @@ def main():
         elapsed = time.time() - t0
         if metrics:
             print(f"\nEpoch {epoch}/{args.epochs}: "
-                  f"ctc={metrics['ctc']:.4f} lid0={metrics['lid0']:.4f} "
-                  f"lid1={metrics['lid1']:.4f}  time={elapsed:.0f}s")
+                  f"ctc={metrics['ctc']:.4f} lid1={metrics['lid1']:.4f}  "
+                  f"time={elapsed:.0f}s")
 
         save_checkpoint(model, opt["optimizer"], opt["scheduler"], opt["scaler"],
                         epoch, args, save_dir)

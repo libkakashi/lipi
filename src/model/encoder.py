@@ -7,13 +7,13 @@ Architecture:
        → (B, 128, 8, W/2)
     -> Shared SWA-A: 2× windowed-attention blocks at (h=8, w=W/2)
     -> Patch-merge 8→2, proj 128×4→dim
-    -> Frame-level LID-0: per-frame super-group classification
-       (5 super-groups: alphabetic, semitic, cjk, brahmic, other, + blank)
-    -> Route frames to per-super-group SWA-B stacks
-    -> 2× super-group SWA-B blocks per super-group (h=2, w=W/2, dim)
-       (blank frames bypass super_b as identity)
+    -> Shared SWA-B: 2× windowed-attention blocks at (h=2, w=W/2, dim)
+    -> Pool h=2→1
+    -> LID-1 context: 1× SWA block (w=32, wider horizontal context) so
+       LID-1 has its own capacity for script-family discrimination
+       without forcing shared_b to encode it.
     -> Frame-level LID-1: per-frame script group classification (15 groups)
-    -> Patch-merge 2→1
+    -> Patch-merge 2→1 (on the pre-lid1_attn features for CTC path)
     -> Route frames to group expert blocks by group_id
     -> 1 local group expert block  (h=1, window 1×16, 15 experts)
     -> 1 wide  group expert block  (h=1, window 1×64, 15 experts)
@@ -48,9 +48,7 @@ except ImportError:
     flex_attention = None
     _HAS_FLEX_ATTENTION = False
 
-from src.model.lid import (
-    NUM_GROUPS, NUM_SUPER_GROUPS, GROUP_ID_TO_SUPER_GROUP_ID,
-)
+from src.model.lid import NUM_GROUPS
 
 
 class DropPath(nn.Module):
@@ -546,23 +544,23 @@ def _run_expert_block(block, x, expert_id, h, w):
 
 
 class LipiMoEEncoder(nn.Module):
-    """Lipi v5: ConvStem + LID-0 super-group routing + group experts + LID-2 + script experts.
+    """Lipi v5: ConvStem + shared SWA + LID-1 + group experts + LID-2 + script experts.
 
     Trained from scratch (no pretrained backbone). Small-RF stem keeps
     boundary contamination minimal before attention layers take over.
 
-    Three-level expert routing:
-      1. LID-0 classifies each frame into a super-group (5 + blank)
-      2. Per-super-group SWA-B stacks specialize features within each family
-      3. LID-1 classifies each frame into a script group (15 + blank)
-      4. Group expert blocks process frames per-group (local + wide streams)
-      5. LID-2 classifies each frame into a script within its group
-      6. Script expert blocks process frames per-script (local + wide streams)
-      7. Per-script CTC heads decode characters
+    Two-level expert routing:
+      1. LID-1 classifies each frame into a script group (15 + blank). A
+         dedicated `lid1_attn` SWA block sits between shared_b and the
+         classifier so LID-1 has its own capacity for script-family
+         discrimination without forcing shared_b into a compromise
+         between family and character features.
+      2. Group expert blocks process frames per-group (local + wide streams)
+      3. LID-2 classifies each frame into a script within its group
+      4. Script expert blocks process frames per-script (local + wide streams)
+      5. Per-script CTC heads decode characters
 
     Single-script groups skip LID-2 (only 1 script, trivially assigned).
-    Blank frames bypass super_b (identity) and are zeroed by the group-
-    expert stage.
     """
 
     def __init__(
@@ -586,21 +584,16 @@ class LipiMoEEncoder(nn.Module):
         # and can starve MoE experts that already see only 1/N of data.
         layer_scale_init: float = 1.0,
         num_groups: int = NUM_GROUPS,
-        num_super_groups: int = NUM_SUPER_GROUPS,
         group_script_vocab_sizes: list[list[int]] | None = None,
         group_script_names: list[list[str]] | None = None,
+        # Accepted for backward compat with checkpoints from the LID-0 era;
+        # silently ignored when rolled back.
+        num_super_groups: int | None = None,
     ):
         super().__init__()
-        # num_super_groups is accepted as a kwarg so ckpt["model_config"] can be
-        # replayed via LipiMoEEncoder(**cfg); the actual super-group count is
-        # fixed by the lid.py constants and must match.
-        assert num_super_groups == NUM_SUPER_GROUPS, (
-            f"num_super_groups={num_super_groups} does not match "
-            f"NUM_SUPER_GROUPS={NUM_SUPER_GROUPS} in lid.py")
+        del num_super_groups  # unused (rolled back); kept as kwarg for ckpt replay
         self.num_groups = num_groups
         self.blank_group_id = num_groups
-        self.num_super_groups = NUM_SUPER_GROUPS
-        self.blank_super_group_id = NUM_SUPER_GROUPS
 
         if group_script_vocab_sizes is None:
             group_script_vocab_sizes = [[100]] * num_groups
@@ -641,24 +634,9 @@ class LipiMoEEncoder(nn.Module):
             "drop_path_rate": drop_path_rate,
             "layer_scale_init": layer_scale_init,
             "num_groups": num_groups,
-            "num_super_groups": NUM_SUPER_GROUPS,
             "group_script_vocab_sizes": group_script_vocab_sizes,
             "group_script_names": group_script_names,
         }
-
-        # Fixed mapping: group_id → super_group_id (buffer so it moves with
-        # the model to GPU). Size is num_groups+1 so index num_groups (blank)
-        # is always valid and maps to the blank super-group. For num_groups <
-        # NUM_GROUPS (tests / partial models), truncate the canonical table.
-        _g2sg_list = GROUP_ID_TO_SUPER_GROUP_ID[:num_groups]
-        if len(_g2sg_list) < num_groups:
-            # Extra groups beyond the canonical 15 fall back to the blank
-            # super-group (they won't route to any specialized super_b stack).
-            _g2sg_list = _g2sg_list + [NUM_SUPER_GROUPS] * (
-                num_groups - len(_g2sg_list))
-        _g2sg_list = _g2sg_list + [NUM_SUPER_GROUPS]  # blank group → blank super
-        g2sg = torch.tensor(_g2sg_list, dtype=torch.long)
-        self.register_buffer("group_to_super_group", g2sg, persistent=False)
 
         # Drop-path schedule: linearly increase from 0 → drop_path_rate
         # across all residual stages along a sample's path.
@@ -690,32 +668,14 @@ class LipiMoEEncoder(nn.Module):
         self._post_stem_h = 8  # stem downsamples 32px input by 4x
         self.merge_a = nn.Linear(stem_out_ch * 4, dim)  # 4 rows → dim
 
-        # LID-0: per-frame super-group classification. Pools h=2→1 off the
-        # merge_a output (before super_b) and predicts one of 5 script
-        # families + blank. Same pooling + MLP pattern as group_head.
-        self.super_h_pool = nn.AdaptiveAvgPool2d((1, None))
-        self.lid0_head = nn.Sequential(
-            nn.Linear(dim, dim // 2),
-            nn.GELU(),
-            nn.Linear(dim // 2, NUM_SUPER_GROUPS + 1),
-        )
-
-        # Per-super-group SWA-B stacks. Each super-group gets its own copy
-        # of what was previously a single shared SWA-B stack; frames route
-        # to the stack matching their super-group. Same config as the old
-        # shared_b (h=2, w=W/2, window 2×16). Drop-path rate is shared
-        # across super-groups so a frame sees the same residual scaling
-        # regardless of which super-group it routes to.
-        sb_dp = [next(dp_iter) for _ in range(num_shared_b_blocks)]
-        self.super_b = nn.ModuleList([
-            nn.ModuleList([
-                SWABlock(dim=dim, num_heads=max(dim // 64, 1),
-                         window_h=2, window_w=16, shift=(i % 2 == 1),
-                         mlp_ratio=shared_mlp_ratio, drop_path=sb_dp[i],
-                         layer_scale_init=layer_scale_init)
-                for i in range(num_shared_b_blocks)
-            ])
-            for _ in range(NUM_SUPER_GROUPS)
+        # Shared SWA-B at (h=2, w=W/2), dim. Window 2×16: full vertical
+        # extent (top+bottom half of char) × 2-char horizontal context.
+        self.shared_b = nn.ModuleList([
+            SWABlock(dim=dim, num_heads=max(dim // 64, 1),
+                     window_h=2, window_w=16, shift=(i % 2 == 1),
+                     mlp_ratio=shared_mlp_ratio, drop_path=next(dp_iter),
+                     layer_scale_init=layer_scale_init)
+            for i in range(num_shared_b_blocks)
         ])
 
         # Patch-merge (h=2 → 1): concat 2 rows → project. Final collapse
@@ -727,8 +687,29 @@ class LipiMoEEncoder(nn.Module):
         group_dp = next(dp_iter) if max(num_group_local_blocks, num_group_wide_blocks) > 0 else 0.0
         script_dp = next(dp_iter) if max(num_script_local_blocks, num_script_wide_blocks) > 0 else 0.0
 
-        # LID-1: per-frame group classification
+        # LID-1: per-frame group classification.
+        #
+        # Dedicated `lid1_attn` block sits between shared_b output (pooled
+        # to h=1) and the classifier head. Window w=32 gives LID-1 ~2×
+        # wider horizontal context than shared_b's w=16, so it can pick up
+        # multi-character script signal (e.g. punctuation-only fragments
+        # use neighbor context). Output projection is zero-init so the
+        # residual starts as identity — from a CTC-seeded checkpoint,
+        # LID-1 keeps its existing accuracy and improves from there.
         self.group_h_pool = nn.AdaptiveAvgPool2d((1, None))
+        self.lid1_attn = SWABlock(
+            dim=dim, num_heads=max(dim // 64, 1),
+            window_h=1, window_w=32, shift=False,
+            mlp_ratio=mlp_ratio, drop_path=0.0,
+            layer_scale_init=layer_scale_init,
+        )
+        # Near-identity init: zero the output projections so lid1_attn
+        # starts as x + 0 = x. Preserves pre-rollback LID-1 behavior at
+        # migration time.
+        nn.init.zeros_(self.lid1_attn.attn.proj.weight)
+        nn.init.zeros_(self.lid1_attn.attn.proj.bias)
+        nn.init.zeros_(self.lid1_attn.mlp[-1].weight)
+        nn.init.zeros_(self.lid1_attn.mlp[-1].bias)
         self.group_head = nn.Sequential(
             nn.Linear(dim, dim // 2),
             nn.GELU(),
@@ -859,26 +840,14 @@ class LipiMoEEncoder(nn.Module):
         group_ids: Tensor | None = None,
         script_ids: Tensor | None = None,
         detach_for_experts: bool = False,
-        compute_until: str = "all",
+        compute_ctc: bool = True,
     ) -> dict:
         """Run the encoder forward pass.
 
-        compute_until: how far to run the pipeline before returning stubs
-        for the remaining outputs. Lets staged training / inference skip
-        compute that no active loss or consumer needs.
-
-          "lid0"  — stop after lid0_head. Skips super_b, LID-1, merge_b,
-                    group experts, LID-2, script experts, CTC.
-          "lid1"  — stop after group_head (LID-1). Skips merge_b, group
-                    experts, LID-2, script experts, CTC.
-          "lid2"  — stop after LID-2 heads. Skips script experts + CTC.
-                    (Equivalent to the old compute_ctc=False.)
-          "all"   — full forward pass (default).
+        compute_ctc=False skips the script experts + final norm + CTC
+        heads. Useful when the CTC loss weight is 0 and we don't need
+        character predictions (e.g. LID-only pretraining).
         """
-        _STAGES = ("lid0", "lid1", "lid2", "all")
-        assert compute_until in _STAGES, (
-            f"compute_until must be one of {_STAGES}, got {compute_until!r}")
-        _stage_idx = _STAGES.index(compute_until)
         B = images.shape[0]
 
         x = images.float() / 255.0 if images.dtype == torch.uint8 else images
@@ -903,139 +872,24 @@ class LipiMoEEncoder(nn.Module):
 
         d = x.shape[-1]
 
-        # =====================================================================
-        # LID-0: per-frame super-group classification
-        #
-        # Pooled h=2→1 view of the merge_a output predicts one of 5 script
-        # families (+ blank). Runs BEFORE super_b so the routing decision is
-        # made on family-agnostic features; super_b blocks then specialize
-        # within the family.
-        # =====================================================================
-        x_for_super = x.reshape(B, h, w, d).permute(0, 3, 1, 2)  # (B, d, 2, w)
-        x_for_super = self.super_h_pool(x_for_super).squeeze(2).permute(0, 2, 1)
-        super_group_logits = self.lid0_head(x_for_super)  # (B, w, num_super+1)
+        # Shared SWA-B at (h=2, w=W/2), dim
+        for blk in self.shared_b:
+            x = blk(x, h, w)
 
-        # Early-exit after LID-0 (compute_until="lid0"). Skips super_b +
-        # group experts + LID-2 + script experts + CTC → ~3-5× faster per
-        # step. All downstream keys are zero-filled stubs so callers that
-        # expect them don't crash.
-        if _stage_idx == 0:
-            T = w
-            max_vocab = max(m.max_vocab for m in self.ctc_modules)
-            return {
-                "logits": torch.zeros(B, T, max_vocab,
-                                      device=x.device, dtype=x.dtype),
-                "lengths": torch.full((B,), T, dtype=torch.long, device=x.device),
-                "super_group_logits": super_group_logits,
-                "super_group_ids": super_group_logits.argmax(dim=-1),
-                "group_logits": torch.zeros(B, T, self.num_groups + 1,
-                                            device=x.device, dtype=x.dtype),
-                "group_ids": torch.zeros(B, T, dtype=torch.long, device=x.device),
-                "lid2_logits_per_group": {},
-                "frame_scripts": torch.zeros(B, T, dtype=torch.long, device=x.device),
-                "flat_scripts": torch.full((B, T), -1, dtype=torch.long, device=x.device),
-            }
-
-        # Determine per-frame super-group assignments. During training with
-        # GT group labels, map group→super_group via the fixed buffer.
-        # During inference, use LID-0 argmax.
-        if group_ids is not None:
-            if group_ids.dim() == 1:
-                _fg_early = group_ids.unsqueeze(1).expand(B, w)
-            else:
-                _fg_early = group_ids
-            _fg_early = torch.where(
-                (_fg_early >= 0) & (_fg_early <= self.blank_group_id),
-                _fg_early, torch.full_like(_fg_early, self.blank_group_id))
-            frame_super_groups = self.group_to_super_group[_fg_early]
-        else:
-            frame_super_groups = super_group_logits.argmax(dim=-1)
-
-        # =====================================================================
-        # Per-super-group SWA-B routing
-        #
-        # Frames route to one of NUM_SUPER_GROUPS SWA-B stacks based on
-        # their super-group. Blank frames (super_id == blank_super_group_id)
-        # bypass super_b as identity — they have no family, and the group
-        # experts will zero them out downstream anyway.
-        # =====================================================================
-        x_2d = x.reshape(B, h, w, d)
-        x_after_super = x_2d.clone()  # identity default for blank/unrouted frames
-
-        # One upfront sync: (B, num_super_groups) per-sample per-sg counts.
-        # Replaces per-iteration .any() + .sum() + .tolist() syncs.
-        sg_lens_cpu = _per_sample_key_lens(
-            frame_super_groups, self.num_super_groups).tolist()
-
-        for sg in range(self.num_super_groups):
-            # Python-only iteration: no syncs inside the loop head.
-            b_list = [b for b in range(B) if sg_lens_cpu[b][sg] > 0]
-            if not b_list:
-                continue
-            lens_list = [sg_lens_cpu[b][sg] for b in b_list]
-            max_w_sg = max(lens_list)
-            N = len(b_list)
-
-            # Vectorized collect: same pattern as _collect_segments, but
-            # preserves h=2 rows (each frame column carries 2 rows).
-            mask_sg = (frame_super_groups == sg)  # (B, w)
-            b_indices_gpu = torch.tensor(
-                b_list, dtype=torch.long, device=x.device)
-            b_to_active = torch.full(
-                (B,), -1, dtype=torch.long, device=x.device)
-            b_to_active[b_indices_gpu] = torch.arange(N, device=x.device)
-
-            bs, ts = mask_sg.nonzero(as_tuple=True)  # (M,), (M,)
-            pos_in_seg = mask_sg.long().cumsum(dim=1) - 1  # (B, w)
-            p_dst = pos_in_seg[bs, ts]  # (M,)
-            i_dst = b_to_active[bs]    # (M,)
-
-            seg = torch.zeros(N, h, max_w_sg, d,
-                              device=x.device, dtype=x.dtype)
-            # Advanced indexing: x_2d[bs, :, ts] → (M, h, d) because the
-            # non-contiguous advanced indices (bs, ts) broadcast to M and
-            # get moved to the front, leaving the `:`-indexed h axis intact.
-            seg[i_dst, :, p_dst] = x_2d[bs, :, ts]
-
-            # Run per-super-group SWA-B stack at (h=2, w=max_w_sg)
-            seg_flat = seg.reshape(N, h * max_w_sg, d)
-            for block in self.super_b[sg]:
-                seg_flat = block(seg_flat, h, max_w_sg)
-            seg = seg_flat.reshape(N, h, max_w_sg, d)
-
-            # Scatter back into x_after_super (reusing i_dst / p_dst).
-            x_after_super[bs, :, ts] = seg[i_dst, :, p_dst]
-
-        x = x_after_super.reshape(B, h * w, d)
-
-        # LID-1 branches off BEFORE the final 2→1 merge. Two consequences:
-        #   1. LID sees h=2 features (upper + lower half of each character)
-        #      — richer script-identifying signal than a flattened h=1 view.
-        #   2. merge_b below then only receives CTC gradient, so it can
-        #      specialize for character discriminability without having to
-        #      simultaneously serve LID's script-discrimination objective.
+        # LID-1 branches off BEFORE the final 2→1 merge so LID-1 sees h=2
+        # features (top+bottom half of each char) and merge_b only gets
+        # CTC gradient. We pool h=2→1 for LID-1, then run `lid1_attn` to
+        # give LID-1 its own horizontal-context capacity (window w=32).
+        # The post-lid1_attn tensor feeds ONLY the classifier; merge_b /
+        # experts / CTC use the pre-lid1_attn pooled features so they
+        # aren't pulled toward script-family representation.
         x_for_group = x.reshape(B, h, w, d).permute(0, 3, 1, 2)  # (B, d, 2, w)
         x_for_group = self.group_h_pool(x_for_group).squeeze(2).permute(0, 2, 1)
+        # lid1_attn output starts as identity (zero-init proj+mlp); the
+        # classifier sees the same features it did pre-rollback, plus room
+        # to grow its own context.
+        x_for_group = self.lid1_attn(x_for_group, 1, w)
         group_logits = self.group_head(x_for_group)  # (B, W/2, num_groups+1)
-
-        # Early-exit after LID-1 (compute_until="lid1"). Skips merge_b +
-        # group experts + LID-2 + script experts + CTC. For staged training
-        # where only LID-0 and LID-1 have non-zero loss weights.
-        if _stage_idx == 1:
-            T = w
-            max_vocab = max(m.max_vocab for m in self.ctc_modules)
-            return {
-                "logits": torch.zeros(B, T, max_vocab,
-                                      device=x.device, dtype=x.dtype),
-                "lengths": torch.full((B,), T, dtype=torch.long, device=x.device),
-                "super_group_logits": super_group_logits,
-                "super_group_ids": frame_super_groups,
-                "group_logits": group_logits,
-                "group_ids": group_logits.argmax(dim=-1),
-                "lid2_logits_per_group": {},
-                "frame_scripts": torch.zeros(B, T, dtype=torch.long, device=x.device),
-                "flat_scripts": torch.full((B, T), -1, dtype=torch.long, device=x.device),
-            }
 
         # Patch-merge 2 → 1: concat 2 rows, project to dim. Only touches
         # the CTC path from here on.
@@ -1131,19 +985,16 @@ class LipiMoEEncoder(nn.Module):
         # Convert to flat script IDs for script expert routing
         flat_scripts = self._get_flat_script_ids(frame_groups, frame_scripts)
 
-        # Early-exit after LID-2 (compute_until="lid2"). Skips script
-        # experts + final norm + CTC heads. Useful when ctc_weight=0 so
-        # CTC loss isn't computed — the script expert forward would be
-        # pure waste.
-        if _stage_idx == 2:
+        # Skip script experts + final norm + CTC heads when compute_ctc
+        # is False (e.g. ctc_weight=0 pretraining). Script experts have
+        # no gradient path to any active loss in that case.
+        if not compute_ctc:
             T = w
             max_vocab = max(m.max_vocab for m in self.ctc_modules)
             return {
                 "logits": torch.zeros(B, T, max_vocab,
                                       device=x.device, dtype=x.dtype),
                 "lengths": torch.full((B,), T, dtype=torch.long, device=x.device),
-                "super_group_logits": super_group_logits,
-                "super_group_ids": frame_super_groups,
                 "group_logits": group_logits,
                 "group_ids": frame_groups,
                 "lid2_logits_per_group": lid2_logits_per_group,
@@ -1226,8 +1077,6 @@ class LipiMoEEncoder(nn.Module):
         return {
             "logits": logits,
             "lengths": lengths,
-            "super_group_logits": super_group_logits,
-            "super_group_ids": frame_super_groups,
             "group_logits": group_logits,
             "group_ids": frame_groups,
             "lid2_logits_per_group": lid2_logits_per_group,

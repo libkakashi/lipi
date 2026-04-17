@@ -112,25 +112,6 @@ def compute_lid1_loss(
     return ce_loss_fn(group_logits.reshape(B * T, G), frame_labels.reshape(B * T))
 
 
-def compute_lid0_loss(
-    super_group_logits: Tensor,
-    true_super_group_ids: Tensor,
-    ce_loss_fn: nn.CrossEntropyLoss,
-) -> Tensor:
-    """LID-0 per-frame super-group cross-entropy.
-
-    super_group_logits: (B, T, num_super_groups + 1) — per-frame predictions.
-    true_super_group_ids: (B,) broadcast to all frames, or (B, T) per-frame.
-    """
-    B, T, G = super_group_logits.shape
-    if true_super_group_ids.dim() == 1:
-        frame_labels = true_super_group_ids.unsqueeze(1).expand(B, T)
-    else:
-        frame_labels = true_super_group_ids
-    return ce_loss_fn(
-        super_group_logits.reshape(B * T, G), frame_labels.reshape(B * T))
-
-
 def compute_ctc_loss_segments(
     logits: Tensor,
     segments_batch: list[list[dict]],

@@ -9,17 +9,14 @@ import torch
 
 
 def estimate_pixel_budget(
-    model, vram_gb: float = 32, compute_until: str = "all",
+    model, vram_gb: float = 32, compute_ctc: bool = True,
 ) -> int:
     """Estimate max pixel budget (B*W) by measuring actual VRAM usage.
 
     Runs two calibration batches (small and large) to separate fixed
     overhead from per-pixel cost, then extrapolates to available VRAM.
-
-    compute_until should match what training will actually use so the
-    calibration captures the same activation footprint. In staged
-    warm-ups (lid0 only) the forward is much smaller, so measuring "all"
-    would massively under-size the batch.
+    compute_ctc should match what training uses so the calibration
+    captures the same activation footprint.
     """
     device = next(model.parameters()).device
     if device.type != "cuda":
@@ -27,8 +24,8 @@ def estimate_pixel_budget(
         return 50000
 
     # Only params that will actually be updated contribute to grad + Adam
-    # state. With --freeze-except lid0 this collapses from ~250 MB * 4 to
-    # essentially 0 MB (lid0_head is tiny).
+    # state. With --freeze-except <heads>, optimizer VRAM collapses to
+    # just those head params.
     model_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
     trainable_bytes = sum(p.numel() * p.element_size()
                           for p in model.parameters() if p.requires_grad)
@@ -47,18 +44,15 @@ def estimate_pixel_budget(
 
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             out = model(imgs, group_ids=gids, script_ids=sids,
-                        compute_until=compute_until)
-            # Sum every logit tensor the forward actually produced — if
-            # the backbone is frozen, this may be the only tensor whose
-            # graph contains a requires_grad=True parameter (e.g.
-            # super_group_logits when only lid0_head is trainable).
-            parts = [out["super_group_logits"].sum()]
-            if compute_until in ("lid1", "lid2", "all"):
-                parts.append(out["group_logits"].sum())
-            if compute_until in ("lid2", "all"):
-                for lid2 in out.get("lid2_logits_per_group", {}).values():
-                    parts.append(lid2.sum())
-            if compute_until == "all":
+                        compute_ctc=compute_ctc)
+            # Sum every logit tensor the forward produced. Covers the
+            # case where the backbone is frozen and only a head has grad
+            # — at least one of these tensors' graphs will contain a
+            # requires_grad=True parameter.
+            parts = [out["group_logits"].sum()]
+            for lid2 in out.get("lid2_logits_per_group", {}).values():
+                parts.append(lid2.sum())
+            if compute_ctc:
                 parts.append(out["logits"].sum())
             dummy_loss = torch.stack(parts).sum()
         if dummy_loss.requires_grad:

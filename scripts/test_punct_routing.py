@@ -112,7 +112,7 @@ def main():
             continue
         tensor = img_to_tensor(img).to(device)
         with torch.no_grad():
-            out = model(tensor, compute_until="lid2")
+            out = model(tensor, compute_ctc=False)
         # Per-frame group predictions (majority vote)
         frame_preds = out["group_logits"][0].argmax(dim=-1)  # (T,)
         # Exclude blank group
@@ -151,7 +151,7 @@ def main():
             continue
         tensor = img_to_tensor(img).to(device)
         with torch.no_grad():
-            out = model(tensor, compute_until="lid2")
+            out = model(tensor, compute_ctc=False)
         frame_preds = out["group_logits"][0].argmax(dim=-1).cpu()
 
         # Count groups

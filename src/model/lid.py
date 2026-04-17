@@ -153,46 +153,6 @@ GROUP_SCRIPTS = {
 }
 
 
-# --- Super-groups (LID-0: 5 script-family buckets) ---
-#
-# Grouping rationale (see docs/lid0_architecture.md):
-#   Alphabetic — left-to-right discrete letters, no complex ligatures
-#   Semitic    — right-to-left, cursive, diacritics
-#   CJK        — dense square-grid logographic/syllabic
-#   Brahmic    — base-consonant + vowel-mark derived scripts (incl. SE Asian)
-#   Other      — unique scripts with no close relatives
-
-SUPER_GROUPS = [
-    "alphabetic",  # 0
-    "semitic",     # 1
-    "cjk",         # 2
-    "brahmic",     # 3
-    "other",       # 4
-]
-
-SUPER_GROUP_TO_ID = {name: i for i, name in enumerate(SUPER_GROUPS)}
-NUM_SUPER_GROUPS = len(SUPER_GROUPS)
-
-SUPER_GROUP_GROUPS = {
-    "alphabetic": ["latin", "cyrillic_greek", "caucasus"],
-    "semitic":    ["arabic", "hebrew"],
-    "cjk":        ["han", "kana", "korean"],
-    "brahmic":    ["ne_indic", "dravidian_north", "dravidian_south", "se_asian"],
-    "other":      ["emoji", "ethiopic", "tibetan"],
-}
-
-GROUP_TO_SUPER_GROUP = {
-    g: sg for sg, gs in SUPER_GROUP_GROUPS.items() for g in gs
-}
-assert set(GROUP_TO_SUPER_GROUP.keys()) == set(GROUPS), \
-    f"super-group cover mismatch: missing {set(GROUPS) - set(GROUP_TO_SUPER_GROUP)}"
-
-# group_id → super_group_id (length NUM_GROUPS)
-GROUP_ID_TO_SUPER_GROUP_ID = [
-    SUPER_GROUP_TO_ID[GROUP_TO_SUPER_GROUP[g]] for g in GROUPS
-]
-
-
 class LIDCoarse(nn.Module):
     """LID-1: Coarse group classifier on backbone spatial features.
 
