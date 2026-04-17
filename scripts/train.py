@@ -490,19 +490,39 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             gl_for_model, sl_frames = build_frame_labels_from_segments(
                 segments_, T_est, NUM_GROUPS, device)
 
+            # Pick the deepest forward stage any active loss actually
+            # needs. Any loss with weight=0 contributes nothing, so we can
+            # skip every stage whose output would only feed into it.
+            #   ctc_weight > 0    → need "all" (full forward)
+            #   lid2_weight > 0   → need "lid2" (up to LID-2 heads)
+            #   lid1_weight > 0   → need "lid1" (up to group_head)
+            #   otherwise         → need "lid0" only
+            if ctc_weight != 0:
+                compute_until = "all"
+            elif lid2_weight != 0:
+                compute_until = "lid2"
+            elif lid1_weight != 0:
+                compute_until = "lid1"
+            else:
+                compute_until = "lid0"
             out = model(imgs_, group_ids=gl_for_model, script_ids=sl_frames,
                         detach_for_experts=detach_for_experts,
-                        compute_ctc=(ctc_weight != 0))
-
-        # LID-1 loss (gl_frames has -100 for padding → ignored by CE)
-        T = out["group_logits"].shape[1]
-        gl_frames = gl_frames[:, :T]
-        lid1_loss = compute_lid1_loss(out["group_logits"], gl_frames, ce_loss_fn)
+                        compute_until=compute_until)
 
         # LID-0 loss: map group labels → super-group labels (preserving -100)
+        T = out["super_group_logits"].shape[1]
+        gl_frames = gl_frames[:, :T]
         sgl_frames = derive_super_group_labels(gl_frames)
         lid0_loss = compute_lid0_loss(
             out["super_group_logits"], sgl_frames, ce_loss_fn)
+
+        # LID-1 loss. Skip when weight is 0 — group_logits is a zero-stub
+        # in that case and the loss value is meaningless anyway.
+        if lid1_weight != 0:
+            lid1_loss = compute_lid1_loss(
+                out["group_logits"], gl_frames, ce_loss_fn)
+        else:
+            lid1_loss = torch.zeros(1, device=device)
 
         # CTC loss: per-segment for all lines (handles both single and mixed script)
         # Skip CTC loss computation entirely when its weight is 0
@@ -515,26 +535,27 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         else:
             ctc_loss = torch.zeros(1, device=device)
 
-        # LID-2 loss: per-frame CE within multi-script groups
-        # Uses ground truth sl_frames as targets, same ignore_index=-100 as LID-1
+        # LID-2 loss: per-frame CE within multi-script groups. Skip when
+        # weight is 0 or when lid2_logits_per_group is empty (which is the
+        # case under compute_post_lid0=False).
         lid2_loss = torch.zeros(1, device=device)
-        lid2_count = 0
-        T_lid2 = out["group_logits"].shape[1]
-        sl_for_loss = sl_frames[:, :T_lid2]
-        gl_for_loss = gl_for_model[:, :T_lid2]
-        for g_str, lid2_logits in out.get("lid2_logits_per_group", {}).items():
-            g = int(g_str)
-            # Only compute on frames that belong to this group
-            g_mask = (gl_for_loss == g)
-            if not g_mask.any():
-                continue
-            # lid2_logits: (B, T, n_scripts_in_group)
-            pred = lid2_logits[g_mask]  # (N_frames, n_scripts)
-            target = sl_for_loss[g_mask]  # (N_frames,)
-            lid2_loss = lid2_loss + F.cross_entropy(pred, target, label_smoothing=0.1)
-            lid2_count += 1
-        if lid2_count > 0:
-            lid2_loss = lid2_loss / lid2_count
+        if lid2_weight != 0:
+            lid2_count = 0
+            T_lid2 = out["super_group_logits"].shape[1]
+            sl_for_loss = sl_frames[:, :T_lid2]
+            gl_for_loss = gl_for_model[:, :T_lid2]
+            for g_str, lid2_logits in out.get("lid2_logits_per_group", {}).items():
+                g = int(g_str)
+                g_mask = (gl_for_loss == g)
+                if not g_mask.any():
+                    continue
+                pred = lid2_logits[g_mask]
+                target = sl_for_loss[g_mask]
+                lid2_loss = lid2_loss + F.cross_entropy(
+                    pred, target, label_smoothing=0.1)
+                lid2_count += 1
+            if lid2_count > 0:
+                lid2_loss = lid2_loss / lid2_count
 
         loss = (ctc_weight * ctc_loss
                 + lid0_weight * lid0_loss.float()
@@ -614,33 +635,35 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         log_count += 1
 
         # Accumulate LID-0, LID-1 and LID-2 accuracy on GPU — no per-batch
-        # sync. Using .sum() on a bool mask avoids needing .any() + .item()
-        # (a sum of 0 is fine; correctness doesn't require the guard).
+        # sync. Skip trackers whose loss weight is 0: the corresponding
+        # logits are zero-stubs (from the early-exit forward), so argmax
+        # would always be 0 and the number would be meaningless.
         with torch.no_grad():
-            fp = group_logits.argmax(dim=-1)
-            T_acc = fp.shape[1]
-            fl = group_labels[:, ::2][:, :T_acc].to(fp.device)
-            non_pad = (fl >= 0)
-            log_lid1_correct += ((fp == fl) & non_pad).sum()
-            log_lid1_total += non_pad.sum()
+            T_acc = super_group_logits.shape[1]
 
-            # LID-0: per-frame super-group accuracy
+            # LID-0: always tracked (it's why we're training)
             sgp = super_group_logits.argmax(dim=-1)
             sgl = gt_super_groups[:, :T_acc]
             sg_non_pad = (sgl >= 0)
             log_lid0_correct += ((sgp == sgl) & sg_non_pad).sum()
             log_lid0_total += sg_non_pad.sum()
 
-            # LID-2: per-frame accuracy within multi-script groups
-            gt_groups_T = gt_groups[:, :T_acc]
-            gt_scripts_T = gt_scripts[:, :T_acc]
-            for g_str, lid2_log in lid2_logits.items():
-                g = int(g_str)
-                g_mask = (gt_groups_T == g)
-                pred_s = lid2_log[:, :T_acc].argmax(dim=-1)
-                # .sum() on AND-masked correctness — safe when g_mask is all False
-                log_lid2_correct += ((pred_s == gt_scripts_T) & g_mask).sum()
-                log_lid2_total += g_mask.sum()
+            if lid1_weight != 0:
+                fp = group_logits.argmax(dim=-1)
+                fl = group_labels[:, ::2][:, :T_acc].to(fp.device)
+                non_pad = (fl >= 0)
+                log_lid1_correct += ((fp == fl) & non_pad).sum()
+                log_lid1_total += non_pad.sum()
+
+            if lid2_weight != 0:
+                gt_groups_T = gt_groups[:, :T_acc]
+                gt_scripts_T = gt_scripts[:, :T_acc]
+                for g_str, lid2_log in lid2_logits.items():
+                    g = int(g_str)
+                    g_mask = (gt_groups_T == g)
+                    pred_s = lid2_log[:, :T_acc].argmax(dim=-1)
+                    log_lid2_correct += ((pred_s == gt_scripts_T) & g_mask).sum()
+                    log_lid2_total += g_mask.sum()
 
         if save_dir and n_batches % 500 == 0:
             save_checkpoint(model, optimizer, scheduler, scaler,

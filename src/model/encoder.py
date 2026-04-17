@@ -859,8 +859,26 @@ class LipiMoEEncoder(nn.Module):
         group_ids: Tensor | None = None,
         script_ids: Tensor | None = None,
         detach_for_experts: bool = False,
-        compute_ctc: bool = True,
+        compute_until: str = "all",
     ) -> dict:
+        """Run the encoder forward pass.
+
+        compute_until: how far to run the pipeline before returning stubs
+        for the remaining outputs. Lets staged training / inference skip
+        compute that no active loss or consumer needs.
+
+          "lid0"  — stop after lid0_head. Skips super_b, LID-1, merge_b,
+                    group experts, LID-2, script experts, CTC.
+          "lid1"  — stop after group_head (LID-1). Skips merge_b, group
+                    experts, LID-2, script experts, CTC.
+          "lid2"  — stop after LID-2 heads. Skips script experts + CTC.
+                    (Equivalent to the old compute_ctc=False.)
+          "all"   — full forward pass (default).
+        """
+        _STAGES = ("lid0", "lid1", "lid2", "all")
+        assert compute_until in _STAGES, (
+            f"compute_until must be one of {_STAGES}, got {compute_until!r}")
+        _stage_idx = _STAGES.index(compute_until)
         B = images.shape[0]
 
         x = images.float() / 255.0 if images.dtype == torch.uint8 else images
@@ -896,6 +914,27 @@ class LipiMoEEncoder(nn.Module):
         x_for_super = x.reshape(B, h, w, d).permute(0, 3, 1, 2)  # (B, d, 2, w)
         x_for_super = self.super_h_pool(x_for_super).squeeze(2).permute(0, 2, 1)
         super_group_logits = self.lid0_head(x_for_super)  # (B, w, num_super+1)
+
+        # Early-exit after LID-0 (compute_until="lid0"). Skips super_b +
+        # group experts + LID-2 + script experts + CTC → ~3-5× faster per
+        # step. All downstream keys are zero-filled stubs so callers that
+        # expect them don't crash.
+        if _stage_idx == 0:
+            T = w
+            max_vocab = max(m.max_vocab for m in self.ctc_modules)
+            return {
+                "logits": torch.zeros(B, T, max_vocab,
+                                      device=x.device, dtype=x.dtype),
+                "lengths": torch.full((B,), T, dtype=torch.long, device=x.device),
+                "super_group_logits": super_group_logits,
+                "super_group_ids": super_group_logits.argmax(dim=-1),
+                "group_logits": torch.zeros(B, T, self.num_groups + 1,
+                                            device=x.device, dtype=x.dtype),
+                "group_ids": torch.zeros(B, T, dtype=torch.long, device=x.device),
+                "lid2_logits_per_group": {},
+                "frame_scripts": torch.zeros(B, T, dtype=torch.long, device=x.device),
+                "flat_scripts": torch.full((B, T), -1, dtype=torch.long, device=x.device),
+            }
 
         # Determine per-frame super-group assignments. During training with
         # GT group labels, map group→super_group via the fixed buffer.
@@ -978,6 +1017,25 @@ class LipiMoEEncoder(nn.Module):
         x_for_group = x.reshape(B, h, w, d).permute(0, 3, 1, 2)  # (B, d, 2, w)
         x_for_group = self.group_h_pool(x_for_group).squeeze(2).permute(0, 2, 1)
         group_logits = self.group_head(x_for_group)  # (B, W/2, num_groups+1)
+
+        # Early-exit after LID-1 (compute_until="lid1"). Skips merge_b +
+        # group experts + LID-2 + script experts + CTC. For staged training
+        # where only LID-0 and LID-1 have non-zero loss weights.
+        if _stage_idx == 1:
+            T = w
+            max_vocab = max(m.max_vocab for m in self.ctc_modules)
+            return {
+                "logits": torch.zeros(B, T, max_vocab,
+                                      device=x.device, dtype=x.dtype),
+                "lengths": torch.full((B,), T, dtype=torch.long, device=x.device),
+                "super_group_logits": super_group_logits,
+                "super_group_ids": frame_super_groups,
+                "group_logits": group_logits,
+                "group_ids": group_logits.argmax(dim=-1),
+                "lid2_logits_per_group": {},
+                "frame_scripts": torch.zeros(B, T, dtype=torch.long, device=x.device),
+                "flat_scripts": torch.full((B, T), -1, dtype=torch.long, device=x.device),
+            }
 
         # Patch-merge 2 → 1: concat 2 rows, project to dim. Only touches
         # the CTC path from here on.
@@ -1073,12 +1131,11 @@ class LipiMoEEncoder(nn.Module):
         # Convert to flat script IDs for script expert routing
         flat_scripts = self._get_flat_script_ids(frame_groups, frame_scripts)
 
-        # Skip the whole script-expert + CTC pipeline if the caller isn't
-        # going to use CTC logits (e.g., LID-only pretraining with
-        # --ctc-weight 0). Script experts, the final norm, and the CTC
-        # heads have no gradient path to the loss in that case, so the
-        # forward pass is pure waste otherwise.
-        if not compute_ctc:
+        # Early-exit after LID-2 (compute_until="lid2"). Skips script
+        # experts + final norm + CTC heads. Useful when ctc_weight=0 so
+        # CTC loss isn't computed — the script expert forward would be
+        # pure waste.
+        if _stage_idx == 2:
             T = w
             max_vocab = max(m.max_vocab for m in self.ctc_modules)
             return {
