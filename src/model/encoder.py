@@ -6,19 +6,22 @@ Architecture:
     -> ConvStem: two plain strided convs (no ResBlocks, small RF ~5px)
        → (B, 128, 8, W/2)
     -> Shared SWA-A: 2× windowed-attention blocks at (h=8, w=W/2)
-       (window 8×8 covers full vertical extent in a single window,
-        so downstream h>1 wouldn't add new vertical info)
-    -> Pool h=8→1, proj 128→dim
-    -> Shared SWA-B: 2× windowed-attention blocks at (h=1, w=W/2, dim)
-    -> Frame-level LID-1: per-frame script group classification
+    -> Patch-merge 8→2, proj 128×4→dim
+    -> Frame-level LID-0: per-frame super-group classification
+       (5 super-groups: alphabetic, semitic, cjk, brahmic, other, + blank)
+    -> Route frames to per-super-group SWA-B stacks
+    -> 2× super-group SWA-B blocks per super-group (h=2, w=W/2, dim)
+       (blank frames bypass super_b as identity)
+    -> Frame-level LID-1: per-frame script group classification (15 groups)
+    -> Patch-merge 2→1
     -> Route frames to group expert blocks by group_id
-    -> 1 local group expert block  (h=1, window 1×16, 13 experts)
-    -> 1 wide  group expert block  (h=1, window 1×64, 13 experts)
+    -> 1 local group expert block  (h=1, window 1×16, 15 experts)
+    -> 1 wide  group expert block  (h=1, window 1×64, 15 experts)
     -> Per-group aggregation (concat local + wide → dim)
     -> Frame-level LID-2: per-frame script classification (multi-script groups)
     -> Route frames to script expert blocks by script_id
-    -> 1 local script expert block (h=1, 1×16 windows, 26 experts)
-    -> 1 wide  script expert block (h=1, 1×64 windows, 26 experts)
+    -> 1 local script expert block (h=1, 1×16 windows, 27 experts)
+    -> 1 wide  script expert block (h=1, 1×64 windows, 27 experts)
     -> Per-script aggregation (concat local + wide → dim)
     -> Per-script CTC heads (T=W/2)
 """
@@ -45,7 +48,9 @@ except ImportError:
     flex_attention = None
     _HAS_FLEX_ATTENTION = False
 
-from src.model.lid import NUM_GROUPS
+from src.model.lid import (
+    NUM_GROUPS, NUM_SUPER_GROUPS, GROUP_ID_TO_SUPER_GROUP_ID,
+)
 
 
 class DropPath(nn.Module):
@@ -429,6 +434,22 @@ class GroupCTCModule(nn.Module):
         return logits, script_ids
 
 
+def _per_sample_key_lens(frame_ids: Tensor, num_classes: int) -> Tensor:
+    """(B, num_classes) per-sample counts of each key in frame_ids.
+
+    Frames with id < 0 or >= num_classes don't contribute. Computed via one
+    scatter_add — no Python loop. Returning the GPU tensor means the caller
+    can do a single .tolist() for all keys at once instead of N .any() /
+    .sum() / .tolist() syncs per key.
+    """
+    B, _ = frame_ids.shape
+    counts = torch.zeros(B, num_classes, dtype=torch.long, device=frame_ids.device)
+    valid = (frame_ids >= 0) & (frame_ids < num_classes)
+    safe = torch.where(valid, frame_ids, torch.zeros_like(frame_ids))
+    counts.scatter_add_(1, safe, valid.long())
+    return counts
+
+
 def _collect_segments(
     x: Tensor,
     mask: Tensor,
@@ -444,23 +465,37 @@ def _collect_segments(
                    this expert. Padded with zeros.
         batch_info: list of (b_idx, seg_len) — for scatter_segments.
         Both None if no samples have any frames in this expert.
+
+    Implementation note: vectorized via one nonzero + one cumsum + one
+    index_put. Replaces the prior per-sample Python loop (which launched
+    one kernel per active sample).
     """
-    B = x.shape[0]
-    seg_lens = mask.sum(dim=1)  # (B,) — per-sample frame count
+    B, _, d = x.shape
+    seg_lens = mask.sum(dim=1)  # (B,)
     has_g = seg_lens > 0
     b_indices = has_g.nonzero(as_tuple=True)[0]
     if b_indices.numel() == 0:
         return None, None
 
+    # Single sync for the Python-side batch_info list.
     lens_list = seg_lens[b_indices].tolist()
     b_list = b_indices.tolist()
     max_len = max(lens_list)
     N = len(b_list)
-    d = x.shape[-1]
+
+    # Dense map b_idx → active_idx in [0, N); -1 for inactive samples.
+    b_to_active = torch.full((B,), -1, dtype=torch.long, device=x.device)
+    b_to_active[b_indices] = torch.arange(N, device=x.device)
+
+    # Source (b, t) positions where mask is True.
+    bs, ts = mask.nonzero(as_tuple=True)  # both (M,) where M = mask.sum()
+    # Position within the sample's segment at each True (b, t).
+    pos_in_seg = mask.long().cumsum(dim=1) - 1  # (B, T)
+    p_dst = pos_in_seg[bs, ts]  # (M,)
+    i_dst = b_to_active[bs]    # (M,)
 
     batch_x = torch.zeros(N, max_len, d, device=x.device, dtype=x.dtype)
-    for i, (b, sl) in enumerate(zip(b_list, lens_list)):
-        batch_x[i, :sl] = x[b][mask[b]]
+    batch_x[i_dst, p_dst] = x[bs, ts]
 
     return batch_x, list(zip(b_list, lens_list))
 
@@ -471,9 +506,25 @@ def _scatter_segments(
     mask: Tensor,
     batch_info: list[tuple[int, int]],
 ) -> None:
-    """Scatter packed batch results back to per-sample positions."""
-    for i, (b, sl) in enumerate(batch_info):
-        x_out[b, mask[b]] = batch_out[i, :sl]
+    """Scatter packed batch results back to per-sample positions.
+
+    Vectorized: one nonzero + cumsum + index_put, no Python loop.
+    """
+    if not batch_info:
+        return
+    B = x_out.shape[0]
+    N = len(batch_info)
+    b_indices_cpu = torch.tensor(
+        [b for b, _ in batch_info], dtype=torch.long, device=x_out.device)
+    b_to_active = torch.full((B,), -1, dtype=torch.long, device=x_out.device)
+    b_to_active[b_indices_cpu] = torch.arange(N, device=x_out.device)
+
+    bs, ts = mask.nonzero(as_tuple=True)
+    pos_in_seg = mask.long().cumsum(dim=1) - 1
+    p_src = pos_in_seg[bs, ts]
+    i_src = b_to_active[bs]
+
+    x_out[bs, ts] = batch_out[i_src, p_src]
 
 
 def _run_expert_block(block, x, expert_id, h, w):
@@ -495,19 +546,23 @@ def _run_expert_block(block, x, expert_id, h, w):
 
 
 class LipiMoEEncoder(nn.Module):
-    """Lipi v5: ConvStem + shared SWA + group experts + LID-2 + script experts.
+    """Lipi v5: ConvStem + LID-0 super-group routing + group experts + LID-2 + script experts.
 
     Trained from scratch (no pretrained backbone). Small-RF stem keeps
     boundary contamination minimal before attention layers take over.
 
-    Two-level expert routing:
-      1. LID-1 classifies each frame into a script group (15 groups + blank)
-      2. Group expert blocks process frames per-group (2 local + 2 wide)
-      3. LID-2 classifies each frame into a script within its group
-      4. Script expert blocks process frames per-script (1 local + 1 wide)
-      5. Per-script CTC heads decode characters
+    Three-level expert routing:
+      1. LID-0 classifies each frame into a super-group (5 + blank)
+      2. Per-super-group SWA-B stacks specialize features within each family
+      3. LID-1 classifies each frame into a script group (15 + blank)
+      4. Group expert blocks process frames per-group (local + wide streams)
+      5. LID-2 classifies each frame into a script within its group
+      6. Script expert blocks process frames per-script (local + wide streams)
+      7. Per-script CTC heads decode characters
 
     Single-script groups skip LID-2 (only 1 script, trivially assigned).
+    Blank frames bypass super_b (identity) and are zeroed by the group-
+    expert stage.
     """
 
     def __init__(
@@ -531,12 +586,21 @@ class LipiMoEEncoder(nn.Module):
         # and can starve MoE experts that already see only 1/N of data.
         layer_scale_init: float = 1.0,
         num_groups: int = NUM_GROUPS,
+        num_super_groups: int = NUM_SUPER_GROUPS,
         group_script_vocab_sizes: list[list[int]] | None = None,
         group_script_names: list[list[str]] | None = None,
     ):
         super().__init__()
+        # num_super_groups is accepted as a kwarg so ckpt["model_config"] can be
+        # replayed via LipiMoEEncoder(**cfg); the actual super-group count is
+        # fixed by the lid.py constants and must match.
+        assert num_super_groups == NUM_SUPER_GROUPS, (
+            f"num_super_groups={num_super_groups} does not match "
+            f"NUM_SUPER_GROUPS={NUM_SUPER_GROUPS} in lid.py")
         self.num_groups = num_groups
         self.blank_group_id = num_groups
+        self.num_super_groups = NUM_SUPER_GROUPS
+        self.blank_super_group_id = NUM_SUPER_GROUPS
 
         if group_script_vocab_sizes is None:
             group_script_vocab_sizes = [[100]] * num_groups
@@ -577,9 +641,24 @@ class LipiMoEEncoder(nn.Module):
             "drop_path_rate": drop_path_rate,
             "layer_scale_init": layer_scale_init,
             "num_groups": num_groups,
+            "num_super_groups": NUM_SUPER_GROUPS,
             "group_script_vocab_sizes": group_script_vocab_sizes,
             "group_script_names": group_script_names,
         }
+
+        # Fixed mapping: group_id → super_group_id (buffer so it moves with
+        # the model to GPU). Size is num_groups+1 so index num_groups (blank)
+        # is always valid and maps to the blank super-group. For num_groups <
+        # NUM_GROUPS (tests / partial models), truncate the canonical table.
+        _g2sg_list = GROUP_ID_TO_SUPER_GROUP_ID[:num_groups]
+        if len(_g2sg_list) < num_groups:
+            # Extra groups beyond the canonical 15 fall back to the blank
+            # super-group (they won't route to any specialized super_b stack).
+            _g2sg_list = _g2sg_list + [NUM_SUPER_GROUPS] * (
+                num_groups - len(_g2sg_list))
+        _g2sg_list = _g2sg_list + [NUM_SUPER_GROUPS]  # blank group → blank super
+        g2sg = torch.tensor(_g2sg_list, dtype=torch.long)
+        self.register_buffer("group_to_super_group", g2sg, persistent=False)
 
         # Drop-path schedule: linearly increase from 0 → drop_path_rate
         # across all residual stages along a sample's path.
@@ -611,14 +690,32 @@ class LipiMoEEncoder(nn.Module):
         self._post_stem_h = 8  # stem downsamples 32px input by 4x
         self.merge_a = nn.Linear(stem_out_ch * 4, dim)  # 4 rows → dim
 
-        # Shared SWA-B at (h=2, w=W/2), dim. Window 2×16:
-        # full vertical extent (top+bottom half of char) × 2-char horizontal.
-        self.shared_b = nn.ModuleList([
-            SWABlock(dim=dim, num_heads=max(dim // 64, 1),
-                     window_h=2, window_w=16, shift=(i % 2 == 1),
-                     mlp_ratio=shared_mlp_ratio, drop_path=next(dp_iter),
-                     layer_scale_init=layer_scale_init)
-            for i in range(num_shared_b_blocks)
+        # LID-0: per-frame super-group classification. Pools h=2→1 off the
+        # merge_a output (before super_b) and predicts one of 5 script
+        # families + blank. Same pooling + MLP pattern as group_head.
+        self.super_h_pool = nn.AdaptiveAvgPool2d((1, None))
+        self.lid0_head = nn.Sequential(
+            nn.Linear(dim, dim // 2),
+            nn.GELU(),
+            nn.Linear(dim // 2, NUM_SUPER_GROUPS + 1),
+        )
+
+        # Per-super-group SWA-B stacks. Each super-group gets its own copy
+        # of what was previously a single shared SWA-B stack; frames route
+        # to the stack matching their super-group. Same config as the old
+        # shared_b (h=2, w=W/2, window 2×16). Drop-path rate is shared
+        # across super-groups so a frame sees the same residual scaling
+        # regardless of which super-group it routes to.
+        sb_dp = [next(dp_iter) for _ in range(num_shared_b_blocks)]
+        self.super_b = nn.ModuleList([
+            nn.ModuleList([
+                SWABlock(dim=dim, num_heads=max(dim // 64, 1),
+                         window_h=2, window_w=16, shift=(i % 2 == 1),
+                         mlp_ratio=shared_mlp_ratio, drop_path=sb_dp[i],
+                         layer_scale_init=layer_scale_init)
+                for i in range(num_shared_b_blocks)
+            ])
+            for _ in range(NUM_SUPER_GROUPS)
         ])
 
         # Patch-merge (h=2 → 1): concat 2 rows → project. Final collapse
@@ -786,10 +883,91 @@ class LipiMoEEncoder(nn.Module):
         x = self.merge_a(x)  # (B, 2*w, dim)
         h = 2
 
-        # Shared SWA-B at (h=2, w=W/2), dim
         d = x.shape[-1]
-        for blk in self.shared_b:
-            x = blk(x, h, w)
+
+        # =====================================================================
+        # LID-0: per-frame super-group classification
+        #
+        # Pooled h=2→1 view of the merge_a output predicts one of 5 script
+        # families (+ blank). Runs BEFORE super_b so the routing decision is
+        # made on family-agnostic features; super_b blocks then specialize
+        # within the family.
+        # =====================================================================
+        x_for_super = x.reshape(B, h, w, d).permute(0, 3, 1, 2)  # (B, d, 2, w)
+        x_for_super = self.super_h_pool(x_for_super).squeeze(2).permute(0, 2, 1)
+        super_group_logits = self.lid0_head(x_for_super)  # (B, w, num_super+1)
+
+        # Determine per-frame super-group assignments. During training with
+        # GT group labels, map group→super_group via the fixed buffer.
+        # During inference, use LID-0 argmax.
+        if group_ids is not None:
+            if group_ids.dim() == 1:
+                _fg_early = group_ids.unsqueeze(1).expand(B, w)
+            else:
+                _fg_early = group_ids
+            _fg_early = torch.where(
+                (_fg_early >= 0) & (_fg_early <= self.blank_group_id),
+                _fg_early, torch.full_like(_fg_early, self.blank_group_id))
+            frame_super_groups = self.group_to_super_group[_fg_early]
+        else:
+            frame_super_groups = super_group_logits.argmax(dim=-1)
+
+        # =====================================================================
+        # Per-super-group SWA-B routing
+        #
+        # Frames route to one of NUM_SUPER_GROUPS SWA-B stacks based on
+        # their super-group. Blank frames (super_id == blank_super_group_id)
+        # bypass super_b as identity — they have no family, and the group
+        # experts will zero them out downstream anyway.
+        # =====================================================================
+        x_2d = x.reshape(B, h, w, d)
+        x_after_super = x_2d.clone()  # identity default for blank/unrouted frames
+
+        # One upfront sync: (B, num_super_groups) per-sample per-sg counts.
+        # Replaces per-iteration .any() + .sum() + .tolist() syncs.
+        sg_lens_cpu = _per_sample_key_lens(
+            frame_super_groups, self.num_super_groups).tolist()
+
+        for sg in range(self.num_super_groups):
+            # Python-only iteration: no syncs inside the loop head.
+            b_list = [b for b in range(B) if sg_lens_cpu[b][sg] > 0]
+            if not b_list:
+                continue
+            lens_list = [sg_lens_cpu[b][sg] for b in b_list]
+            max_w_sg = max(lens_list)
+            N = len(b_list)
+
+            # Vectorized collect: same pattern as _collect_segments, but
+            # preserves h=2 rows (each frame column carries 2 rows).
+            mask_sg = (frame_super_groups == sg)  # (B, w)
+            b_indices_gpu = torch.tensor(
+                b_list, dtype=torch.long, device=x.device)
+            b_to_active = torch.full(
+                (B,), -1, dtype=torch.long, device=x.device)
+            b_to_active[b_indices_gpu] = torch.arange(N, device=x.device)
+
+            bs, ts = mask_sg.nonzero(as_tuple=True)  # (M,), (M,)
+            pos_in_seg = mask_sg.long().cumsum(dim=1) - 1  # (B, w)
+            p_dst = pos_in_seg[bs, ts]  # (M,)
+            i_dst = b_to_active[bs]    # (M,)
+
+            seg = torch.zeros(N, h, max_w_sg, d,
+                              device=x.device, dtype=x.dtype)
+            # Advanced indexing: x_2d[bs, :, ts] → (M, h, d) because the
+            # non-contiguous advanced indices (bs, ts) broadcast to M and
+            # get moved to the front, leaving the `:`-indexed h axis intact.
+            seg[i_dst, :, p_dst] = x_2d[bs, :, ts]
+
+            # Run per-super-group SWA-B stack at (h=2, w=max_w_sg)
+            seg_flat = seg.reshape(N, h * max_w_sg, d)
+            for block in self.super_b[sg]:
+                seg_flat = block(seg_flat, h, max_w_sg)
+            seg = seg_flat.reshape(N, h, max_w_sg, d)
+
+            # Scatter back into x_after_super (reusing i_dst / p_dst).
+            x_after_super[bs, :, ts] = seg[i_dst, :, p_dst]
+
+        x = x_after_super.reshape(B, h * w, d)
 
         # LID-1 branches off BEFORE the final 2→1 merge. Two consequences:
         #   1. LID sees h=2 features (upper + lower half of each character)
@@ -831,10 +1009,15 @@ class LipiMoEEncoder(nn.Module):
 
         x_after_group = torch.zeros(B, w, d, device=x.device, dtype=x.dtype)
 
+        # One upfront sync: per-sample per-group frame counts.
+        group_lens_cpu = _per_sample_key_lens(
+            frame_groups, self.num_groups).tolist()
+
         for g in range(self.num_groups):
-            mask_g = (frame_groups == g)  # (B, w)
-            if not mask_g.any():
+            # Skip without a sync: checks a pre-transferred Python list.
+            if not any(group_lens_cpu[b][g] > 0 for b in range(B)):
                 continue
+            mask_g = (frame_groups == g)  # (B, w)
             batch_x, batch_info = _collect_segments(x, mask_g)
             if batch_x is None:
                 continue
@@ -877,12 +1060,15 @@ class LipiMoEEncoder(nn.Module):
                 frame_scripts >= 0, frame_scripts,
                 torch.zeros_like(frame_scripts))
         else:
-            # Inference: predict from LID-2 for multi-script groups
+            # Inference: predict from LID-2 for multi-script groups.
+            # Reuse the Python-side group counts computed above to skip
+            # empty groups without a sync.
             for g, lid2_log in lid2_logits_per_group.items():
+                if not any(group_lens_cpu[b][g] > 0 for b in range(B)):
+                    continue
                 g_mask = (frame_groups == g)
-                if g_mask.any():
-                    pred = lid2_log.argmax(dim=-1)  # (B, T)
-                    frame_scripts[g_mask] = pred[g_mask]
+                pred = lid2_log.argmax(dim=-1)  # (B, T)
+                frame_scripts[g_mask] = pred[g_mask]
 
         # Convert to flat script IDs for script expert routing
         flat_scripts = self._get_flat_script_ids(frame_groups, frame_scripts)
@@ -899,6 +1085,8 @@ class LipiMoEEncoder(nn.Module):
                 "logits": torch.zeros(B, T, max_vocab,
                                       device=x.device, dtype=x.dtype),
                 "lengths": torch.full((B,), T, dtype=torch.long, device=x.device),
+                "super_group_logits": super_group_logits,
+                "super_group_ids": frame_super_groups,
                 "group_logits": group_logits,
                 "group_ids": frame_groups,
                 "lid2_logits_per_group": lid2_logits_per_group,
@@ -912,12 +1100,17 @@ class LipiMoEEncoder(nn.Module):
 
         x_after_script = torch.zeros(B, w, d, device=x.device, dtype=x.dtype)
 
+        # One upfront sync: per-sample per-script frame counts. flat_scripts
+        # uses -1 for blank/unrouted, which _per_sample_key_lens filters.
+        script_lens_cpu = _per_sample_key_lens(
+            flat_scripts, self.total_scripts).tolist()
+
         # Iterate by flat script-id (≤ total_scripts = 26) instead of
         # (B, unique_scripts). Same batching pattern as group experts.
         for s in range(self.total_scripts):
-            mask_s = (flat_scripts == s)  # (B, w)
-            if not mask_s.any():
+            if not any(script_lens_cpu[b][s] > 0 for b in range(B)):
                 continue
+            mask_s = (flat_scripts == s)  # (B, w)
             batch_x, batch_info = _collect_segments(x_after_group, mask_s)
             if batch_x is None:
                 continue
@@ -945,25 +1138,26 @@ class LipiMoEEncoder(nn.Module):
         max_vocab = max(m.max_vocab for m in self.ctc_modules)
         logits = torch.zeros(B, T, max_vocab, device=x.device, dtype=x.dtype)
 
-        # CTC routing: iterate by group (≤ num_groups = 13). Within each
-        # group, per-sample script_ids are passed to the GroupCTCModule
-        # which handles per-script head routing internally.
+        # CTC routing: iterate by group. Within each group, per-sample
+        # script_ids are passed to the GroupCTCModule which handles
+        # per-script head routing internally.
         for g in range(self.num_groups):
-            mask_g = (frame_groups == g)  # (B, T)
-            if not mask_g.any():
+            # Skip without a sync using the pre-transferred group counts.
+            if not any(group_lens_cpu[b][g] > 0 for b in range(B)):
                 continue
+            mask_g = (frame_groups == g)  # (B, T)
             batch_feats, batch_info = _collect_segments(x, mask_g)
             if batch_feats is None:
                 continue
 
             # One script_id per segment (all frames in a group segment share
-            # a script). The per-row indexing variants confuse
-            # torch.compile's Inductor pass (bounds analysis crashes), so
-            # use .item() calls. N syncs per group is negligible vs compile
-            # gains; only called once per (group, batch).
-            batch_sids = torch.tensor(
-                [frame_scripts[b][mask_g[b]][0].item() for b, _ in batch_info],
-                dtype=torch.long, device=x.device)
+            # a script). Build batch_sids on GPU via gather: first-True
+            # column per sample, then index frame_scripts. Single H2D
+            # transfer for b_tensor; no per-sample .item() sync.
+            b_tensor = torch.tensor(
+                [b for b, _ in batch_info], device=x.device, dtype=torch.long)
+            first_col = mask_g[b_tensor].int().argmax(dim=1)  # (N,)
+            batch_sids = frame_scripts[b_tensor, first_col]
 
             seg_logits, _ = self.ctc_modules[g](batch_feats, script_ids=batch_sids)
             vs = seg_logits.shape[-1]
@@ -975,6 +1169,8 @@ class LipiMoEEncoder(nn.Module):
         return {
             "logits": logits,
             "lengths": lengths,
+            "super_group_logits": super_group_logits,
+            "super_group_ids": frame_super_groups,
             "group_logits": group_logits,
             "group_ids": frame_groups,
             "lid2_logits_per_group": lid2_logits_per_group,

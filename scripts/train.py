@@ -32,9 +32,11 @@ from src.training.dataloader import (
     LipiStreamingDataset,
 )
 from src.training.losses import (
-    compute_lid1_loss, compute_ctc_loss_segments,
+    compute_lid0_loss, compute_lid1_loss, compute_ctc_loss_segments,
 )
-from src.training.routing import build_frame_labels_from_segments
+from src.training.routing import (
+    build_frame_labels_from_segments, derive_super_group_labels,
+)
 from src.training.eval import evaluate
 
 
@@ -97,6 +99,9 @@ def parse_args():
                              "before joint training — random features into "
                              "CTC cause blank collapse, structured features "
                              "from LID-pretraining let CTC escape cleanly.")
+    parser.add_argument("--lid0-weight", type=float, default=1.0,
+                        help="Super-group classification loss weight. "
+                             "Set to 0 to freeze LID-0 routing signal.")
     parser.add_argument("--lid1-weight", type=float, default=1.0)
     parser.add_argument("--lid2-weight", type=float, default=1.0,
                         help="Set to 0 to disable LID-2 loss "
@@ -285,7 +290,9 @@ def build_optimizer_and_scheduler(args, model, device_type, steps_per_epoch):
 
     use_amp = device_type in ("cuda", "mps")
     if device_type == "cuda":
-        torch.backends.cudnn.benchmark = False
+        # With WidthSortedBatchSampler, shapes cluster per-bucket and
+        # torch.compile handles dynamic shapes, so cudnn autotune pays off.
+        torch.backends.cudnn.benchmark = True
         torch.set_float32_matmul_precision('high')
         amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
         scaler = torch.amp.GradScaler("cuda", enabled=(amp_dtype == torch.float16))
@@ -425,7 +432,7 @@ def save_checkpoint(model, optimizer, scheduler, scaler, epoch, args, save_dir):
 def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, scaler,
                     ce_loss_fn, device, device_type, use_amp, amp_dtype,
                     epoch, total_epochs, grad_accum, log_interval,
-                    ctc_weight, lid1_weight, lid2_weight,
+                    ctc_weight, lid0_weight, lid1_weight, lid2_weight,
                     group_script_vocabs, group_script_names,
                     detach_for_experts=False,
                     save_dir=None, args=None):
@@ -443,19 +450,25 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         else:
             shared_params.append(p)
 
-    # Accumulate losses on GPU — avoid .item() sync every batch
+    # Accumulate losses and accuracy on GPU — avoid .item() sync every batch.
+    # All *_accum / log_* tensors are 0-d GPU longs/floats; we sync to CPU
+    # only at log interval / epoch end.
     ctc_loss_accum = torch.zeros(1, device=device)
+    lid0_loss_accum = torch.zeros(1, device=device)
     lid1_loss_accum = torch.zeros(1, device=device)
     total_loss_accum = torch.zeros(1, device=device)
     log_ctc = torch.zeros(1, device=device)
+    log_lid0 = torch.zeros(1, device=device)
     log_lid1 = torch.zeros(1, device=device)
     log_lid2 = torch.zeros(1, device=device)
     log_total = torch.zeros(1, device=device)
     log_count = 0
-    log_lid1_correct = 0
-    log_lid1_total = 0
-    log_lid2_correct = 0
-    log_lid2_total = 0
+    log_lid0_correct = torch.zeros((), dtype=torch.long, device=device)
+    log_lid0_total = torch.zeros((), dtype=torch.long, device=device)
+    log_lid1_correct = torch.zeros((), dtype=torch.long, device=device)
+    log_lid1_total = torch.zeros((), dtype=torch.long, device=device)
+    log_lid2_correct = torch.zeros((), dtype=torch.long, device=device)
+    log_lid2_total = torch.zeros((), dtype=torch.long, device=device)
     log_time = time.time()
     shared_norm = 0.0
     expert_norm = 0.0
@@ -483,6 +496,11 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         T = out["group_logits"].shape[1]
         gl_frames = gl_frames[:, :T]
         lid1_loss = compute_lid1_loss(out["group_logits"], gl_frames, ce_loss_fn)
+
+        # LID-0 loss: map group labels → super-group labels (preserving -100)
+        sgl_frames = derive_super_group_labels(gl_frames)
+        lid0_loss = compute_lid0_loss(
+            out["super_group_logits"], sgl_frames, ce_loss_fn)
 
         # CTC loss: per-segment for all lines (handles both single and mixed script)
         # Skip CTC loss computation entirely when its weight is 0
@@ -517,6 +535,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             lid2_loss = lid2_loss / lid2_count
 
         loss = (ctc_weight * ctc_loss
+                + lid0_weight * lid0_loss.float()
                 + lid1_weight * lid1_loss.float()
                 + lid2_weight * lid2_loss.float())
 
@@ -530,9 +549,10 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         detached_lid2 = {
             g: lg.detach() for g, lg in out.get("lid2_logits_per_group", {}).items()
         }
-        return (ctc_loss, lid1_loss, lid2_loss, loss,
+        return (ctc_loss, lid0_loss, lid1_loss, lid2_loss, loss,
+                out["super_group_logits"].detach(),
                 out["group_logits"].detach(), detached_lid2,
-                gl_for_model.detach(), sl_frames.detach())
+                gl_for_model.detach(), sl_frames.detach(), sgl_frames.detach())
 
     for batch_idx, batch in enumerate(train_loader):
         imgs, targets, tgt_lens, gids, sids, _labels, group_labels, segments = batch
@@ -552,8 +572,9 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             group_labels = group_labels.to(device, non_blocking=True)
 
         try:
-            (ctc_loss, lid1_loss, lid2_loss, loss,
-             group_logits, lid2_logits, gt_groups, gt_scripts) = \
+            (ctc_loss, lid0_loss, lid1_loss, lid2_loss, loss,
+             super_group_logits, group_logits, lid2_logits,
+             gt_groups, gt_scripts, gt_super_groups) = \
                 _forward_backward(imgs, targets, tgt_lens, gids, sids, scale=1.0,
                                   group_labels_=group_labels, segments_=segments)
         except torch.cuda.OutOfMemoryError:
@@ -579,47 +600,70 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         # Accumulate on GPU — no sync
         mult = float(grad_accum)
         ctc_loss_accum += ctc_loss.detach()
+        lid0_loss_accum += lid0_loss.detach()
         lid1_loss_accum += lid1_loss.detach()
         total_loss_accum += loss.detach() * mult
         log_ctc += ctc_loss.detach()
+        log_lid0 += lid0_loss.detach()
         log_lid1 += lid1_loss.detach()
         log_lid2 += lid2_loss.detach()
         log_total += loss.detach() * mult
         n_batches += 1
         log_count += 1
 
-        # Accumulate LID-1 and LID-2 accuracy across logging interval
+        # Accumulate LID-0, LID-1 and LID-2 accuracy on GPU — no per-batch
+        # sync. Using .sum() on a bool mask avoids needing .any() + .item()
+        # (a sum of 0 is fine; correctness doesn't require the guard).
         with torch.no_grad():
             fp = group_logits.argmax(dim=-1)
             T_acc = fp.shape[1]
             fl = group_labels[:, ::2][:, :T_acc].to(fp.device)
             non_pad = (fl >= 0)
-            if non_pad.any():
-                log_lid1_correct += (fp[non_pad] == fl[non_pad]).sum().item()
-                log_lid1_total += non_pad.sum().item()
+            log_lid1_correct += ((fp == fl) & non_pad).sum()
+            log_lid1_total += non_pad.sum()
+
+            # LID-0: per-frame super-group accuracy
+            sgp = super_group_logits.argmax(dim=-1)
+            sgl = gt_super_groups[:, :T_acc]
+            sg_non_pad = (sgl >= 0)
+            log_lid0_correct += ((sgp == sgl) & sg_non_pad).sum()
+            log_lid0_total += sg_non_pad.sum()
 
             # LID-2: per-frame accuracy within multi-script groups
+            gt_groups_T = gt_groups[:, :T_acc]
+            gt_scripts_T = gt_scripts[:, :T_acc]
             for g_str, lid2_log in lid2_logits.items():
                 g = int(g_str)
-                g_mask = (gt_groups[:, :T_acc] == g)
-                if g_mask.any():
-                    pred_s = lid2_log[:, :T_acc][g_mask].argmax(dim=-1)
-                    true_s = gt_scripts[:, :T_acc][g_mask]
-                    log_lid2_correct += (pred_s == true_s).sum().item()
-                    log_lid2_total += true_s.shape[0]
+                g_mask = (gt_groups_T == g)
+                pred_s = lid2_log[:, :T_acc].argmax(dim=-1)
+                # .sum() on AND-masked correctness — safe when g_mask is all False
+                log_lid2_correct += ((pred_s == gt_scripts_T) & g_mask).sum()
+                log_lid2_total += g_mask.sum()
 
         if save_dir and n_batches % 500 == 0:
             save_checkpoint(model, optimizer, scheduler, scaler,
                             epoch, args, save_dir)
 
         if n_batches % log_interval == 0:
-            avg_ctc = log_ctc.item() / log_count
-            avg_lid1 = log_lid1.item() / log_count
-            avg_lid2 = log_lid2.item() / log_count
-            avg_total = log_total.item() / log_count
-            # LID-1/LID-2 accuracy (accumulated across logging interval)
-            lid1_acc = 100 * log_lid1_correct / max(log_lid1_total, 1)
-            lid2_acc = 100 * log_lid2_correct / max(log_lid2_total, 1)
+            # Batch all the per-interval counters into one GPU→CPU transfer.
+            # Order: losses (5) + accuracy numerators/denominators (6).
+            stats = torch.stack([
+                log_ctc.squeeze(), log_lid0.squeeze(), log_lid1.squeeze(),
+                log_lid2.squeeze(), log_total.squeeze(),
+                log_lid0_correct.float(), log_lid0_total.float(),
+                log_lid1_correct.float(), log_lid1_total.float(),
+                log_lid2_correct.float(), log_lid2_total.float(),
+            ]).tolist()
+            (avg_ctc, avg_lid0, avg_lid1, avg_lid2, avg_total,
+             lid0_c, lid0_t, lid1_c, lid1_t, lid2_c, lid2_t) = stats
+            avg_ctc /= log_count
+            avg_lid0 /= log_count
+            avg_lid1 /= log_count
+            avg_lid2 /= log_count
+            avg_total /= log_count
+            lid0_acc = 100 * lid0_c / max(lid0_t, 1)
+            lid1_acc = 100 * lid1_c / max(lid1_t, 1)
+            lid2_acc = 100 * lid2_c / max(lid2_t, 1)
             elapsed = time.time() - log_time
             ms_per_step = elapsed / log_count * 1000
             samples_per_sec = imgs.shape[0] * log_count / elapsed
@@ -627,21 +671,25 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             print(
                 f"  [{epoch:>2}/{total_epochs}] {batch_str:>9}  "
                 f"loss {avg_total:.4f}  "
-                f"ctc {avg_ctc:.4f}  lid1 {avg_lid1:.4f}  lid2 {avg_lid2:.4f}  "
-                f"| acc {lid1_acc:5.1f}% {lid2_acc:5.1f}%  "
+                f"ctc {avg_ctc:.4f}  lid0 {avg_lid0:.4f}  "
+                f"lid1 {avg_lid1:.4f}  lid2 {avg_lid2:.4f}  "
+                f"| acc {lid0_acc:5.1f}% {lid1_acc:5.1f}% {lid2_acc:5.1f}%  "
                 f"| {samples_per_sec:.0f} img/s  {ms_per_step:.0f}ms/step  "
                 f"gnorm {shared_norm:.1f}/{expert_norm:.1f}"
             )
             log_time = time.time()
             log_ctc.zero_()
+            log_lid0.zero_()
             log_lid1.zero_()
             log_lid2.zero_()
             log_total.zero_()
             log_count = 0
-            log_lid1_correct = 0
-            log_lid1_total = 0
-            log_lid2_correct = 0
-            log_lid2_total = 0
+            log_lid0_correct.zero_()
+            log_lid0_total.zero_()
+            log_lid1_correct.zero_()
+            log_lid1_total.zero_()
+            log_lid2_correct.zero_()
+            log_lid2_total.zero_()
 
     if oom_skipped > 0:
         print(f"  ** OOM: {oom_skipped} batches skipped this epoch")
@@ -651,6 +699,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
 
     return {
         "ctc": ctc_loss_accum.item() / n_batches,
+        "lid0": lid0_loss_accum.item() / n_batches,
         "lid1": lid1_loss_accum.item() / n_batches,
         "total": total_loss_accum.item() / n_batches,
     }
@@ -678,7 +727,7 @@ def main():
         # Build set of prefixes to unfreeze
         unfreeze_prefixes = []
         if "lid" in components:
-            unfreeze_prefixes.extend(["group_head.", "lid2_heads."])
+            unfreeze_prefixes.extend(["lid0_head.", "group_head.", "lid2_heads."])
         if "ctc" in components:
             unfreeze_prefixes.append("ctc_modules.")
         if "experts" in components:
@@ -686,7 +735,7 @@ def main():
                 k for k in EXPERT_PARAM_PREFIXES if k != "ctc_modules."])
         if "backbone" in components:
             unfreeze_prefixes.extend([
-                "stem.", "shared_a.", "shared_b.", "proj_a.", "pool_a.", "pool_b."])
+                "stem.", "shared_a.", "super_b.", "merge_a.", "merge_b."])
 
         frozen = 0
         trainable = 0
@@ -723,6 +772,7 @@ def main():
                               collate_fn=collate_moe,
                               num_workers=args.num_workers,
                               persistent_workers=args.num_workers > 0,
+                              prefetch_factor=4 if args.num_workers > 0 else None,
                               pin_memory=(device_type == "cuda"))
 
     steps_per_epoch = len(train_loader)
@@ -752,7 +802,8 @@ def main():
     print(f"\n{'=' * 60}")
     print(f"TRAINING: epochs {start_epoch}-{args.epochs}, lr={args.lr}")
     print(f"  Batch: {eff_batch} x {args.grad_accum} (pixel-budgeted)")
-    print(f"  Losses: CTC x{args.ctc_weight} + LID1 x{args.lid1_weight} + LID2 x{args.lid2_weight}")
+    print(f"  Losses: CTC x{args.ctc_weight} + LID0 x{args.lid0_weight} "
+          f"+ LID1 x{args.lid1_weight} + LID2 x{args.lid2_weight}")
     print(f"  Routing: ground truth (CTC on all samples)")
     print(f"  Per-script vocabs: {data['group_script_vocab_sizes']}")
     print(f"{'=' * 60}")
@@ -768,6 +819,7 @@ def main():
             opt["use_amp"], opt["amp_dtype"], epoch, args.epochs, args.grad_accum,
             args.log_interval,
             ctc_weight=args.ctc_weight,
+            lid0_weight=args.lid0_weight,
             lid1_weight=args.lid1_weight, lid2_weight=args.lid2_weight,
             group_script_vocabs=data["group_script_vocab_sizes"],
             group_script_names=data["group_script_names"],
@@ -777,8 +829,8 @@ def main():
         elapsed = time.time() - t0
         if metrics:
             print(f"\nEpoch {epoch}/{args.epochs}: "
-                  f"ctc={metrics['ctc']:.4f} lid1={metrics['lid1']:.4f}  "
-                  f"time={elapsed:.0f}s")
+                  f"ctc={metrics['ctc']:.4f} lid0={metrics['lid0']:.4f} "
+                  f"lid1={metrics['lid1']:.4f}  time={elapsed:.0f}s")
 
         save_checkpoint(model, opt["optimizer"], opt["scheduler"], opt["scaler"],
                         epoch, args, save_dir)

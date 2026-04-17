@@ -10,8 +10,10 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from src.encoding.decompose import decode_ids, encode_text, script_vocab_size
-from src.training.losses import compute_lid1_loss
-from src.training.routing import build_frame_labels_from_segments
+from src.training.losses import compute_lid0_loss, compute_lid1_loss
+from src.training.routing import (
+    build_frame_labels_from_segments, derive_super_group_labels,
+)
 
 
 def _edit_distance(a: str, b: str) -> int:
@@ -112,10 +114,13 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
     # Val loss
     val_ctc_loss = 0.0
     val_ctc_chars = 0
+    val_lid0_loss = 0.0
+    val_lid0_frames = 0
     val_lid1_loss = 0.0
     val_lid1_frames = 0
 
     # Global stats
+    lid0_frame_correct = lid0_frame_total = 0
     lid1_frame_correct = lid1_frame_total = 0
     lid2_correct = lid2_total = 0
     ctc_correct = ctc_total = total_chars = correct_chars = 0
@@ -161,6 +166,12 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
         val_lid1_loss += lid1_l.item() * n_frames
         val_lid1_frames += n_frames
 
+        # --- LID-0 val loss (per-frame super-group CE) ---
+        sgl_frames = derive_super_group_labels(gl_frames)
+        lid0_l = compute_lid0_loss(out["super_group_logits"], sgl_frames, ce_fn)
+        val_lid0_loss += lid0_l.item() * n_frames
+        val_lid0_frames += n_frames
+
         # --- Batched CTC val loss (one call per (group, script) bucket) ---
         if batch_segments is not None and group_script_vocab_sizes:
             ctc_l, ctc_c = _batched_ctc_val_loss(
@@ -179,6 +190,13 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
             if g_frame_mask.any():
                 g_lid_frame_total[g] += g_frame_mask.sum().item()
                 g_lid_frame_correct[g] += (frame_preds[g_frame_mask] == g).sum().item()
+
+        # --- LID-0 frame-level accuracy ---
+        sg_preds = out["super_group_logits"].argmax(dim=-1)
+        sg_non_pad = (sgl_frames >= 0)
+        if sg_non_pad.any():
+            lid0_frame_correct += (sg_preds[sg_non_pad] == sgl_frames[sg_non_pad]).sum().item()
+            lid0_frame_total += sg_non_pad.sum().item()
 
         # --- LID-2 per-frame accuracy ---
         T_est = imgs.shape[3] // 2
@@ -203,12 +221,20 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
                     s_lid2_correct[key] = s_lid2_correct.get(key, 0) + (
                         pred_scripts[s_mask] == ls).sum().item()
 
-        # --- Per-segment CTC decode (CPU, one transfer) ---
-        all_preds = out["logits"].float().cpu()
-        T_logits = all_preds.shape[1]
+        # --- Per-segment CTC decode ---
+        # Keep out["logits"] on GPU; argmax per-segment on GPU, then a
+        # single concat + .tolist() to move everything to CPU in one
+        # transfer. Previously we moved the full (B, T, max_vocab) float
+        # tensor to CPU (~1 GB/batch with max_vocab=3800); the argmax
+        # result is ~3800× smaller.
+        logits_gpu = out["logits"]
+        T_logits = logits_gpu.shape[1]
         gids_cpu = gids.cpu().tolist()
         sids_cpu = sids.cpu().tolist()
 
+        # Phase 1: on GPU, compute per-segment argmaxes into a list.
+        # Each entry is (metadata, argmax_tensor_1d_on_gpu).
+        seg_gpu_preds = []
         for i, (label, true_g, local_sid) in enumerate(
                 zip(labels, gids_cpu, sids_cpu)):
 
@@ -227,14 +253,15 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
                 if not ref_s:
                     continue
 
-                key = (seg_g, seg_s)
                 frame_start = seg["offset"] // 2
                 frame_end = min((seg["offset"] + seg["width"] + 1) // 2, T_logits)
                 if frame_end <= frame_start:
                     continue
 
-                s_idx = min(seg_s, len(group_script_names[seg_g]) - 1) if seg_g < len(group_script_names) else 0
-                script_name = group_script_names[seg_g][s_idx] if seg_g < len(group_script_names) else ""
+                s_idx = (min(seg_s, len(group_script_names[seg_g]) - 1)
+                         if seg_g < len(group_script_names) else 0)
+                script_name = (group_script_names[seg_g][s_idx]
+                               if seg_g < len(group_script_names) else "")
                 if not script_name:
                     continue
 
@@ -243,46 +270,67 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
                 else:
                     vs = script_vocab_size(script_name)
 
-                seq = all_preds[i, frame_start:frame_end, :vs].argmax(dim=-1).tolist()
-                ids = []
-                prev = -1
-                for tok in seq:
-                    if tok != prev and tok != 0:
-                        ids.append(tok)
-                    prev = tok
+                seq_gpu = logits_gpu[i, frame_start:frame_end, :vs].argmax(dim=-1)
+                seg_gpu_preds.append(
+                    (seg_g, seg_s, script_name, ref_s, seq_gpu))
 
-                dec_s = decode_ids(ids, script_name).strip().lower() if ids else ""
+        # Phase 2: single GPU→CPU transfer for all segments in this batch.
+        if seg_gpu_preds:
+            seg_lens = [t.shape[0] for *_, t in seg_gpu_preds]
+            big_cpu = torch.cat([t for *_, t in seg_gpu_preds]).tolist()
+        else:
+            seg_lens = []
+            big_cpu = []
 
-                ctc_total += 1
-                g_word_total[seg_g] += 1
-                s_word_total[key] = s_word_total.get(key, 0) + 1
-                if dec_s == ref_s:
-                    ctc_correct += 1
-                    g_word_correct[seg_g] += 1
-                    s_word_correct[key] = s_word_correct.get(key, 0) + 1
-                edits = _edit_distance(dec_s, ref_s)
-                matched = max(0, len(ref_s) - edits)
-                total_chars += len(ref_s)
-                correct_chars += matched
-                g_char_total[seg_g] += len(ref_s)
-                g_char_correct[seg_g] += matched
-                s_char_total[key] = s_char_total.get(key, 0) + len(ref_s)
-                s_char_correct[key] = s_char_correct.get(key, 0) + matched
+        # Phase 3: decode on CPU.
+        offset = 0
+        for (seg_g, seg_s, script_name, ref_s, _), sl in zip(
+                seg_gpu_preds, seg_lens):
+            seq = big_cpu[offset:offset + sl]
+            offset += sl
+
+            ids = []
+            prev = -1
+            for tok in seq:
+                if tok != prev and tok != 0:
+                    ids.append(tok)
+                prev = tok
+
+            dec_s = decode_ids(ids, script_name).strip().lower() if ids else ""
+
+            key = (seg_g, seg_s)
+            ctc_total += 1
+            g_word_total[seg_g] += 1
+            s_word_total[key] = s_word_total.get(key, 0) + 1
+            if dec_s == ref_s:
+                ctc_correct += 1
+                g_word_correct[seg_g] += 1
+                s_word_correct[key] = s_word_correct.get(key, 0) + 1
+            edits = _edit_distance(dec_s, ref_s)
+            matched = max(0, len(ref_s) - edits)
+            total_chars += len(ref_s)
+            correct_chars += matched
+            g_char_total[seg_g] += len(ref_s)
+            g_char_correct[seg_g] += matched
+            s_char_total[key] = s_char_total.get(key, 0) + len(ref_s)
+            s_char_correct[key] = s_char_correct.get(key, 0) + matched
 
     # Print results
+    lid0_frame_acc = 100 * lid0_frame_correct / max(lid0_frame_total, 1)
     lid1_frame_acc = 100 * lid1_frame_correct / max(lid1_frame_total, 1)
     lid2_acc = 100 * lid2_correct / max(lid2_total, 1)
     ctc_acc = 100 * ctc_correct / max(ctc_total, 1)
     char_acc = 100 * correct_chars / max(total_chars, 1)
 
     avg_ctc_loss = val_ctc_loss / max(val_ctc_chars, 1)
+    avg_lid0_loss = val_lid0_loss / max(val_lid0_frames, 1)
     avg_lid1_loss = val_lid1_loss / max(val_lid1_frames, 1)
 
-    print(f"\n  ┌──────────────────────────────────────────────┐")
-    print(f"  │  LID-1: {lid1_frame_acc:5.1f}%   LID-2: {lid2_acc:5.1f}%              │")
-    print(f"  │  Word:  {ctc_acc:5.1f}%   Char:  {char_acc:5.1f}%              │")
-    print(f"  │  Val loss: ctc={avg_ctc_loss:.4f}  lid1={avg_lid1_loss:.4f}     │")
-    print(f"  └──────────────────────────────────────────────┘")
+    print(f"\n  ┌──────────────────────────────────────────────────────┐")
+    print(f"  │  LID-0: {lid0_frame_acc:5.1f}%   LID-1: {lid1_frame_acc:5.1f}%   LID-2: {lid2_acc:5.1f}%      │")
+    print(f"  │  Word:  {ctc_acc:5.1f}%   Char:  {char_acc:5.1f}%                      │")
+    print(f"  │  Val loss: ctc={avg_ctc_loss:.4f}  lid0={avg_lid0_loss:.4f}  lid1={avg_lid1_loss:.4f}  │")
+    print(f"  └──────────────────────────────────────────────────────┘")
 
     print(f"\n  {'Group / Script':<20s} {'LID1':>6s} {'Word':>6s} {'Char':>6s} {'LID2':>6s}")
     print(f"  {'─' * 50}")
@@ -310,6 +358,9 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
 
     print(f"  {'─' * 56}")
 
-    return {"lid1_acc": lid1_frame_acc, "lid2_acc": lid2_acc,
+    return {"lid0_acc": lid0_frame_acc,
+            "lid1_acc": lid1_frame_acc, "lid2_acc": lid2_acc,
             "word_acc": ctc_acc, "char_acc": char_acc,
-            "val_ctc_loss": avg_ctc_loss, "val_lid1_loss": avg_lid1_loss}
+            "val_ctc_loss": avg_ctc_loss,
+            "val_lid0_loss": avg_lid0_loss,
+            "val_lid1_loss": avg_lid1_loss}

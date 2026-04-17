@@ -1,9 +1,15 @@
 """
-Migrate checkpoints to 15-group layout (han/kana split + dravidian split).
+Migrate checkpoints to 15-group layout (han/kana split + dravidian split),
+and seed LID-0 super-group SWA-B stacks from the pre-LID-0 shared_b stack.
 
 Auto-detects source layout from checkpoint's model_config:
   - 13 groups (original): applies han/kana split + dravidian split
   - 14 groups (post han/kana): applies dravidian split only
+
+Then (if the checkpoint still has a single shared_b stack), replicates its
+weights across all NUM_SUPER_GROUPS super_b stacks so each super-group
+starts identical to the pre-LID-0 behavior and specializes during training.
+The new lid0_head is left to random init.
 
 Usage:
     python scripts/migrate_checkpoint.py --input checkpoints/moe/moe_epoch20.pt \
@@ -12,9 +18,13 @@ Usage:
 
 import argparse
 import re
+import sys
 from pathlib import Path
 
 import torch
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from src.model.lid import NUM_SUPER_GROUPS  # noqa: E402
 
 
 # =========================================================================
@@ -145,6 +155,37 @@ def _remap_expert_key(key, block_prefix, old_to_new):
     return key, True
 
 
+def _seed_super_b_from_shared_b(state_dict):
+    """Replicate pre-LID-0 shared_b.* weights across all NUM_SUPER_GROUPS
+    super_b.<sg>.* stacks. Idempotent — skips if super_b.* already present.
+
+    Returns a new dict; does not mutate the input.
+    """
+    has_shared_b = any(k.startswith("shared_b.") for k in state_dict)
+    has_super_b = any(k.startswith("super_b.") for k in state_dict)
+    if not has_shared_b:
+        # Either already migrated (super_b present) or checkpoint has neither
+        return state_dict, 0
+    if has_super_b:
+        # Both present — trust super_b, drop shared_b
+        return ({k: v for k, v in state_dict.items()
+                 if not k.startswith("shared_b.")},
+                0)
+
+    new_state = {k: v for k, v in state_dict.items()
+                 if not k.startswith("shared_b.")}
+    replicated = 0
+    for k, v in state_dict.items():
+        if not k.startswith("shared_b."):
+            continue
+        # shared_b.<i>.<rest>  →  super_b.<sg>.<i>.<rest>  for sg in [0..)
+        suffix = k[len("shared_b."):]
+        for sg in range(NUM_SUPER_GROUPS):
+            new_state[f"super_b.{sg}.{suffix}"] = v.clone()
+            replicated += 1
+    return new_state, replicated
+
+
 def migrate(old_state, source_groups):
     """Migrate state dict to 15-group layout."""
     if source_groups == 13:
@@ -230,6 +271,12 @@ def migrate(old_state, source_groups):
             remapped.append(f'{key} → {new_key}')
         new_state[new_key] = value
 
+    # Seed per-super-group SWA-B stacks from the old single shared_b stack
+    new_state, seeded = _seed_super_b_from_shared_b(new_state)
+    if seeded:
+        remapped.append(f'shared_b.* → super_b.{{0..{NUM_SUPER_GROUPS-1}}}.* '
+                        f'(replicated {seeded} tensors)')
+
     return new_state, skipped, remapped
 
 
@@ -256,18 +303,27 @@ def main():
         source_groups = max(group_ids) + 1 if group_ids else 13
     print(f"  Source: {source_groups} groups")
 
-    if source_groups == 15:
-        print("  Already at 15 groups — nothing to migrate.")
-        return
-
-    if source_groups not in (13, 14):
+    if source_groups not in (13, 14, 15):
         print(f"  ERROR: Unsupported source layout ({source_groups} groups)")
         return
 
     old_state = ckpt["model"]
     print(f"  {len(old_state)} parameters")
 
-    new_state, skipped, remapped = migrate(old_state, source_groups)
+    if source_groups == 15:
+        # Skip group remap; only run the LID-0 seeding step.
+        print("  15 groups — skipping group remap, running LID-0 seeding only.")
+        new_state, seeded = _seed_super_b_from_shared_b(old_state)
+        remapped = []
+        if seeded:
+            remapped.append(f'shared_b.* → super_b.{{0..{NUM_SUPER_GROUPS-1}}}.* '
+                            f'(replicated {seeded} tensors)')
+        skipped = []
+        if not seeded and not any(k.startswith("shared_b.") for k in old_state):
+            print("  No shared_b.* keys found — nothing to migrate.")
+            return
+    else:
+        new_state, skipped, remapped = migrate(old_state, source_groups)
 
     print(f"\n  Remapped: {len(remapped)} keys")
     for r in remapped[:15]:
@@ -300,10 +356,13 @@ def main():
     if source_groups == 13:
         print("\nApplied: han/kana split + dravidian split (13 → 15)")
         print("  Reinit: LID-1, kana expert/CTC, han CTC, dravidian LID-2s")
-    else:
+    elif source_groups == 14:
         print("\nApplied: dravidian split only (14 → 15)")
         print("  Reinit: LID-1, dravidian_south expert, dravidian LID-2s")
+    else:
+        print("\nApplied: LID-0 super-group seeding only (15 → 15)")
     print("  Preserved: south_indic CTC heads split across dravidian_north/south")
+    print(f"  LID-0 head (lid0_head.*) will randomly init on model load.")
 
 
 if __name__ == "__main__":
