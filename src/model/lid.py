@@ -3,24 +3,25 @@ Script Identification (LID).
 
 Single-stage routing based on visual character set similarity:
 
-  LID-1 (after shared SWA): 14 group classification.
+  LID-1 (after shared SWA): 15 group classification.
     Routes to group-specific expert attention + expert MLP + group CTC heads.
 
-Groups (14):
+Groups (15):
   1. Latin (~800 chars, 36 languages, ~3B speakers)
   2. Cyrillic + Greek (~760 chars, ~300M speakers)
   3. Arabic (~490 chars incl. Persian/Urdu, ~500M)
   4. Hebrew (~190 chars, ~9M)
-  5. Han (kanji/hanzi, ~2.8K encoding tokens, Chinese/Japanese kanji, ~1.4B)
-  6. Kana (hiragana + katakana, ~220 tokens, Japanese syllabaries, ~125M)
-  7. Korean (~370 decomposed tokens, Hangul, ~80M)
+  5. Han (kanji/hanzi, ~3.8K encoding tokens, Chinese/Japanese kanji, ~1.4B)
+  6. Kana (hiragana + katakana, ~260 tokens, Japanese syllabaries, ~125M)
+  7. Korean (~1.5K decomposed tokens, Hangul, ~80M)
   8. N+E Indian Brahmic (~850 chars, Devanagari/Gurmukhi/Gujarati/Bengali/Odia, ~1B+)
-  9. South Indian Brahmic (~750 chars, Kannada/Telugu/Malayalam/Tamil/Sinhala, ~300M)
-  10. SE Asian (~770 chars, Thai/Lao/Burmese/Khmer, ~150M)
-  11. Emoji (universal)
-  12. Caucasus (~330 chars, Armenian/Georgian, ~10M)
-  13. Ethiopic (~520 chars, Amharic, ~57M)
-  14. Tibetan (~270 chars, ~6M)
+  9. Dravidian North (~500 chars, Kannada/Telugu/Sinhala, ~200M)
+  10. Dravidian South (~350 chars, Malayalam/Tamil, ~100M)
+  11. SE Asian (~770 chars, Thai/Lao/Burmese/Khmer, ~150M)
+  12. Emoji (universal)
+  13. Caucasus (~330 chars, Armenian/Georgian, ~10M)
+  14. Ethiopic (~520 chars, Amharic, ~57M)
+  15. Tibetan (~270 chars, ~6M)
 """
 
 import torch
@@ -52,25 +53,26 @@ SCRIPTS = [
     "gujarati",    # 10
     "bengali",     # 11
     "odia",        # 12
-    # Group 9: South Indian Brahmic
+    # Group 9: Dravidian North (curvy, similar stroke patterns)
     "kannada",     # 13
     "telugu",      # 14
-    "malayalam",   # 15
-    "tamil",       # 16
-    "sinhala",     # 17
-    # Group 10: SE Asian
+    "sinhala",     # 15
+    # Group 10: Dravidian South (round, loopy)
+    "malayalam",   # 16
+    "tamil",       # 17
+    # Group 11: SE Asian
     "thai",        # 18
     "lao",         # 19
     "burmese",     # 20
     "khmer",       # 21
-    # Group 11: Emoji
+    # Group 12: Emoji
     "emoji",       # 22
-    # Group 12: Caucasus
+    # Group 13: Caucasus
     "armenian",    # 23
     "georgian",    # 24
-    # Group 13: Ethiopic
+    # Group 14: Ethiopic
     "ethiopic",    # 25
-    # Group 14: Tibetan
+    # Group 15: Tibetan
     "tibetan",     # 26
 ]
 
@@ -78,23 +80,24 @@ SCRIPT_TO_ID = {name: i for i, name in enumerate(SCRIPTS)}
 NUM_SCRIPTS = len(SCRIPTS)
 
 
-# --- Groups (14 families) ---
+# --- Groups (15 families) ---
 
 GROUPS = [
     "latin",             # 0
     "cyrillic_greek",    # 1
     "arabic",            # 2
     "hebrew",            # 3
-    "han",               # 4  (was sino_japanese; kana split off)
-    "kana",              # 5  (NEW: hiragana + katakana)
+    "han",               # 4
+    "kana",              # 5
     "korean",            # 6
     "ne_indic",          # 7
-    "south_indic",       # 8
-    "se_asian",          # 9
-    "emoji",             # 10
-    "caucasus",          # 11
-    "ethiopic",          # 12
-    "tibetan",           # 13
+    "dravidian_north",   # 8  (was south_indic: kannada, telugu, sinhala)
+    "dravidian_south",   # 9  (was south_indic: malayalam, tamil)
+    "se_asian",          # 10
+    "emoji",             # 11
+    "caucasus",          # 12
+    "ethiopic",          # 13
+    "tibetan",           # 14
 ]
 
 GROUP_TO_ID = {name: i for i, name in enumerate(GROUPS)}
@@ -115,11 +118,11 @@ SCRIPT_TO_GROUP = {
     "gujarati": "ne_indic",
     "bengali": "ne_indic",
     "odia": "ne_indic",
-    "kannada": "south_indic",
-    "telugu": "south_indic",
-    "malayalam": "south_indic",
-    "tamil": "south_indic",
-    "sinhala": "south_indic",
+    "kannada": "dravidian_north",
+    "telugu": "dravidian_north",
+    "sinhala": "dravidian_north",
+    "malayalam": "dravidian_south",
+    "tamil": "dravidian_south",
     "thai": "se_asian",
     "lao": "se_asian",
     "burmese": "se_asian",
@@ -140,7 +143,8 @@ GROUP_SCRIPTS = {
     "kana": ["kana"],
     "korean": ["korean"],
     "ne_indic": ["devanagari", "gurmukhi", "gujarati", "bengali", "odia"],
-    "south_indic": ["kannada", "telugu", "malayalam", "tamil", "sinhala"],
+    "dravidian_north": ["kannada", "telugu", "sinhala"],
+    "dravidian_south": ["malayalam", "tamil"],
     "se_asian": ["thai", "lao", "burmese", "khmer"],
     "emoji": ["emoji"],
     "caucasus": ["armenian", "georgian"],
@@ -153,7 +157,7 @@ class LIDCoarse(nn.Module):
     """LID-1: Coarse group classifier on backbone spatial features.
 
     Takes (B, C, H, W) from backbone, pools to (B, C), classifies
-    into one of 14 script groups.
+    into one of NUM_GROUPS script groups.
     """
 
     def __init__(self, in_channels: int, num_groups: int = NUM_GROUPS):
