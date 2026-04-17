@@ -107,8 +107,8 @@ def parse_args():
                         help="Number of epochs to detach shared→expert gradient. "
                              "LID-1 gets undivided shared encoder, CTC trains experts only.")
     parser.add_argument("--freeze-except", type=str, default=None,
-                        choices=["experts", "experts+ctc", "ctc", "backbone", "lid"],
-                        help="Freeze everything except specified components")
+                        help="Freeze everything except specified components. "
+                             "Comma-separated: lid,ctc,experts,backbone")
     args = parser.parse_args()
 
     # Validation
@@ -670,24 +670,28 @@ def main():
 
     # Selective freezing
     if args.freeze_except:
+        components = set(c.strip() for c in args.freeze_except.split(","))
+        valid = {"experts", "ctc", "backbone", "lid"}
+        bad = components - valid
+        assert not bad, f"Unknown --freeze-except components: {bad}. Valid: {valid}"
+
+        # Build set of prefixes to unfreeze
+        unfreeze_prefixes = []
+        if "lid" in components:
+            unfreeze_prefixes.extend(["group_head.", "lid2_heads."])
+        if "ctc" in components:
+            unfreeze_prefixes.append("ctc_modules.")
+        if "experts" in components:
+            unfreeze_prefixes.extend([
+                k for k in EXPERT_PARAM_PREFIXES if k != "ctc_modules."])
+        if "backbone" in components:
+            unfreeze_prefixes.extend([
+                "stem.", "shared_a.", "shared_b.", "proj_a.", "pool_a.", "pool_b."])
+
         frozen = 0
         trainable = 0
         for name, param in model.named_parameters():
-            if args.freeze_except == "experts":
-                param.requires_grad = any(
-                    k in name for k in EXPERT_PARAM_PREFIXES
-                    if k != "ctc_modules.")
-            elif args.freeze_except == "experts+ctc":
-                param.requires_grad = _is_expert_param(name)
-            elif args.freeze_except == "ctc":
-                param.requires_grad = "ctc_modules." in name
-            elif args.freeze_except == "backbone":
-                param.requires_grad = any(
-                    k in name for k in ("stem.", "shared_a.", "shared_b.",
-                                        "proj_a.", "pool_a.", "pool_b."))
-            elif args.freeze_except == "lid":
-                param.requires_grad = any(
-                    k in name for k in ("group_head.", "lid2_heads."))
+            param.requires_grad = any(p in name for p in unfreeze_prefixes)
             if param.requires_grad:
                 trainable += param.numel()
             else:
