@@ -10,13 +10,17 @@ import torch
 
 def estimate_pixel_budget(
     model, vram_gb: float = 32, compute_ctc: bool = True,
+    safety: float = 0.85,
 ) -> int:
     """Estimate max pixel budget (B*W) by measuring actual VRAM usage.
 
     Runs two calibration batches (small and large) to separate fixed
     overhead from per-pixel cost, then extrapolates to available VRAM.
     compute_ctc should match what training uses so the calibration
-    captures the same activation footprint.
+    captures the same activation footprint. `safety` is the fraction of
+    the extrapolated budget we actually allocate (the rest absorbs
+    per-batch peak variance from variable routing, drop_path stochastics,
+    and allocator fragmentation).
     """
     device = next(model.parameters()).device
     if device.type != "cuda":
@@ -81,14 +85,13 @@ def estimate_pixel_budget(
     fixed_activation = small_bytes - bytes_per_pixel * small_pixels
 
     available = vram_gb * 1e9 - fixed_model - max(fixed_activation, 0)
-    # 5% reserve — expandable_segments handles fragmentation well
-    pixel_budget = int(available * 0.95 / bytes_per_pixel)
+    pixel_budget = int(available * safety / bytes_per_pixel)
 
     print(f"  VRAM estimate: {model_bytes/1e9:.2f}GB model, "
           f"{fixed_model/1e9:.2f}GB fixed (optimizer), "
           f"{max(fixed_activation, 0)/1e6:.0f}MB fixed (activation)")
     print(f"  {bytes_per_pixel/1e3:.0f}KB/px (calibrated), "
-          f"{available/1e9:.1f}GB available")
+          f"{available/1e9:.1f}GB available (safety={safety:.2f})")
     print(f"  Pixel budget: {pixel_budget}")
 
     return pixel_budget

@@ -77,6 +77,10 @@ def parse_args():
                         help="Max batch size (actual size varies by width)")
     parser.add_argument("--vram", type=float, default=32,
                         help="GPU VRAM in GB (used to auto-size batches)")
+    parser.add_argument("--vram-safety", type=float, default=0.85,
+                        help="Fraction of calibrated budget to actually use. "
+                             "Lower if you see OOM batches; raise toward 1.0 "
+                             "if OOMs never fire but throughput is low.")
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--grad-accum", type=int, default=1)
     parser.add_argument("--device", type=str, default="auto")
@@ -733,7 +737,8 @@ def main():
     # ctc_weight=0 the CTC path is skipped, so the activation footprint
     # is smaller.
     pixel_budget = estimate_pixel_budget(
-        model, vram_gb=args.vram, compute_ctc=(args.ctc_weight != 0))
+        model, vram_gb=args.vram, compute_ctc=(args.ctc_weight != 0),
+        safety=args.vram_safety)
     max_batch_at_widest = pixel_budget // max_width
     # Cap at --batch-size: pixel budget handles width scaling, but there's
     # per-sample overhead (autograd nodes, CTC loss, routing) that doesn't
