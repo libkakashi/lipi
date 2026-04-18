@@ -6,9 +6,9 @@ Architecture:
     -> ConvStem: two plain strided convs (small RF ~5px) → (B, 128, 8, W/2)
     -> Shared SWA-A:   2× blocks at h=8, w=16 (local features)
     -> Patch-merge 8→4
-    -> Shared SWA-Mid: 2× blocks at h=4, w=32 (character-level context)
+    -> Shared SWA-B: 2× blocks at h=4, w=32 (character-level context)
     -> Patch-merge 4→2, proj 128→256
-    -> Shared SWA-B:   2× blocks at h=2, w=64 (multi-char script context)
+    -> Shared SWA-C:   2× blocks at h=2, w=64 (multi-char script context)
     -> LID-1 branch: pool h=2→1, lid1_attn (w=32), group classifier
     -> Patch-merge 2→1 (CTC path only)
     -> 1 local + 1 wide group expert block (15 experts)
@@ -544,9 +544,9 @@ class LipiMoEEncoder(nn.Module):
 
     Two-level expert routing:
       1. LID-1 classifies each frame into a script group (15 + blank). A
-         dedicated `lid1_attn` SWA block sits between shared_b and the
+         dedicated `lid1_attn` SWA block sits between shared_c and the
          classifier so LID-1 has its own capacity for script-family
-         discrimination without forcing shared_b into a compromise
+         discrimination without forcing shared_c into a compromise
          between family and character features.
       2. Group expert blocks process frames per-group (local + wide streams)
       3. LID-2 classifies each frame into a script within its group
@@ -561,15 +561,15 @@ class LipiMoEEncoder(nn.Module):
         dim: int = 256,
         stem_out_ch: int = 128,
         num_shared_a_blocks: int = 2,
-        num_shared_mid_blocks: int = 2,
         num_shared_b_blocks: int = 2,
+        num_shared_c_blocks: int = 2,
         num_group_local_blocks: int = 1,
         num_group_wide_blocks: int = 1,
         num_script_local_blocks: int = 1,
         num_script_wide_blocks: int = 1,
         shared_a_window_w: int = 16,
-        shared_mid_window_w: int = 32,
-        shared_b_window_w: int = 64,
+        shared_b_window_w: int = 32,
+        shared_c_window_w: int = 64,
         local_window_w: int = 16,
         wide_window_w: int = 64,
         mlp_ratio: int = 2,
@@ -615,15 +615,15 @@ class LipiMoEEncoder(nn.Module):
             "dim": dim,
             "stem_out_ch": stem_out_ch,
             "num_shared_a_blocks": num_shared_a_blocks,
-            "num_shared_mid_blocks": num_shared_mid_blocks,
             "num_shared_b_blocks": num_shared_b_blocks,
+            "num_shared_c_blocks": num_shared_c_blocks,
             "num_group_local_blocks": num_group_local_blocks,
             "num_group_wide_blocks": num_group_wide_blocks,
             "num_script_local_blocks": num_script_local_blocks,
             "num_script_wide_blocks": num_script_wide_blocks,
             "shared_a_window_w": shared_a_window_w,
-            "shared_mid_window_w": shared_mid_window_w,
             "shared_b_window_w": shared_b_window_w,
+            "shared_c_window_w": shared_c_window_w,
             "local_window_w": local_window_w,
             "wide_window_w": wide_window_w,
             "mlp_ratio": mlp_ratio,
@@ -637,10 +637,10 @@ class LipiMoEEncoder(nn.Module):
 
         # Drop-path schedule: linearly increase from 0 → drop_path_rate
         # across all residual stages along a sample's path.
-        # Stages: shared_a, shared_mid, shared_b,
+        # Stages: shared_a, shared_b, shared_b,
         # group (local/wide parallel), script (local/wide parallel).
-        n_stages = (num_shared_a_blocks + num_shared_mid_blocks
-                    + num_shared_b_blocks
+        n_stages = (num_shared_a_blocks + num_shared_b_blocks
+                    + num_shared_c_blocks
                     + max(num_group_local_blocks, num_group_wide_blocks)
                     + max(num_script_local_blocks, num_script_wide_blocks))
         dp_schedule = [drop_path_rate * i / max(n_stages - 1, 1)
@@ -663,35 +663,35 @@ class LipiMoEEncoder(nn.Module):
         # Patch-merge (h=8 → 4): concat 2 adjacent rows, project.
         # Gradual vertical downsampling preserves fine features.
         self._post_stem_h = 8
-        self.merge_a1 = nn.Linear(stem_out_ch * 2, stem_out_ch)
+        self.merge_a = nn.Linear(stem_out_ch * 2, stem_out_ch)
 
-        # Shared SWA-Mid at (h=4, w=W/2), dim=stem_out_ch.
+        # Shared SWA-B at (h=4, w=W/2), dim=stem_out_ch.
         # Window 4×32: full vertical × medium horizontal context.
-        self.shared_mid = nn.ModuleList([
-            SWABlock(dim=stem_out_ch, num_heads=max(stem_out_ch // 64, 1),
-                     window_h=4, window_w=shared_mid_window_w, shift=(i % 2 == 1),
-                     mlp_ratio=shared_mlp_ratio, drop_path=next(dp_iter),
-                     layer_scale_init=layer_scale_init)
-            for i in range(num_shared_mid_blocks)
-        ])
-
-        # Patch-merge (h=4 → 2): concat 2 adjacent rows, project to dim.
-        self.merge_a2 = nn.Linear(stem_out_ch * 2, dim)
-
-        # Shared SWA-B at (h=2, w=W/2), dim.
-        # Window 2×64: full vertical × wide horizontal context for
-        # multi-character script discrimination before LID-1.
         self.shared_b = nn.ModuleList([
-            SWABlock(dim=dim, num_heads=max(dim // 64, 1),
-                     window_h=2, window_w=shared_b_window_w, shift=(i % 2 == 1),
+            SWABlock(dim=stem_out_ch, num_heads=max(stem_out_ch // 64, 1),
+                     window_h=4, window_w=shared_b_window_w, shift=(i % 2 == 1),
                      mlp_ratio=shared_mlp_ratio, drop_path=next(dp_iter),
                      layer_scale_init=layer_scale_init)
             for i in range(num_shared_b_blocks)
         ])
 
+        # Patch-merge (h=4 → 2): concat 2 adjacent rows, project to dim.
+        self.merge_b = nn.Linear(stem_out_ch * 2, dim)
+
+        # Shared SWA-C at (h=2, w=W/2), dim.
+        # Window 2×64: full vertical × wide horizontal context for
+        # multi-character script discrimination before LID-1.
+        self.shared_c = nn.ModuleList([
+            SWABlock(dim=dim, num_heads=max(dim // 64, 1),
+                     window_h=2, window_w=shared_c_window_w, shift=(i % 2 == 1),
+                     mlp_ratio=shared_mlp_ratio, drop_path=next(dp_iter),
+                     layer_scale_init=layer_scale_init)
+            for i in range(num_shared_c_blocks)
+        ])
+
         # Patch-merge (h=2 → 1): concat 2 rows → project. Final collapse
         # to frame sequence before experts.
-        self.merge_b = nn.Linear(dim * 2, dim)
+        self.merge_c = nn.Linear(dim * 2, dim)
 
         # Parallel stages share one drop-path rate per stage so local/wide
         # streams have matched residual scaling.
@@ -875,19 +875,19 @@ class LipiMoEEncoder(nn.Module):
         # Patch-merge 8 → 4: concat 2 adjacent rows, project.
         assert h == self._post_stem_h, \
             f"expected post-stem height {self._post_stem_h}, got {h}"
-        x, h = _patch_merge_h(x, h, w, self.merge_a1)  # h=8→4
+        x, h = _patch_merge_h(x, h, w, self.merge_a)  # h=8→4
 
-        # Shared SWA-Mid at (h=4, w=W/2)
-        for blk in self.shared_mid:
+        # Shared SWA-B at (h=4, w=W/2)
+        for blk in self.shared_b:
             x = blk(x, h, w)
 
         # Patch-merge 4 → 2: concat 2 adjacent rows, project to dim.
-        x, h = _patch_merge_h(x, h, w, self.merge_a2)  # h=4→2
+        x, h = _patch_merge_h(x, h, w, self.merge_b)  # h=4→2
 
         d = x.shape[-1]
 
-        # Shared SWA-B at (h=2, w=W/2), dim
-        for blk in self.shared_b:
+        # Shared SWA-C at (h=2, w=W/2), dim
+        for blk in self.shared_c:
             x = blk(x, h, w)
 
         # LID-1 branches off BEFORE the final 2→1 merge so LID-1 sees h=2
@@ -907,7 +907,7 @@ class LipiMoEEncoder(nn.Module):
 
         # Patch-merge 2 → 1: concat 2 rows, project to dim. Only touches
         # the CTC path from here on.
-        x, h = _patch_merge_h(x, h, w, self.merge_b)
+        x, h = _patch_merge_h(x, h, w, self.merge_c)
 
         # Determine per-frame group assignments
         if group_ids is not None:
