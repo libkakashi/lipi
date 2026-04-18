@@ -1,6 +1,6 @@
 # Lipi: Multilingual OCR via Mixture of Experts
 
-> 26 scripts, 13 groups, 100+ languages.
+> 27 scripts, 15 groups, 100+ languages. 57.4M params.
 
 ---
 
@@ -9,96 +9,210 @@
 Takes a cropped word image and outputs the text. Script identification and character recognition happen in a single forward pass through a Mixture of Experts architecture.
 
 ```
-Word Image (32 x W x 3)
-  -> RGB to L+a (preprocessing, 2ch)
-  -> HGNetV2 backbone (pretrained, OCR strides) -> (h=1, w=W/2, 2048ch)
-  -> Project 2048 -> dim                         -> (W/2, dim)
-  -> LID-1 (13-group classifier)                 <- which script family?
-  -> Expert global attention (1D, per-group)      <- script-specific refinement
-  -> LID-2 (per-script classifier)               <- which exact script?
-  -> Per-Script CTC Head (T=W/2)                  <- character sequence
+Word Image (32 x W x 3 RGB)
+  -> ConvStem (stride-4 height, stride-2 width)  -> (8, W/2, 128)
+  -> 6 shared SWA blocks (gradual h=8→4→2, progressively wider windows)
+  -> LID-1 (15-group classifier + dedicated attn block)
+  -> Group expert blocks (local w=16 + wide w=64, per-group)
+  -> LID-2 (per-script classifier, multi-script groups only)
+  -> Script expert blocks (local w=16 + wide w=64, per-script)
+  -> Per-script CTC head (T=W/2)
   -> Output: decoded text
 ```
 
 ---
 
-## Model Architecture
+## Model Architecture (57.4M params)
 
-### Backbone: HGNetV2 (pretrained, shared)
-
-```
-Input: (B, 2, 32, W) L+a
-  -> Conv2d(2, 3, 1x1)              adapt L+a to RGB for pretrained weights
-  -> HGNetV2 with OCR strides       height-aggressive, width-conservative
-     Stem:    stride (2,1), (2,1)    h=8, w=W
-     Stage 0: HGBlocks               h=8, w=W, 192ch
-     Stage 1: stride (2,2)           h=4, w=W/2, 512ch
-     Stage 2: stride (2,1)           h=2, w=W/2, 1024ch
-     Stage 3: stride (2,1)           h=1, w=W/2, 2048ch
-  -> Output: (B, 2048, 1, W/2)
-```
-
-### Projection + LID-1
+### ConvStem (0.1M)
 
 ```
-Project:         Linear(2048, dim)
-LID-1:           AdaptiveAvgPool -> MLP -> 13 groups
+Input: (B, 3, 32, W) RGB
+  Conv2d(3→64,  k=3x3, stride=(2,1), pad=1) + GN + GELU  -> (64, 16, W)
+  Conv2d(64→128, k=3x3, stride=(2,2), pad=1) + GN + GELU -> (128, 8, W/2)
+
+RF: ~7px H × 5px W (tight for clean routing boundaries)
 ```
 
-### Expert Path (1 of 13 active per sample)
+### Shared Backbone: 6 SWA Blocks (1.7M)
+
+Gradual vertical downsampling with progressively wider windows.
 
 ```
-Expert blocks:   2x ExpertBlock (1D global attention + MLP, per-group)
-                 dim, mlp_ratio=2, global attention (no windows)
-LID-2:           Conv1d pool -> MLP (multi-script groups only)
-CTC Head:        Linear(dim, vocab_size) per script
+Shared SWA-A:  2 blocks  h=8, w=16, dim=128, mlp=2  (local features)
+  merge_a:     h=8→4     Linear(256→128)
+Shared SWA-B:  2 blocks  h=4, w=32, dim=128, mlp=2  (character context)
+  merge_b:     h=4→2     Linear(256→256)
+Shared SWA-C:  2 blocks  h=2, w=64, dim=256, mlp=2  (multi-char script context)
 ```
 
-### Training-only: GTC Decoder (planned)
+Each SWA block: LayerNorm → WindowedAttention (QK-norm, relative pos bias) → LayerScale → DropPath + residual → LayerNorm → MLP → LayerScale → DropPath + residual. Shifted windows on alternate blocks.
+
+### LID-1: Script Group Classification (0.5M)
+
+Branches off shared_c output before the CTC path merge.
 
 ```
-NRTR decoder:    2-layer transformer (cross-attention to encoder)
-                 Guides CTC alignment during training, discarded at inference
+AdaptiveAvgPool h=2→1                      pool vertical
+lid1_attn: SWABlock(dim=256, w=32, h=1)   dedicated script-discrimination context
+group_head: Linear(256→128) + GELU + Linear(128→16)   15 groups + blank
+
+Output: per-frame group logits (B, T, 16)
+```
+
+lid1_attn is zero-initialized (identity at start) so LID-1 has its own capacity without affecting the CTC feature path.
+
+### Patch Merge to 1D (CTC path)
+
+```
+merge_c: h=2→1, Linear(512→256)
+Output: (B, T, 256) where T = W/2
+```
+
+### Group Expert Blocks: 15 experts (17.9M)
+
+Per-group routing via LID-1 predictions (training: GT labels).
+
+```
+For each group g (0..14):
+  local:  ExpertBlock(dim=256, heads=4, w=16, identity-init)
+  wide:   ExpertBlock(dim=256, heads=4, w=64, identity-init)
+  agg:    concat(local, wide) → Linear(512→256)  init: 0.5·I | 0.5·I
+
+Per expert: 527K params (attn 264K + MLP 263K)
+Per group:  527K × 2 blocks + 131K agg = 1.2M
+```
+
+Each ExpertBlock has N parallel attention+MLP experts sharing LayerNorm and LayerScale. Identity-initialized output projections so experts start as pass-through.
+
+### LID-2: Per-Script Classification (0.2M)
+
+Only for multi-script groups. Single-script groups skip LID-2.
+
+```
+6 heads (ModuleDict):
+  group 1  (cyrillic_greek):   2-way  → cyrillic, greek
+  group 7  (ne_indic):         5-way  → devanagari, gurmukhi, gujarati, bengali, odia
+  group 8  (dravidian_north):  3-way  → kannada, telugu, sinhala
+  group 9  (dravidian_south):  2-way  → malayalam, tamil
+  group 10 (se_asian):         4-way  → thai, lao, burmese, khmer
+  group 12 (caucasus):         2-way  → armenian, georgian
+```
+
+### Script Expert Blocks: 27 experts (31.9M)
+
+Same structure as group experts but routed by flat script ID from LID-2.
+
+```
+script_local: ExpertBlock(dim=256, heads=4, w=16, 27 experts)
+script_wide:  ExpertBlock(dim=256, heads=4, w=64, 27 experts)
+Per-script aggregate: Linear(512→256)
+```
+
+### CTC Heads (5.0M)
+
+```
+LayerNorm(256) → per-script Linear(256→vocab_size)
+
+CTC greedy decode: argmax → collapse repeats → remove blanks → token IDs → text
 ```
 
 ---
 
-## Groups and Scripts (13 groups, 26 scripts)
+## Groups and Scripts (15 groups, 27 scripts)
 
-| # | Group | Scripts | LID-2 |
-|---|-------|---------|-------|
-| 0 | latin | latin | - |
-| 1 | cyrillic_greek | cyrillic, greek | yes |
-| 2 | arabic | arabic | - |
-| 3 | hebrew | hebrew | - |
-| 4 | sino_japanese | han_kana | - |
-| 5 | korean | korean | - |
-| 6 | ne_indic | devanagari, gurmukhi, gujarati, bengali, odia | yes |
-| 7 | south_indic | kannada, telugu, malayalam, tamil, sinhala | yes |
-| 8 | se_asian | thai, lao, burmese, khmer | yes |
-| 9 | emoji | emoji | - |
-| 10 | caucasus | armenian, georgian | yes |
-| 11 | ethiopic | ethiopic | - |
-| 12 | tibetan | tibetan | - |
+| # | Group | Scripts | Vocab | LID-2 |
+|---|-------|---------|-------|-------|
+| 0 | latin | latin | 797 | - |
+| 1 | cyrillic_greek | cyrillic, greek | 364, 426 | yes |
+| 2 | arabic | arabic | 500 | - |
+| 3 | hebrew | hebrew | 192 | - |
+| 4 | han | han | 3811 | - |
+| 5 | kana | kana | 263 | - |
+| 6 | korean | korean | 1500 | - |
+| 7 | ne_indic | devanagari, gurmukhi, gujarati, bengali, odia | 1000, 600, 900, 900, 850 | yes |
+| 8 | dravidian_north | kannada, telugu, sinhala | 550, 950, 500 | yes |
+| 9 | dravidian_south | malayalam, tamil | 900, 350 | yes |
+| 10 | se_asian | thai, lao, burmese, khmer | 450, 500, 650, 950 | yes |
+| 11 | emoji | emoji | 107 | - |
+| 12 | caucasus | armenian, georgian | 150, 186 | yes |
+| 13 | ethiopic | ethiopic | 521 | - |
+| 14 | tibetan | tibetan | 550 | - |
+
+---
+
+## Encoding
+
+| Type | Scripts | Method |
+|------|---------|--------|
+| No-fusion | latin, cyrillic, greek, hebrew, armenian, georgian, ethiopic, kana | 1 char = 1 token |
+| Fusion | devanagari, bengali, gujarati, gurmukhi, odia, kannada, telugu, malayalam, tamil, sinhala, thai, lao, burmese, khmer | base chars + virama-pair conjuncts |
+| CJK | han | single-token frequent chars + ALT-slot visual similarity for rare chars |
+| Korean | korean | jamo decomposition (onset + vowel + coda) |
+| Arabic | arabic | positional forms (isolated/initial/medial/final) |
+
+ASCII punctuation and digits are in every codec's vocab but labeled as latin in training data so LID-1 learns to route them to the latin expert.
 
 ---
 
 ## Training
 
+### Data Generation
+
+Synthetic data from word lists + fonts. Per-line content plans with mixed-script support. Japanese words split at kana/kanji boundaries via `split_by_script()`. ASCII characters in non-latin words become separate latin segments.
+
 ### Loss Functions
 
 ```
-loss = CTC_loss + lid1_weight x LID1_loss + LID2_loss
+loss = ctc_weight × CTC + lid1_weight × LID1 + lid2_weight × LID2
+
+CTC:   per-segment, batched by (group, script)
+LID-1: per-frame CrossEntropy vs GT group_labels
+LID-2: per-frame CrossEntropy vs GT script_labels (multi-script groups only)
 ```
 
-### Key Hyperparameters
+### Selective Freezing
 
 ```
-lr:           3e-4 (shared), 1e-3 (experts)
-optimizer:    AdamW (weight_decay=0.01)
-scheduler:    cosine decay
-amp:          bf16
+--freeze-except lid          train LID-1 + LID-2 heads only
+--freeze-except backbone     train shared blocks + stem only
+--freeze-except ctc          train CTC heads only
+--freeze-except experts      train expert blocks only
+--freeze-except lid,ctc      comma-separated combinations
 ```
+
+### Drop Path Schedule
+
+Linearly increasing from 0 → 0.1 across all stages:
+```
+shared_a[0]: 0.000   shared_a[1]: 0.014
+shared_b[0]: 0.029   shared_b[1]: 0.043
+shared_c[0]: 0.057   shared_c[1]: 0.071
+group experts: 0.086
+script experts: 0.100
+```
+
+---
+
+## Parameter Breakdown
+
+| Component | Params | % |
+|-----------|--------|---|
+| ConvStem | 0.1M | 0.1% |
+| Shared SWA-A (2, h=8, w=16, dim=128) | 0.3M | 0.5% |
+| Shared SWA-B (2, h=4, w=32, dim=128) | 0.3M | 0.5% |
+| Shared SWA-C (2, h=2, w=64, dim=256) | 1.1M | 1.9% |
+| Merges (a + b + c) | 0.2M | 0.3% |
+| lid1_attn + group_head | 0.5M | 0.9% |
+| Group experts (15 × 2 blocks) | 15.8M | 27.5% |
+| Group aggregates (15) | 2.0M | 3.5% |
+| LID-2 heads (6) | 0.2M | 0.3% |
+| Script experts (27 × 2 blocks) | 28.5M | 49.6% |
+| Script aggregates (27) | 3.5M | 6.1% |
+| CTC heads (27 scripts) | 5.0M | 8.7% |
+| **Total** | **57.4M** | |
+| Shared (all scripts) | 2.5M | 4.4% |
+| MoE (per-group/script) | 54.9M | 95.6% |
 
 ---
 
@@ -107,30 +221,27 @@ amp:          bf16
 ```
 src/
   model/
-    encoder.py          LipiMoEEncoder (HGNetV2 backbone + expert attention)
-    memory.py           VRAM budget estimation
-    lid.py              SCRIPTS, GROUPS, LIDCoarse
+    encoder.py          LipiMoEEncoder (ConvStem + shared SWA + MoE experts)
+    lid.py              SCRIPTS, GROUPS, mappings, LIDCoarse
   encoding/
-    decompose.py        CJK 13-symbol + Korean jamo decomposition
-    encoding.py         Script-aware encoding pipeline
-    tokenizer.py        Per-script tokenizers
-    vocab.py            Frozen vocab loading
+    config.py           Codec definitions (NoFusion, Fusion, CJK, Korean)
+    decompose.py        encode_text / decode_ids routing
+    vocab.py            Per-script vocab building
   data/
-    augmentation.py     25 augmentation ops
-    color.py            RGB to L+a conversion
-    dataset.py          Dataset classes
-    fonts.py            Font discovery
+    fonts.py            Font discovery and script mapping
     rendering.py        Word/char rendering
+    word_lists.py       Word list loading
+    script_detect.py    Unicode-based script detection
   training/
-    dataloader.py       Data loading and batching
-    losses.py           CTC, LID-1, LID-2 losses
-    routing.py          Routing mask computation
+    dataloader.py       MDS streaming dataset + tokenizer building
+    losses.py           CTC + LID losses (batched by group/script)
+    routing.py          Frame-level label construction from segments
     eval.py             Per-group/per-script evaluation
 
 scripts/
-  train.py              Training
-  eval.py               Standalone evaluation
+  train.py              Training loop (selective freeze, staged warm-start)
+  generate.py           Synthetic data generation (split_by_script, ASCII→latin)
+  migrate_checkpoint.py Checkpoint migration (13/14→15 groups)
   benchmark.py          Standard OCR benchmarks
-  generate.py           Synthetic data generation
   run_doctr.py          Full document OCR pipeline
 ```
