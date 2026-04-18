@@ -661,9 +661,14 @@ class LipiMoEEncoder(nn.Module):
         ])
 
         # Patch-merge (h=8 → 4): concat 2 adjacent rows, project.
-        # Gradual vertical downsampling preserves fine features.
+        # Init as average of the two rows (near-identity).
         self._post_stem_h = 8
         self.merge_a = nn.Linear(stem_out_ch * 2, stem_out_ch)
+        with torch.no_grad():
+            self.merge_a.weight.zero_()
+            self.merge_a.weight[:, :stem_out_ch] = 0.5 * torch.eye(stem_out_ch)
+            self.merge_a.weight[:, stem_out_ch:] = 0.5 * torch.eye(stem_out_ch)
+            self.merge_a.bias.zero_()
 
         # Shared SWA-B at (h=4, w=W/2), dim=stem_out_ch.
         # Window 4×32: full vertical × medium horizontal context.
@@ -683,7 +688,17 @@ class LipiMoEEncoder(nn.Module):
             nn.init.zeros_(blk.mlp[-1].bias)
 
         # Patch-merge (h=4 → 2): concat 2 adjacent rows, project to dim.
+        # Init: each output dim gets average of corresponding dims from
+        # the two input rows (zero-pads if out_dim > in_dim).
         self.merge_b = nn.Linear(stem_out_ch * 2, dim)
+        with torch.no_grad():
+            self.merge_b.weight.zero_()
+            d_in = stem_out_ch
+            d_out = dim
+            d_copy = min(d_in, d_out)
+            self.merge_b.weight[:d_copy, :d_copy] = 0.5 * torch.eye(d_copy)
+            self.merge_b.weight[:d_copy, d_in:d_in + d_copy] = 0.5 * torch.eye(d_copy)
+            self.merge_b.bias.zero_()
 
         # Shared SWA-C at (h=2, w=W/2), dim.
         # Window 2×64: full vertical × wide horizontal context for
