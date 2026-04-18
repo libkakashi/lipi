@@ -3,25 +3,18 @@ Lipi v5 MoE Vision Encoder (from scratch — no pretrained backbone).
 
 Architecture:
     Input: (B, 3, 32, W) — RGB
-    -> ConvStem: two plain strided convs (no ResBlocks, small RF ~5px)
-       → (B, 128, 8, W/2)
-    -> Shared SWA-A: 2× windowed-attention blocks at (h=8, w=W/2)
-    -> Patch-merge 8→2, proj 128×4→dim
-    -> Shared SWA-B: 2× windowed-attention blocks at (h=2, w=W/2, dim)
-    -> Pool h=2→1
-    -> LID-1 context: 1× SWA block (w=32, wider horizontal context) so
-       LID-1 has its own capacity for script-family discrimination
-       without forcing shared_b to encode it.
-    -> Frame-level LID-1: per-frame script group classification (15 groups)
-    -> Patch-merge 2→1 (on the pre-lid1_attn features for CTC path)
-    -> Route frames to group expert blocks by group_id
-    -> 1 local group expert block  (h=1, window 1×16, 15 experts)
-    -> 1 wide  group expert block  (h=1, window 1×64, 15 experts)
+    -> ConvStem: two plain strided convs (small RF ~5px) → (B, 128, 8, W/2)
+    -> Shared SWA-A:   2× blocks at h=8, w=16 (local features)
+    -> Patch-merge 8→4
+    -> Shared SWA-Mid: 2× blocks at h=4, w=32 (character-level context)
+    -> Patch-merge 4→2, proj 128→256
+    -> Shared SWA-B:   2× blocks at h=2, w=64 (multi-char script context)
+    -> LID-1 branch: pool h=2→1, lid1_attn (w=32), group classifier
+    -> Patch-merge 2→1 (CTC path only)
+    -> 1 local + 1 wide group expert block (15 experts)
     -> Per-group aggregation (concat local + wide → dim)
-    -> Frame-level LID-2: per-frame script classification (multi-script groups)
-    -> Route frames to script expert blocks by script_id
-    -> 1 local script expert block (h=1, 1×16 windows, 27 experts)
-    -> 1 wide  script expert block (h=1, 1×64 windows, 27 experts)
+    -> LID-2: per-frame script classification (multi-script groups)
+    -> 1 local + 1 wide script expert block (27 experts)
     -> Per-script aggregation (concat local + wide → dim)
     -> Per-script CTC heads (T=W/2)
 """
@@ -568,20 +561,20 @@ class LipiMoEEncoder(nn.Module):
         dim: int = 256,
         stem_out_ch: int = 128,
         num_shared_a_blocks: int = 2,
+        num_shared_mid_blocks: int = 2,
         num_shared_b_blocks: int = 2,
         num_group_local_blocks: int = 1,
         num_group_wide_blocks: int = 1,
         num_script_local_blocks: int = 1,
         num_script_wide_blocks: int = 1,
+        shared_a_window_w: int = 16,
+        shared_mid_window_w: int = 32,
+        shared_b_window_w: int = 64,
         local_window_w: int = 16,
         wide_window_w: int = 64,
         mlp_ratio: int = 2,
-        shared_mlp_ratio: int = 4,
+        shared_mlp_ratio: int = 2,
         drop_path_rate: float = 0.1,
-        # LayerScale init=1.0 is a no-op (identity). Reduce (e.g. 1e-2)
-        # only if you see training instability; on top of identity-init
-        # experts, small values scale expert gradients by the same factor
-        # and can starve MoE experts that already see only 1/N of data.
         layer_scale_init: float = 1.0,
         num_groups: int = NUM_GROUPS,
         group_script_vocab_sizes: list[list[int]] | None = None,
@@ -622,11 +615,15 @@ class LipiMoEEncoder(nn.Module):
             "dim": dim,
             "stem_out_ch": stem_out_ch,
             "num_shared_a_blocks": num_shared_a_blocks,
+            "num_shared_mid_blocks": num_shared_mid_blocks,
             "num_shared_b_blocks": num_shared_b_blocks,
             "num_group_local_blocks": num_group_local_blocks,
             "num_group_wide_blocks": num_group_wide_blocks,
             "num_script_local_blocks": num_script_local_blocks,
             "num_script_wide_blocks": num_script_wide_blocks,
+            "shared_a_window_w": shared_a_window_w,
+            "shared_mid_window_w": shared_mid_window_w,
+            "shared_b_window_w": shared_b_window_w,
             "local_window_w": local_window_w,
             "wide_window_w": wide_window_w,
             "mlp_ratio": mlp_ratio,
@@ -640,9 +637,10 @@ class LipiMoEEncoder(nn.Module):
 
         # Drop-path schedule: linearly increase from 0 → drop_path_rate
         # across all residual stages along a sample's path.
-        # Stages (parallel pairs count as one): shared_a, shared_b,
+        # Stages: shared_a, shared_mid, shared_b,
         # group (local/wide parallel), script (local/wide parallel).
-        n_stages = (num_shared_a_blocks + num_shared_b_blocks
+        n_stages = (num_shared_a_blocks + num_shared_mid_blocks
+                    + num_shared_b_blocks
                     + max(num_group_local_blocks, num_group_wide_blocks)
                     + max(num_script_local_blocks, num_script_wide_blocks))
         dp_schedule = [drop_path_rate * i / max(n_stages - 1, 1)
@@ -652,27 +650,40 @@ class LipiMoEEncoder(nn.Module):
         # Convolutional stem: (B, 3, 32, W) → (B, stem_out_ch, 8, W/2)
         self.stem = ConvStem(in_ch=3, out_ch=stem_out_ch)
 
-        # Shared SWA-A at (h=8, w=W/2), dim=stem_out_ch. Window 8×16:
-        # full vertical extent × 2-character horizontal context.
+        # Shared SWA-A at (h=8, w=W/2), dim=stem_out_ch.
+        # Window 8×16: full vertical extent × local horizontal context.
         self.shared_a = nn.ModuleList([
             SWABlock(dim=stem_out_ch, num_heads=max(stem_out_ch // 64, 1),
-                     window_h=8, window_w=16, shift=(i % 2 == 1),
+                     window_h=8, window_w=shared_a_window_w, shift=(i % 2 == 1),
                      mlp_ratio=shared_mlp_ratio, drop_path=next(dp_iter),
                      layer_scale_init=layer_scale_init)
             for i in range(num_shared_a_blocks)
         ])
 
-        # Patch-merge (h=8 → 2): concat 4 adjacent rows channel-wise,
-        # project to dim. Drops vertical resolution by 4× but keeps
-        # learned weighting across the original rows.
-        self._post_stem_h = 8  # stem downsamples 32px input by 4x
-        self.merge_a = nn.Linear(stem_out_ch * 4, dim)  # 4 rows → dim
+        # Patch-merge (h=8 → 4): concat 2 adjacent rows, project.
+        # Gradual vertical downsampling preserves fine features.
+        self._post_stem_h = 8
+        self.merge_a1 = nn.Linear(stem_out_ch * 2, stem_out_ch)
 
-        # Shared SWA-B at (h=2, w=W/2), dim. Window 2×16: full vertical
-        # extent (top+bottom half of char) × 2-char horizontal context.
+        # Shared SWA-Mid at (h=4, w=W/2), dim=stem_out_ch.
+        # Window 4×32: full vertical × medium horizontal context.
+        self.shared_mid = nn.ModuleList([
+            SWABlock(dim=stem_out_ch, num_heads=max(stem_out_ch // 64, 1),
+                     window_h=4, window_w=shared_mid_window_w, shift=(i % 2 == 1),
+                     mlp_ratio=shared_mlp_ratio, drop_path=next(dp_iter),
+                     layer_scale_init=layer_scale_init)
+            for i in range(num_shared_mid_blocks)
+        ])
+
+        # Patch-merge (h=4 → 2): concat 2 adjacent rows, project to dim.
+        self.merge_a2 = nn.Linear(stem_out_ch * 2, dim)
+
+        # Shared SWA-B at (h=2, w=W/2), dim.
+        # Window 2×64: full vertical × wide horizontal context for
+        # multi-character script discrimination before LID-1.
         self.shared_b = nn.ModuleList([
             SWABlock(dim=dim, num_heads=max(dim // 64, 1),
-                     window_h=2, window_w=16, shift=(i % 2 == 1),
+                     window_h=2, window_w=shared_b_window_w, shift=(i % 2 == 1),
                      mlp_ratio=shared_mlp_ratio, drop_path=next(dp_iter),
                      layer_scale_init=layer_scale_init)
             for i in range(num_shared_b_blocks)
@@ -861,14 +872,17 @@ class LipiMoEEncoder(nn.Module):
         for blk in self.shared_a:
             x = blk(x, h, w)
 
-        # Patch-merge 8 → 2 (4× h-downsample): concat 4 adjacent rows,
-        # project to dim. One intermediate stage (h=2) with attention
-        # before the final collapse.
+        # Patch-merge 8 → 4: concat 2 adjacent rows, project.
         assert h == self._post_stem_h, \
             f"expected post-stem height {self._post_stem_h}, got {h}"
-        x = x.reshape(B, 2, 4, w, C).permute(0, 1, 3, 2, 4).reshape(B, 2 * w, 4 * C)
-        x = self.merge_a(x)  # (B, 2*w, dim)
-        h = 2
+        x, h = _patch_merge_h(x, h, w, self.merge_a1)  # h=8→4
+
+        # Shared SWA-Mid at (h=4, w=W/2)
+        for blk in self.shared_mid:
+            x = blk(x, h, w)
+
+        # Patch-merge 4 → 2: concat 2 adjacent rows, project to dim.
+        x, h = _patch_merge_h(x, h, w, self.merge_a2)  # h=4→2
 
         d = x.shape[-1]
 
