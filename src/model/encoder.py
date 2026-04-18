@@ -637,7 +637,7 @@ class LipiMoEEncoder(nn.Module):
 
         # Drop-path schedule: linearly increase from 0 → drop_path_rate
         # across all residual stages along a sample's path.
-        # Stages: shared_a, shared_b, shared_b,
+        # Stages: shared_a, shared_b, shared_c,
         # group (local/wide parallel), script (local/wide parallel).
         n_stages = (num_shared_a_blocks + num_shared_b_blocks
                     + num_shared_c_blocks
@@ -700,9 +700,10 @@ class LipiMoEEncoder(nn.Module):
 
         # LID-1: per-frame group classification.
         #
-        # Dedicated `lid1_attn` block sits between shared_b output (pooled
-        # to h=1) and the classifier head. Window w=32 gives LID-1 ~2×
-        # wider horizontal context than shared_b's w=16, so it can pick up
+        # Dedicated `lid1_attn` block sits between shared_c output (pooled
+        # to h=1) and the classifier head. Window w=32 gives LID-1
+        # horizontal context for script discrimination. Output projection
+        # is zero-init so the residual starts as identity. Can pick up
         # multi-character script signal (e.g. punctuation-only fragments
         # use neighbor context). Output projection is zero-init so the
         # residual starts as identity — from a CTC-seeded checkpoint,
@@ -891,10 +892,10 @@ class LipiMoEEncoder(nn.Module):
             x = blk(x, h, w)
 
         # LID-1 branches off BEFORE the final 2→1 merge so LID-1 sees h=2
-        # features (top+bottom half of each char) and merge_b only gets
+        # features (top+bottom half of each char) and merge_c only gets
         # CTC gradient. We pool h=2→1 for LID-1, then run `lid1_attn` to
         # give LID-1 its own horizontal-context capacity (window w=32).
-        # The post-lid1_attn tensor feeds ONLY the classifier; merge_b /
+        # The post-lid1_attn tensor feeds ONLY the classifier; merge_c /
         # experts / CTC use the pre-lid1_attn pooled features so they
         # aren't pulled toward script-family representation.
         x_for_group = x.reshape(B, h, w, d).permute(0, 3, 1, 2)  # (B, d, 2, w)
