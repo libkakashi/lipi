@@ -715,7 +715,8 @@ def main():
                 k for k in EXPERT_PARAM_PREFIXES if k != "ctc_modules."])
         if "backbone" in components:
             unfreeze_prefixes.extend([
-                "stem.", "shared_a.", "shared_b.", "merge_a.", "merge_b."])
+                "stem.", "shared_a.", "shared_b.", "shared_c.",
+                "merge_a.", "merge_b.", "merge_c."])
 
         frozen = 0
         trainable = 0
