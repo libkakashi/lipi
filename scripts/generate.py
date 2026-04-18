@@ -206,12 +206,19 @@ def _is_kanji_cp(cp):
 def _is_cjk_punct_cp(cp):
     return 0x3000 <= cp <= 0x303F
 
-def split_japanese(text):
-    """Split Japanese text at kana/kanji boundaries.
+def _is_ascii_cp(cp):
+    return 0x21 <= cp <= 0x7E
 
-    Returns [(chunk_text, script_name), ...] where script_name is "han" or "kana".
-    Non-CJK characters (ASCII punctuation, digits) attach to the current segment.
-    CJK punctuation (0x3000-0x303F) routes to "han" since the kana codec can't encode it.
+
+def split_by_script(text, parent_script):
+    """Split text into segments with correct script labels.
+
+    ASCII characters (0x21-0x7E) become "latin" segments.
+    For han/kana, also splits at kana/kanji boundaries.
+    CJK punctuation (0x3000-0x303F) routes to "han".
+    Everything else stays in parent_script.
+
+    Returns [(chunk_text, script_name), ...].
     """
     if not text:
         return []
@@ -222,12 +229,19 @@ def split_japanese(text):
 
     for ch in text:
         cp = ord(ch)
-        if _is_kana_cp(cp):
-            script = "kana"
-        elif _is_kanji_cp(cp) or _is_cjk_punct_cp(cp):
-            script = "han"
+
+        # Determine script for this character
+        if _is_ascii_cp(cp):
+            script = "latin"
+        elif parent_script in ("han", "kana"):
+            if _is_kana_cp(cp):
+                script = "kana"
+            elif _is_kanji_cp(cp) or _is_cjk_punct_cp(cp):
+                script = "han"
+            else:
+                script = current_script  # non-ASCII, non-CJK → attach
         else:
-            script = current_script
+            script = parent_script
 
         if script != current_script and current_script is not None and script is not None:
             segments.append(("".join(current), current_script))
@@ -242,10 +256,61 @@ def split_japanese(text):
     return segments
 
 
-def _is_mixed_japanese(text):
-    has_kana = any(_is_kana_cp(ord(c)) for c in text)
-    has_kanji = any(_is_kanji_cp(ord(c)) for c in text)
-    return has_kana and has_kanji
+# ---------------------------------------------------------------------------
+# Latin punctuation/number segments for non-latin plans
+# ---------------------------------------------------------------------------
+
+from src.encoding.config import _ASCII_COMMON, _TYPOGRAPHIC_COMMON
+
+# Build flat char lists from the encoding config ranges
+_ASCII_COMMON_CHARS = [chr(cp) for start, end in _ASCII_COMMON
+                       for cp in range(start, end + 1)
+                       if chr(cp).strip()]
+_TYPO_COMMON_CHARS = [chr(cp) for start, end in _TYPOGRAPHIC_COMMON
+                      for cp in range(start, end + 1)]
+
+
+def _random_latin_segment():
+    """Generate a random segment from ASCII_COMMON / TYPOGRAPHIC_COMMON chars."""
+    r = random.random()
+    if r < 0.35:
+        # 1-3 random ASCII common chars
+        n = random.randint(1, 3)
+        return "".join(random.choices(_ASCII_COMMON_CHARS, k=n))
+    elif r < 0.50:
+        # Typographic chars
+        return random.choice(_TYPO_COMMON_CHARS)
+    elif r < 0.70:
+        # Number: 1-6 digits, possibly with . or ,
+        digits = "".join(random.choices("0123456789", k=random.randint(1, 6)))
+        if len(digits) >= 4 and random.random() < 0.3:
+            digits = f"{int(digits):,}"
+        elif len(digits) >= 2 and random.random() < 0.3:
+            pos = random.randint(1, len(digits) - 1)
+            digits = digits[:pos] + "." + digits[pos:]
+        return digits
+    elif r < 0.82:
+        # Currency + number
+        currency = random.choice(["$", "\u00A3", "\u00A5", "\u20AC"])
+        return currency + str(random.randint(1, 9999))
+    elif r < 0.90:
+        # Bracketed expression: (123), [45], {6}
+        inner = "".join(random.choices("0123456789", k=random.randint(1, 4)))
+        l, r_ = random.choice([("(", ")"), ("[", "]"), ("{", "}")])
+        return l + inner + r_
+    else:
+        # Separated numbers: 12-34, 123.456.789
+        sep = random.choice(list("-/."))
+        parts = ["".join(random.choices("0123456789", k=random.randint(2, 4)))
+                 for _ in range(random.randint(2, 3))]
+        return sep.join(parts)
+
+
+def _maybe_add_latin_segment(plan, p=0.15):
+    """With probability p, append a latin punctuation/number segment to the plan."""
+    if random.random() > p:
+        return
+    plan.append({"text": _random_latin_segment(), "script": "latin"})
 
 
 # ---------------------------------------------------------------------------
@@ -449,7 +514,6 @@ def render_content_plan(plan, fonts_by_script, h, mw, aug=None,
                 font = random.choice(fonts)
                 if not font_covers_text(font, text):
                     continue
-                # Always render clean — augmentation applies style to composed line
                 img = render_word(text, font, h, clean=True)
                 if img is not None and image_has_ink(img):
                     break
@@ -732,11 +796,21 @@ def _get_word_pool(style, script, fonts, words, h=32, punct_prob=0.15):
         # the mislabel that hurt LID-1 han accuracy previously. Using
         # split_japanese catches mixed AND pure-mismatched words in one
         # check (japanese.txt is ~52% pure-kana, ~3% pure-kanji).
+        # For han/kana pools: skip mixed Japanese words (they'd get
+        # the wrong single-script label). split_by_script handles them
+        # correctly in the plan builders instead.
         if script in ("han", "kana"):
-            segs = split_japanese(word)
+            segs = split_by_script(word, script)
             if len(segs) != 1 or segs[0][1] != script:
                 continue
-        word = mix_punctuation(word, p=punct_prob, script=script)
+        # For non-latin pools: skip words with ASCII chars.
+        # split_by_script in plan builders will route those chars to
+        # latin, but the pool renders whole words with a single label.
+        if script != "latin" and any(_is_ascii_cp(ord(c)) for c in word):
+            continue
+        # Only mix punctuation into latin pool entries.
+        if script == "latin":
+            word = mix_punctuation(word, p=punct_prob, script=script)
         font = random.choice(fonts)
         if not font_covers_text(font, word):
             continue
@@ -1002,16 +1076,13 @@ def _build_single_line_plan(script_info):
     for i in range(n_words):
         if i > 0:
             plan.append({"text": " ", "script": "whitespace"})
+        if script != "latin":
+            _maybe_add_latin_segment(plan)
         word = random.choice(words)
-        if script in ("han", "kana"):
-            # Always split: pure-kana words picked for a "han" line (or vice
-            # versa) get re-labeled correctly per-segment. split_japanese
-            # returns a single segment for pure inputs, so it's a no-op for
-            # already-uniform words.
-            for seg_text, seg_script in split_japanese(word):
-                plan.append({"text": seg_text, "script": seg_script})
-        else:
-            plan.append({"text": word, "script": script})
+        for seg_text, seg_script in split_by_script(word, script):
+            plan.append({"text": seg_text, "script": seg_script})
+        if script != "latin":
+            _maybe_add_latin_segment(plan)
     return plan
 
 
@@ -1048,16 +1119,15 @@ def _build_mixed_line_plan(group_index):
     for i, (script, _fonts, words, _gid) in enumerate(chosen):
         if i > 0:
             plan.append({"text": " ", "script": "whitespace"})
+        if script != "latin":
+            _maybe_add_latin_segment(plan)
+        if script != "latin":
+            _maybe_add_latin_segment(plan)
         word = random.choice(words)
-        if script in ("han", "kana"):
-            # Always split: pure-kana words picked for a "han" line (or vice
-            # versa) get re-labeled correctly per-segment. split_japanese
-            # returns a single segment for pure inputs, so it's a no-op for
-            # already-uniform words.
-            for seg_text, seg_script in split_japanese(word):
-                plan.append({"text": seg_text, "script": seg_script})
-        else:
-            plan.append({"text": word, "script": script})
+        for seg_text, seg_script in split_by_script(word, script):
+            plan.append({"text": seg_text, "script": seg_script})
+        if script != "latin":
+            _maybe_add_latin_segment(plan)
     return plan
 
 
