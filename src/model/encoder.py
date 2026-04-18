@@ -667,6 +667,8 @@ class LipiMoEEncoder(nn.Module):
 
         # Shared SWA-B at (h=4, w=W/2), dim=stem_out_ch.
         # Window 4×32: full vertical × medium horizontal context.
+        # Zero-init output projections so new blocks start as identity
+        # (pass-through) — preserves shared_a features on checkpoint resume.
         self.shared_b = nn.ModuleList([
             SWABlock(dim=stem_out_ch, num_heads=max(stem_out_ch // 64, 1),
                      window_h=4, window_w=shared_b_window_w, shift=(i % 2 == 1),
@@ -674,6 +676,11 @@ class LipiMoEEncoder(nn.Module):
                      layer_scale_init=layer_scale_init)
             for i in range(num_shared_b_blocks)
         ])
+        for blk in self.shared_b:
+            nn.init.zeros_(blk.attn.proj.weight)
+            nn.init.zeros_(blk.attn.proj.bias)
+            nn.init.zeros_(blk.mlp[-1].weight)
+            nn.init.zeros_(blk.mlp[-1].bias)
 
         # Patch-merge (h=4 → 2): concat 2 adjacent rows, project to dim.
         self.merge_b = nn.Linear(stem_out_ch * 2, dim)
@@ -681,6 +688,7 @@ class LipiMoEEncoder(nn.Module):
         # Shared SWA-C at (h=2, w=W/2), dim.
         # Window 2×64: full vertical × wide horizontal context for
         # multi-character script discrimination before LID-1.
+        # Zero-init for same identity-start reason.
         self.shared_c = nn.ModuleList([
             SWABlock(dim=dim, num_heads=max(dim // 64, 1),
                      window_h=2, window_w=shared_c_window_w, shift=(i % 2 == 1),
@@ -688,6 +696,11 @@ class LipiMoEEncoder(nn.Module):
                      layer_scale_init=layer_scale_init)
             for i in range(num_shared_c_blocks)
         ])
+        for blk in self.shared_c:
+            nn.init.zeros_(blk.attn.proj.weight)
+            nn.init.zeros_(blk.attn.proj.bias)
+            nn.init.zeros_(blk.mlp[-1].weight)
+            nn.init.zeros_(blk.mlp[-1].bias)
 
         # Patch-merge (h=2 → 1): concat 2 rows → project. Final collapse
         # to frame sequence before experts.
