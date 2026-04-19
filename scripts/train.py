@@ -86,6 +86,9 @@ def parse_args():
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--save-dir", type=str, default="checkpoints/moe")
     parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--skip-backbone-load", action="store_true",
+                        help="When resuming, skip loading shared/merge/stem/LID "
+                             "weights. Loads only experts + CTC heads.")
     parser.add_argument("--val-split", type=float, default=0.1)
     parser.add_argument("--log-interval", type=int, default=20)
     parser.add_argument("--num-workers", type=int, default=12,
@@ -329,9 +332,22 @@ def resume_from_checkpoint(args, model, optimizer, base_optimizer, scaler, sched
                            steps_per_epoch, device_type):
     print(f"\nResuming from {args.resume}...")
     ckpt = torch.load(args.resume, map_location="cpu", weights_only=False)
-    # Partial load: skip mismatched layers (e.g., CTC proj after vocab change)
     model_state = ckpt["model"]
 
+    # Optionally drop backbone keys so they keep fresh init
+    if getattr(args, 'skip_backbone_load', False):
+        backbone_prefixes = (
+            "stem.", "shared_a.", "shared_b.", "shared_c.",
+            "merge_a.", "merge_b.", "merge_c.",
+            "group_head.", "group_h_pool.", "lid1_attn.",
+            "lid2_heads.", "norm.",
+        )
+        dropped = [k for k in model_state if any(k.startswith(p) for p in backbone_prefixes)]
+        for k in dropped:
+            del model_state[k]
+        print(f"  --skip-backbone-load: dropped {len(dropped)} backbone keys")
+
+    # Skip mismatched shapes (e.g., CTC proj after vocab change)
     current_state = model.state_dict()
     skipped = []
     for k in list(model_state.keys()):
