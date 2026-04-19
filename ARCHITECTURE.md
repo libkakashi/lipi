@@ -1,6 +1,6 @@
 # Lipi: Multilingual OCR via Mixture of Experts
 
-> 27 scripts, 15 groups, 100+ languages. 57.4M params.
+> 27 scripts, 15 groups, 100+ languages. 80.5M params, ~1.7 GFLOPs/word.
 
 ---
 
@@ -22,7 +22,7 @@ Word Image (32 x W x 3 RGB)
 
 ---
 
-## Model Architecture (57.4M params)
+## Model Architecture (80.5M params)
 
 ### ConvStem (0.1M)
 
@@ -34,16 +34,16 @@ Input: (B, 3, 32, W) RGB
 RF: ~7px H × 5px W (tight for clean routing boundaries)
 ```
 
-### Shared Backbone: 6 SWA Blocks (1.7M)
+### Shared Backbone: 6 SWA Blocks (2.4M)
 
 Gradual vertical downsampling with progressively wider windows.
 
 ```
-Shared SWA-A:  2 blocks  h=8, w=16, dim=128, mlp=2  (local features)
+Shared SWA-A:  2 blocks  h=8, w=16, dim=128, mlp=4  (local features)
   merge_a:     h=8→4     Linear(256→128)
-Shared SWA-B:  2 blocks  h=4, w=32, dim=128, mlp=2  (character context)
+Shared SWA-B:  2 blocks  h=4, w=32, dim=128, mlp=4  (character context)
   merge_b:     h=4→2     Linear(256→256)
-Shared SWA-C:  2 blocks  h=2, w=64, dim=256, mlp=2  (multi-char script context)
+Shared SWA-C:  2 blocks  h=2, w=64, dim=256, mlp=4  (multi-char script context)
 ```
 
 Each SWA block: LayerNorm → WindowedAttention (QK-norm, relative pos bias) → LayerScale → DropPath + residual → LayerNorm → MLP → LayerScale → DropPath + residual. Shifted windows on alternate blocks.
@@ -69,18 +69,18 @@ merge_c: h=2→1, Linear(512→256)
 Output: (B, T, 256) where T = W/2
 ```
 
-### Group Expert Blocks: 15 experts (17.9M)
+### Group Expert Blocks: 15 experts (23.7M)
 
 Per-group routing via LID-1 predictions (training: GT labels).
 
 ```
 For each group g (0..14):
-  local:  ExpertBlock(dim=256, heads=4, w=16, identity-init)
-  wide:   ExpertBlock(dim=256, heads=4, w=64, identity-init)
+  local:  ExpertBlock(dim=256, heads=4, w=16, mlp=4, identity-init)
+  wide:   ExpertBlock(dim=256, heads=4, w=64, mlp=4, identity-init)
   agg:    concat(local, wide) → Linear(512→256)  init: 0.5·I | 0.5·I
 
-Per expert: 527K params (attn 264K + MLP 263K)
-Per group:  527K × 2 blocks + 131K agg = 1.2M
+Per expert: 789K params (attn 264K + MLP 525K)
+Per group:  789K × 2 blocks + 131K agg = 1.71M
 ```
 
 Each ExpertBlock has N parallel attention+MLP experts sharing LayerNorm and LayerScale. Identity-initialized output projections so experts start as pass-through.
@@ -99,13 +99,13 @@ Only for multi-script groups. Single-script groups skip LID-2.
   group 12 (caucasus):         2-way  → armenian, georgian
 ```
 
-### Script Expert Blocks: 27 experts (31.9M)
+### Script Expert Blocks: 27 experts (42.6M)
 
 Same structure as group experts but routed by flat script ID from LID-2.
 
 ```
-script_local: ExpertBlock(dim=256, heads=4, w=16, 27 experts)
-script_wide:  ExpertBlock(dim=256, heads=4, w=64, 27 experts)
+script_local: ExpertBlock(dim=256, heads=4, w=16, mlp=4, 27 experts)
+script_wide:  ExpertBlock(dim=256, heads=4, w=64, mlp=4, 27 experts)
 Per-script aggregate: Linear(512→256)
 ```
 
@@ -199,20 +199,23 @@ script experts: 0.100
 | Component | Params | % |
 |-----------|--------|---|
 | ConvStem | 0.1M | 0.1% |
-| Shared SWA-A (2, h=8, w=16, dim=128) | 0.3M | 0.5% |
-| Shared SWA-B (2, h=4, w=32, dim=128) | 0.3M | 0.5% |
-| Shared SWA-C (2, h=2, w=64, dim=256) | 1.1M | 1.9% |
+| Shared SWA-A (2, h=8, w=16, dim=128) | 0.4M | 0.5% |
+| Shared SWA-B (2, h=4, w=32, dim=128) | 0.4M | 0.5% |
+| Shared SWA-C (2, h=2, w=64, dim=256) | 1.6M | 2.0% |
 | Merges (a + b + c) | 0.2M | 0.3% |
-| lid1_attn + group_head | 0.5M | 0.9% |
-| Group experts (15 × 2 blocks) | 15.8M | 27.5% |
-| Group aggregates (15) | 2.0M | 3.5% |
-| LID-2 heads (6) | 0.2M | 0.3% |
-| Script experts (27 × 2 blocks) | 28.5M | 49.6% |
-| Script aggregates (27) | 3.5M | 6.1% |
-| CTC heads (27 scripts) | 5.0M | 8.7% |
-| **Total** | **57.4M** | |
-| Shared (all scripts) | 2.5M | 4.4% |
-| MoE (per-group/script) | 54.9M | 95.6% |
+| lid1_attn + group_head | 0.8M | 1.0% |
+| Group experts (15 × 2 blocks) | 23.7M | 29.4% |
+| Group aggregates (15) | 2.0M | 2.4% |
+| LID-2 heads (6) | 0.2M | 0.2% |
+| Script experts (27 × 2 blocks) | 42.6M | 52.9% |
+| Script aggregates (27) | 3.5M | 4.4% |
+| CTC heads (27 scripts) | 5.0M | 6.2% |
+| **Total** | **80.5M** | |
+| Shared (all scripts) | 3.5M | 4.3% |
+| MoE (per-group/script) | 77.0M | 95.7% |
+
+Inference: only 1 group expert + 1 script expert fire per sample.
+Active path is ~6.5M params, ~1.7 GFLOPs at W=128.
 
 ---
 

@@ -256,7 +256,7 @@ class WindowedAttention(nn.Module):
 
 
 class MLP(nn.Module):
-    def __init__(self, dim: int, mlp_ratio: int = 2):
+    def __init__(self, dim: int, mlp_ratio: int = 4):
         super().__init__()
         hidden = dim * mlp_ratio
         self.fc1 = nn.Linear(dim, hidden)
@@ -279,7 +279,7 @@ class ExpertBlock(nn.Module):
 
     def __init__(self, dim: int, num_heads: int, num_experts: int,
                  window_h: int = 2, window_w: int = 16, shift: bool = False,
-                 mlp_ratio: int = 2, drop_path: float = 0.0,
+                 mlp_ratio: int = 4, drop_path: float = 0.0,
                  layer_scale_init: float = 1e-4):
         super().__init__()
         self.num_experts = num_experts
@@ -354,7 +354,7 @@ class SWABlock(nn.Module):
 
     def __init__(self, dim: int, num_heads: int,
                  window_h: int, window_w: int, shift: bool,
-                 mlp_ratio: int = 2, drop_path: float = 0.0,
+                 mlp_ratio: int = 4, drop_path: float = 0.0,
                  layer_scale_init: float = 1e-4):
         super().__init__()
         self.norm1 = nn.LayerNorm(dim)
@@ -572,8 +572,8 @@ class LipiMoEEncoder(nn.Module):
         shared_c_window_w: int = 64,
         local_window_w: int = 16,
         wide_window_w: int = 64,
-        mlp_ratio: int = 2,
-        shared_mlp_ratio: int = 2,
+        mlp_ratio: int = 4,
+        shared_mlp_ratio: int = 4,
         drop_path_rate: float = 0.1,
         layer_scale_init: float = 1.0,
         num_groups: int = NUM_GROUPS,
