@@ -652,6 +652,9 @@ class LipiMoEEncoder(nn.Module):
 
         # Shared SWA-A at (h=8, w=W/2), dim=stem_out_ch.
         # Window 8×16: full vertical extent × local horizontal context.
+        # Zero-init MLP output so that when MLP shape mismatches a
+        # checkpoint (e.g. mlp_ratio changed), the attention output
+        # is preserved through the residual while MLP relearns.
         self.shared_a = nn.ModuleList([
             SWABlock(dim=stem_out_ch, num_heads=max(stem_out_ch // 64, 1),
                      window_h=8, window_w=shared_a_window_w, shift=(i % 2 == 1),
@@ -659,6 +662,9 @@ class LipiMoEEncoder(nn.Module):
                      layer_scale_init=layer_scale_init)
             for i in range(num_shared_a_blocks)
         ])
+        for blk in self.shared_a:
+            nn.init.zeros_(blk.mlp[-1].weight)
+            nn.init.zeros_(blk.mlp[-1].bias)
 
         # Patch-merge (h=8 → 4): concat 2 adjacent rows, project.
         # Init as average of the two rows (near-identity).
