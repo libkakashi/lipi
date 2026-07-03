@@ -3,8 +3,8 @@
 Train Lipi MoE Encoder end-to-end.
 
 Usage:
-    python scripts/train_moe.py --data data/shards --epochs 15 --batch-size 192
-    python scripts/train_moe.py --data data/shards --epochs 20 --resume checkpoints/moe/moe_epoch15.pt
+    python scripts/train.py --data data/shards --epochs 15 --batch-size 192
+    python scripts/train.py --data data/shards --epochs 20 --resume checkpoints/moe/moe_epoch15.pt
 """
 
 import os
@@ -732,7 +732,7 @@ def main():
         if "backbone" in components:
             unfreeze_prefixes.extend([
                 "stem.", "shared_a.", "shared_b.", "shared_c.",
-                "merge_a.", "merge_b.", "merge_c."])
+                "merge_a.", "merge_b.", "merge_c.", "norm."])
 
         frozen = 0
         trainable = 0

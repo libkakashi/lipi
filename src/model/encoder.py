@@ -652,19 +652,17 @@ class LipiMoEEncoder(nn.Module):
 
         # Shared SWA-A at (h=8, w=W/2), dim=stem_out_ch.
         # Window 8×16: full vertical extent × local horizontal context.
-        # Zero-init MLP output so that when MLP shape mismatches a
-        # checkpoint (e.g. mlp_ratio changed), the attention output
-        # is preserved through the residual while MLP relearns.
+        # Small LayerScale init (1e-4) gives near-identity at step 0
+        # without zeroing any W_out — all internal weights receive
+        # non-zero gradient immediately. Avoids the ReZero chicken-and-egg
+        # where zero-init of mlp[-1] blocks gradient to mlp[0].
         self.shared_a = nn.ModuleList([
             SWABlock(dim=stem_out_ch, num_heads=max(stem_out_ch // 64, 1),
                      window_h=8, window_w=shared_a_window_w, shift=(i % 2 == 1),
                      mlp_ratio=shared_mlp_ratio, drop_path=next(dp_iter),
-                     layer_scale_init=layer_scale_init)
+                     layer_scale_init=1e-4)
             for i in range(num_shared_a_blocks)
         ])
-        for blk in self.shared_a:
-            nn.init.zeros_(blk.mlp[-1].weight)
-            nn.init.zeros_(blk.mlp[-1].bias)
 
         # Patch-merge (h=8 → 4): concat 2 adjacent rows, project.
         # Init as average of the two rows (near-identity).
@@ -678,20 +676,15 @@ class LipiMoEEncoder(nn.Module):
 
         # Shared SWA-B at (h=4, w=W/2), dim=stem_out_ch.
         # Window 4×32: full vertical × medium horizontal context.
-        # Zero-init output projections so new blocks start as identity
-        # (pass-through) — preserves shared_a features on checkpoint resume.
+        # Small LayerScale init (1e-4) → near-identity at step 0 while
+        # every internal weight still receives gradient.
         self.shared_b = nn.ModuleList([
             SWABlock(dim=stem_out_ch, num_heads=max(stem_out_ch // 64, 1),
                      window_h=4, window_w=shared_b_window_w, shift=(i % 2 == 1),
                      mlp_ratio=shared_mlp_ratio, drop_path=next(dp_iter),
-                     layer_scale_init=layer_scale_init)
+                     layer_scale_init=1e-4)
             for i in range(num_shared_b_blocks)
         ])
-        for blk in self.shared_b:
-            nn.init.zeros_(blk.attn.proj.weight)
-            nn.init.zeros_(blk.attn.proj.bias)
-            nn.init.zeros_(blk.mlp[-1].weight)
-            nn.init.zeros_(blk.mlp[-1].bias)
 
         # Patch-merge (h=4 → 2): concat 2 adjacent rows, project to dim.
         # Init: each output dim gets average of corresponding dims from
@@ -709,19 +702,15 @@ class LipiMoEEncoder(nn.Module):
         # Shared SWA-C at (h=2, w=W/2), dim.
         # Window 2×64: full vertical × wide horizontal context for
         # multi-character script discrimination before LID-1.
-        # Zero-init for same identity-start reason.
+        # Small LayerScale init (1e-4) → near-identity at step 0 while
+        # every internal weight still receives gradient.
         self.shared_c = nn.ModuleList([
             SWABlock(dim=dim, num_heads=max(dim // 64, 1),
                      window_h=2, window_w=shared_c_window_w, shift=(i % 2 == 1),
                      mlp_ratio=shared_mlp_ratio, drop_path=next(dp_iter),
-                     layer_scale_init=layer_scale_init)
+                     layer_scale_init=1e-4)
             for i in range(num_shared_c_blocks)
         ])
-        for blk in self.shared_c:
-            nn.init.zeros_(blk.attn.proj.weight)
-            nn.init.zeros_(blk.attn.proj.bias)
-            nn.init.zeros_(blk.mlp[-1].weight)
-            nn.init.zeros_(blk.mlp[-1].bias)
 
         # Patch-merge (h=2 → 1): concat 2 rows → project. Final collapse
         # to frame sequence before experts.
@@ -762,7 +751,7 @@ class LipiMoEEncoder(nn.Module):
             nn.Linear(dim // 2, num_groups + 1),
         )
 
-        # Group expert blocks (routed by group_id, 13 experts)
+        # Group expert blocks (routed by group_id, 15 experts)
         # Init output projections near-zero so residual connections pass
         # features through initially — experts learn to specialize gradually
         # without destroying features that CTC needs.
@@ -814,7 +803,7 @@ class LipiMoEEncoder(nn.Module):
                     nn.Linear(dim // 2, n_scripts),
                 )
 
-        # Script expert blocks (routed by flat script_id, 26 experts)
+        # Script expert blocks (routed by flat script_id, 27 experts)
         # Initialize output projections near-zero so residual connections
         # pass features through initially (prevents randomly initialized
         # script experts from destroying group-expert features)
@@ -963,7 +952,7 @@ class LipiMoEEncoder(nn.Module):
 
         # =====================================================================
         # STAGE 1: Group expert blocks (routed per-segment by group_id)
-        # Iterates by group (≤ num_groups = 13) instead of (B, unique_groups)
+        # Iterates by group (≤ num_groups = 15) instead of (B, unique_groups)
         # to amortize kernel-launch overhead — all samples with the same
         # group are padded and processed in one batched call per expert.
         # =====================================================================
