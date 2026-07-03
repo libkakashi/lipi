@@ -4,11 +4,11 @@ MoE training loss computation.
 Separates loss logic from training loop for clarity and testability.
 Each loss function takes explicit inputs and returns a scalar tensor.
 
-Losses:
-  - LID-1: group classification (cross-entropy)
-  - LID-2: script classification within multi-script groups (cross-entropy)
-  - CTC: sequence-level character recognition
-  - Regional token: spatial partial credit for multi-token characters
+Provides:
+  - compute_lid1_loss: per-frame group classification (cross-entropy)
+  - compute_ctc_loss_segments: per-segment CTC, batched by (group, script)
+
+(LID-2 script cross-entropy is computed inline in the training loop.)
 """
 
 import functools
