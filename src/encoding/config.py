@@ -6,8 +6,10 @@ No-fusion scripts (1 CTC token = 1 character):
     0 = CTC BLANK
     1..vocab_size-1 = characters in sorted codepoint order
 
-BPE-encoded scripts (decomposition + BPE merging):
-  Token IDs are plain integers, remapped to contiguous range after build.
+Fusion / Korean / CJK scripts (multi-codepoint clusters):
+  A cluster (base+virama conjunct, jamo syllable, or frequent Han char) maps
+  to one token; rare clusters fall back to their component tokens.  Token IDs
+  are assigned directly (0 = CTC BLANK, then 1..vocab_size-1).
 """
 
 from __future__ import annotations
@@ -640,7 +642,7 @@ def _build_korean_codec() -> KoreanCodec:
                     three_freq[c] += 1
 
     # How many slots for 3-jamo?
-    n_base = len(_KOREAN_COMMON) + 27 + 399  # common + tails + two-jamo
+    n_base = len(_KOREAN_COMMON) + len(_TAIL_JAMO) + len(_TWO_JAMO)  # common + tails + two-jamo
     n_three = _KOREAN_VOCAB_SIZE - 1 - n_base  # -1 for BLANK
     top_three = [c for c, _ in three_freq.most_common(n_three)]
 
@@ -690,7 +692,6 @@ class CJKCodec:
     ):
         n_alt = _CJK_N_ALT
         self.tokens = base_chars + freq_chars
-        self._alt_names = [f"ALT{i:02d}" for i in range(n_alt)]
         self.vocab_size = len(self.tokens) + n_alt + 1  # +1 BLANK, +N ALT
 
         self._token_to_id = {t: i + 1 for i, t in enumerate(self.tokens)}

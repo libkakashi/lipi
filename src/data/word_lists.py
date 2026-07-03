@@ -49,7 +49,7 @@ def load_word_list(script: str) -> list[str]:
         if path.exists():
             for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
                 w = line.strip()
-                if 2 <= len(w) <= 15 and w and not w[0].isdigit():
+                if 2 <= len(w) <= 15 and not w[0].isdigit():
                     words.append(w)
 
     if words:

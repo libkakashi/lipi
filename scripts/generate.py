@@ -296,8 +296,8 @@ def _random_latin_segment():
     elif r < 0.90:
         # Bracketed expression: (123), [45], {6}
         inner = "".join(random.choices("0123456789", k=random.randint(1, 4)))
-        l, r_ = random.choice([("(", ")"), ("[", "]"), ("{", "}")])
-        return l + inner + r_
+        left, right = random.choice([("(", ")"), ("[", "]"), ("{", "}")])
+        return left + inner + right
     else:
         # Separated numbers: 12-34, 123.456.789
         sep = random.choice(list("-/."))
@@ -660,7 +660,7 @@ def parse_args() -> argparse.Namespace:
                              "Scripts with more characters get more training data.")
     parser.add_argument("--style", type=str, default="all",
                         choices=list(STYLES.keys()) + ["all"],
-                        help="Data style: clean, document, handwriting, signage, degraded, or all")
+                        help="Data style: clean, printed, handwritten, signage, degraded, or all")
     parser.add_argument("--augment", dest="augment", action="store_true", default=True)
     parser.add_argument("--no-augment", dest="augment", action="store_false")
     parser.add_argument("--height", type=int, default=32)
@@ -794,7 +794,7 @@ def _get_word_pool(style, script, fonts, words, h=32, punct_prob=0.15):
         # labels every entry as `script`, so admitting e.g. a pure-katakana
         # word to the "han" pool would label visual kana as han — exactly
         # the mislabel that hurt LID-1 han accuracy previously. Using
-        # split_japanese catches mixed AND pure-mismatched words in one
+        # split_by_script catches mixed AND pure-mismatched words in one
         # check (japanese.txt is ~52% pure-kana, ~3% pure-kanji).
         # For han/kana pools: skip mixed Japanese words (they'd get
         # the wrong single-script label). split_by_script handles them
@@ -979,7 +979,7 @@ def run_generation_pool(chunks, worker_fn, n_workers, label,
 def _generate_line_batch(args_tuple):
     """Generate line images (mixed or single-script) using two-stage pipeline.
 
-    Each line has 2-8 words. Mixed ratio controlled by MIXED_LINE_RATIO.
+    Each line has 2-8 words. Mixed ratio controlled by _worker_mixed_ratio (--mixed-ratio).
     Shared data (script_info, fonts) loaded from worker globals.
     """
     (primary_script, count, h, mw, do_augment, chunk_id,
@@ -1121,7 +1121,6 @@ def _build_mixed_line_plan(group_index):
             plan.append({"text": " ", "script": "whitespace"})
         if script != "latin":
             _maybe_add_latin_segment(plan)
-        if script != "latin":
             _maybe_add_latin_segment(plan)
         word = random.choice(words)
         for seg_text, seg_script in split_by_script(word, script):

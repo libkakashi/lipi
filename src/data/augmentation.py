@@ -19,8 +19,29 @@ import math
 import random
 
 import numpy as np
-from PIL import Image, ImageFilter, ImageEnhance, ImageDraw
+from PIL import Image, ImageFilter, ImageEnhance
 from typing import Callable
+
+
+# =========================================================================
+# Shared pixel helpers
+# =========================================================================
+
+def _luminance(arr: np.ndarray) -> np.ndarray:
+    """Rec.601 luma of an (H, W, 3) float array."""
+    return 0.299 * arr[:, :, 0] + 0.587 * arr[:, :, 1] + 0.114 * arr[:, :, 2]
+
+
+def _soft_bg_mask(arr: np.ndarray, blur_radius: float) -> np.ndarray:
+    """Soft [0,1] background mask: bright pixels (top 60% luma) are background,
+    with edges softened by a Gaussian blur of the given radius.
+    """
+    gray = _luminance(arr)
+    threshold = np.percentile(gray, 40)
+    bg_mask = (gray >= threshold).astype(np.float32)
+    mask_img = Image.fromarray((bg_mask * 255).astype(np.uint8))
+    mask_img = mask_img.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+    return np.array(mask_img, dtype=np.float32) / 255.0
 
 
 # =========================================================================
@@ -62,9 +83,8 @@ def blur(img: Image.Image) -> Image.Image:
     else:
         # Defocus blur — circular bokeh, common on phone cameras
         sigma = random.uniform(1.0, 2.5)
-        # Two-pass Gaussian approximates disk blur
-        blurred = img.filter(ImageFilter.GaussianBlur(radius=sigma))
-        return blurred
+        # Single-pass Gaussian approximates disk/defocus blur
+        return img.filter(ImageFilter.GaussianBlur(radius=sigma))
 
 
 def low_resolution(img: Image.Image) -> Image.Image:
@@ -115,7 +135,7 @@ def uneven_lighting(img: Image.Image) -> Image.Image:
         else:
             g = np.linspace(strength, 1.0, h) if direction == "top" else np.linspace(1.0, strength, h)
             mask = g[:, np.newaxis]
-        arr = arr * mask[:, :, np.newaxis] if mask.ndim == 2 else arr * np.expand_dims(mask, -1)
+        arr = arr * mask[:, :, np.newaxis]
     else:
         # Radial spotlight
         cx = random.uniform(0.15, 0.85) * w
@@ -502,18 +522,18 @@ def weather_damage(img: Image.Image) -> Image.Image:
 
 def elastic_distortion(img: Image.Image) -> Image.Image:
     """Mild elastic warp — paper warping, flexible surface."""
-    from scipy.ndimage import gaussian_filter as gf, map_coordinates as mc
+    from scipy.ndimage import gaussian_filter, map_coordinates
     arr = np.array(img, dtype=np.float32)
     h, w = arr.shape[:2]
     strength = random.uniform(0.5, 2.0)
-    dx = gf(np.random.randn(h, w) * strength, sigma=3)
-    dy = gf(np.random.randn(h, w) * strength, sigma=3)
+    dx = gaussian_filter(np.random.randn(h, w) * strength, sigma=3)
+    dy = gaussian_filter(np.random.randn(h, w) * strength, sigma=3)
     x, y = np.meshgrid(np.arange(w), np.arange(h))
     x_new = np.clip(x + dx, 0, w - 1).astype(np.float32)
     y_new = np.clip(y + dy, 0, h - 1).astype(np.float32)
     result = np.zeros_like(arr)
     for c in range(3):
-        result[:, :, c] = mc(arr[:, :, c], [y_new, x_new], order=1, mode='reflect')
+        result[:, :, c] = map_coordinates(arr[:, :, c], [y_new, x_new], order=1, mode='reflect')
     return Image.fromarray(result.astype(np.uint8))
 
 
@@ -670,16 +690,8 @@ def textured_background(img: Image.Image) -> Image.Image:
     arr = np.array(img, dtype=np.float32)
     h, w = arr.shape[:2]
 
-    # Detect which pixels are "background" (bright) vs "text" (dark)
-    gray = 0.299 * arr[:, :, 0] + 0.587 * arr[:, :, 1] + 0.114 * arr[:, :, 2]
-    # Adaptive threshold: background is top 60% brightness
-    threshold = np.percentile(gray, 40)
-    bg_mask = (gray >= threshold).astype(np.float32)
-    # Soften the mask edges to blend naturally
-    from PIL import ImageFilter as _IF
-    mask_img = Image.fromarray((bg_mask * 255).astype(np.uint8))
-    mask_img = mask_img.filter(_IF.GaussianBlur(radius=1.5))
-    bg_mask = np.array(mask_img, dtype=np.float32) / 255.0
+    # Background = bright pixels (top 60% luma), soft-edged to blend naturally
+    bg_mask = _soft_bg_mask(arr, blur_radius=1.5)
 
     texture_type = random.choice([
         "solid_color", "gradient", "perlin_noise", "stripe", "checker"
@@ -750,13 +762,7 @@ def colored_background(img: Image.Image) -> Image.Image:
     arr = np.array(img, dtype=np.float32)
     h, w = arr.shape[:2]
 
-    gray = 0.299 * arr[:, :, 0] + 0.587 * arr[:, :, 1] + 0.114 * arr[:, :, 2]
-    threshold = np.percentile(gray, 40)
-    bg_mask = (gray >= threshold).astype(np.float32)
-    # Soften mask
-    mask_img = Image.fromarray((bg_mask * 255).astype(np.uint8))
-    mask_img = mask_img.filter(ImageFilter.GaussianBlur(radius=1.0))
-    bg_mask = np.array(mask_img, dtype=np.float32) / 255.0
+    bg_mask = _soft_bg_mask(arr, blur_radius=1.0)
 
     # Random background color — biased toward realistic sign/label colors
     palette = [
@@ -928,7 +934,7 @@ def text_shadow(img: Image.Image) -> Image.Image:
     h, w = arr.shape[:2]
 
     # Detect text regions (dark areas)
-    gray = 0.299 * arr[:, :, 0] + 0.587 * arr[:, :, 1] + 0.114 * arr[:, :, 2]
+    gray = _luminance(arr)
     threshold = np.percentile(gray, 30)
     text_mask = (gray < threshold).astype(np.float32)
 
