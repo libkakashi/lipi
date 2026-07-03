@@ -15,7 +15,7 @@ from torch.utils.data import Dataset, Sampler
 
 from streaming import Stream, StreamingDataset
 
-from src.model.lid import SCRIPT_TO_GROUP, SCRIPT_TO_ID, GROUP_TO_ID
+from src.model.lid import SCRIPT_TO_GROUP, SCRIPT_TO_ID, GROUP_TO_ID, NUM_GROUPS
 from src.encoding.decompose import encode_text, script_vocab_size
 
 
@@ -117,7 +117,6 @@ class LipiStreamingDataset(Dataset):
 
         # Per-pixel group labels → remap to local group IDs
         # Blank pixels (NUM_GROUPS) must stay as NUM_GROUPS, not become 0
-        from src.model.lid import NUM_GROUPS
         gl = sample["group_labels"].copy()
         remapped = np.full_like(gl, NUM_GROUPS)  # default to blank
         for gid_global, gid_local in self._global_to_local_group.items():
@@ -125,7 +124,6 @@ class LipiStreamingDataset(Dataset):
         group_labels = torch.from_numpy(remapped).to(torch.long)
 
         # Segments: per-word metadata for mixed-script CTC loss
-        from src.model.lid import NUM_GROUPS
         segments = json.loads(sample["segments"])
         for seg in segments:
             seg["group_id"] = self._global_to_local_group.get(seg["group_id"], NUM_GROUPS)

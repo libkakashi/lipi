@@ -1,9 +1,8 @@
 """
 Unicode-based script detection.
 
-Detects which script a text string belongs to by examining Unicode code points.
-Used to auto-label training samples with script/group IDs when LMDB
-datasets don't store script labels explicitly.
+Maps a text string to its script by examining Unicode code points
+(majority vote across characters). Used for labeling and diagnostics.
 """
 
 # Unicode block ranges for each script

@@ -21,40 +21,36 @@ from src.encoding.config import (
 )
 
 
-def encode_text(text: str, script: str) -> list[int]:
-    """Encode text → CTC token IDs.  Works for all script types."""
+def _codec_for(script: str):
+    """Return the codec for a script, or None if unknown.
+
+    All codecs share one interface: encode_text(text) -> list[int],
+    decode_ids(ids) -> str, and a vocab_size attribute (BLANK at index 0).
+    """
     if script in NO_FUSION_SCRIPTS:
-        return NO_FUSION_SCRIPTS[script].encode_text(text)
+        return NO_FUSION_SCRIPTS[script]
     if script in FUSION_BASE_CHARS:
-        return get_fusion_codec(script).encode_text(text)
+        return get_fusion_codec(script)
     if script == "korean":
-        return get_korean_codec().encode_text(text)
+        return get_korean_codec()
     if script == "han":
-        return get_han_codec().encode_text(text)
-    return []
+        return get_han_codec()
+    return None
+
+
+def encode_text(text: str, script: str) -> list[int]:
+    """Encode text → CTC token IDs. Works for all script types."""
+    codec = _codec_for(script)
+    return codec.encode_text(text) if codec is not None else []
 
 
 def decode_ids(ids: list[int], script: str) -> str:
-    """Decode CTC token IDs → text.  Works for all script types."""
-    if script in NO_FUSION_SCRIPTS:
-        return NO_FUSION_SCRIPTS[script].decode_ids(ids)
-    if script in FUSION_BASE_CHARS:
-        return get_fusion_codec(script).decode_ids(ids)
-    if script == "korean":
-        return get_korean_codec().decode_ids(ids)
-    if script == "han":
-        return get_han_codec().decode_ids(ids)
-    return ""
+    """Decode CTC token IDs → text. Works for all script types."""
+    codec = _codec_for(script)
+    return codec.decode_ids(ids) if codec is not None else ""
 
 
 def script_vocab_size(script: str) -> int:
-    """Get vocab size for any script (including BLANK at 0)."""
-    if script in NO_FUSION_SCRIPTS:
-        return NO_FUSION_SCRIPTS[script].vocab_size
-    if script in FUSION_BASE_CHARS:
-        return get_fusion_codec(script).vocab_size
-    if script == "korean":
-        return get_korean_codec().vocab_size
-    if script == "han":
-        return get_han_codec().vocab_size
-    return 0
+    """Vocab size for any script (includes BLANK at index 0)."""
+    codec = _codec_for(script)
+    return codec.vocab_size if codec is not None else 0

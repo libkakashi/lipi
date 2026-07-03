@@ -68,4 +68,6 @@ training_data/word_lists/raw_*/
 # Testing
 .pytest_cache/
 render_check*/
-data/
+
+# Generated datasets/shards at repo root (anchored so it doesn't match src/data/)
+/data/
