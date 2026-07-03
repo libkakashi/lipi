@@ -523,11 +523,6 @@ def _decompose_syllable(char: str) -> tuple[int, int, int] | None:
     return idx // 588, (idx % 588) // 28, idx % 28
 
 
-def _compose_syllable(lead: int, vowel: int, tail: int) -> str:
-    """Compose Hangul syllable from (lead, vowel, tail) indices."""
-    return chr(_HANGUL_BASE + lead * 588 + vowel * 28 + tail)
-
-
 class KoreanCodec:
     """Codec for Korean Hangul.
 

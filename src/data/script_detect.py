@@ -6,9 +6,6 @@ Used to auto-label training samples with script/group IDs when LMDB
 datasets don't store script labels explicitly.
 """
 
-from src.model.lid import SCRIPTS, SCRIPT_TO_GROUP, SCRIPT_TO_ID, GROUP_TO_ID
-
-
 # Unicode block ranges for each script
 _SCRIPT_RANGES = {
     "latin": [
@@ -109,23 +106,3 @@ def detect_script(text: str) -> str:
     if not counts:
         return "latin"
     return max(counts, key=counts.get)
-
-
-def detect_group(text: str) -> str:
-    """Detect the coarse group of a text string.
-
-    Returns:
-        Group name from GROUPS list.
-    """
-    script = detect_script(text)
-    return SCRIPT_TO_GROUP.get(script, "latin")
-
-
-def detect_script_id(text: str) -> int:
-    """Detect script and return its integer ID."""
-    return SCRIPT_TO_ID.get(detect_script(text), 0)
-
-
-def detect_group_id(text: str) -> int:
-    """Detect group and return its integer ID."""
-    return GROUP_TO_ID.get(detect_group(text), 0)

@@ -9,8 +9,10 @@ All scripts derive their vocab from config.py:
   - Han: CJKCodec (kanji/hanzi, Chinese + Japanese kanji)
 """
 
-from src.encoding.tokenizer import BLANK_TOKEN
 from src.encoding.decompose import script_vocab_size
+
+
+BLANK_TOKEN = "∅"  # ∅ — CTC blank, always token index 0
 
 
 def build_script_vocab(script: str) -> list[str]:

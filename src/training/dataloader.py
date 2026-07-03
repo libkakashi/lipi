@@ -20,15 +20,6 @@ from src.encoding.decompose import encode_text, script_vocab_size
 
 
 # ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def scripts_in_group(active_scripts: list[str], group_name: str) -> list[str]:
-    """Return the subset of *active_scripts* that belong to *group_name*."""
-    return [s for s in active_scripts if SCRIPT_TO_GROUP.get(s) == group_name]
-
-
-# ---------------------------------------------------------------------------
 # Tokenizer / vocab building
 # ---------------------------------------------------------------------------
 

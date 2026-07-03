@@ -47,8 +47,7 @@ def _get_sample_words(script, n=5):
 
 def _get_sample_chars(script, n=10):
     """Get sample characters from a script's vocab."""
-    from src.encoding.vocab import build_script_vocab
-    from src.encoding.tokenizer import BLANK_TOKEN
+    from src.encoding.vocab import build_script_vocab, BLANK_TOKEN
     group = SCRIPT_TO_GROUP[script]
     vocab = build_script_vocab(script)
     chars = [ch for ch in vocab if len(ch) == 1 and ch.strip() and ord(ch) > 127 and ch != BLANK_TOKEN]
