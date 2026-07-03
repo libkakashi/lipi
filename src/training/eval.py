@@ -52,9 +52,9 @@ def _batched_ctc_val_loss(logits, segments_batch, group_script_names,
             if not script_name:
                 continue
 
-            fs = seg["offset"] // 2
-            fe = min((seg["offset"] + seg["width"] + 1) // 2, T)
-            seg_len = fe - fs
+            frame_start = seg["offset"] // 2
+            frame_end = min((seg["offset"] + seg["width"] + 1) // 2, T)
+            seg_len = frame_end - frame_start
             if seg_len < 1:
                 continue
 
@@ -67,8 +67,8 @@ def _batched_ctc_val_loss(logits, segments_batch, group_script_names,
 
             vs = group_script_vocab_sizes[g][s]
             buckets.setdefault((g, s), []).append({
-                "b": b, "fs": fs, "fe": fe, "seg_len": seg_len,
-                "ids": ids, "vs": vs,
+                "b": b, "frame_start": frame_start, "frame_end": frame_end,
+                "seg_len": seg_len, "ids": ids, "vs": vs,
             })
 
     total_loss = 0.0
@@ -86,7 +86,7 @@ def _batched_ctc_val_loss(logits, segments_batch, group_script_names,
         concat_targets = []
 
         for i, sg in enumerate(segs):
-            batched_logits[:sg["seg_len"], i, :] = logits[sg["b"], sg["fs"]:sg["fe"], :vs]
+            batched_logits[:sg["seg_len"], i, :] = logits[sg["b"], sg["frame_start"]:sg["frame_end"], :vs]
             input_lens[i] = sg["seg_len"]
             target_lens[i] = len(sg["ids"])
             concat_targets.extend(sg["ids"])
