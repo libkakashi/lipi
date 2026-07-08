@@ -207,14 +207,14 @@ class TestVisualMapping:
 class TestCTCHeadCompatibility:
 
     def test_ctc_head_accepts_vocab_size(self):
-        from src.model.encoder import CTCHead
+        from src.model.blocks import CTCHead
         vs = _vocab_size()
         head = CTCHead(enc_dim=384, vocab_size=vs)
         assert head.vocab_size == vs
         assert head.proj.out_features == vs
 
     def test_group_ctc_module_accepts_vocab_size(self):
-        from src.model.encoder import GroupCTCModule
+        from src.model.blocks import GroupCTCModule
         vs = _vocab_size()
         gcm = GroupCTCModule(
             enc_dim=384,
