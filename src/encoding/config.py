@@ -45,7 +45,7 @@ def _build_char_list(*range_groups: list[tuple[int, int]]) -> list[str]:
 # ── Common character sets ────────────────────────────────────────────
 
 # ASCII symbols, digits, and punctuation (no Latin letters)
-_ASCII_COMMON: list[tuple[int, int]] = [
+ASCII_COMMON: list[tuple[int, int]] = [
     (0x0020, 0x0040),   # space !"#$%&'()*+,-./0-9:;<=>?@
     (0x005B, 0x0060),   # [\]^_`
     (0x007B, 0x007E),   # {|}~
@@ -60,7 +60,7 @@ _INDIC_CURRENCY: list[tuple[int, int]] = [
 ]
 
 # Typographic characters shared across scripts
-_TYPOGRAPHIC_COMMON: list[tuple[int, int]] = [
+TYPOGRAPHIC_COMMON: list[tuple[int, int]] = [
     (0x00AB, 0x00AB),   # «
     (0x00BB, 0x00BB),   # »
     (0x2010, 0x2010),   # ‐ hyphen
@@ -124,61 +124,61 @@ NO_FUSION_SCRIPTS: dict[str, NoFusionCodec] = {
     )),
 
     "cyrillic": NoFusionCodec(_build_char_list(
-        _ASCII_COMMON,
+        ASCII_COMMON,
         [(0x0400, 0x052F)],     # Cyrillic + Supplement
-        _TYPOGRAPHIC_COMMON,
+        TYPOGRAPHIC_COMMON,
         [(0x2011, 0x2011), (0x2020, 0x2020)],  # extra typo
     )),
 
     "greek": NoFusionCodec(_build_char_list(
-        _ASCII_COMMON,
+        ASCII_COMMON,
         [(0x0370, 0x03FF)],     # Greek and Coptic
         [(0x1F00, 0x1FFF)],     # Greek Extended
-        _TYPOGRAPHIC_COMMON,
+        TYPOGRAPHIC_COMMON,
     )),
 
     "hebrew": NoFusionCodec(_build_char_list(
-        _ASCII_COMMON,
+        ASCII_COMMON,
         [(0x0591, 0x05C7)],     # Hebrew points & accents
         [(0x05D0, 0x05F4)],     # Hebrew letters & ligatures
         [(0xFB1D, 0xFB4F)],     # Hebrew Presentation Forms
-        _TYPOGRAPHIC_COMMON,
+        TYPOGRAPHIC_COMMON,
     )),
 
     "georgian": NoFusionCodec(_build_char_list(
-        _ASCII_COMMON,
+        ASCII_COMMON,
         [(0x10A0, 0x10FF)],     # Georgian
         [(0x2D00, 0x2D2F)],     # Georgian Supplement
-        _TYPOGRAPHIC_COMMON,
+        TYPOGRAPHIC_COMMON,
     )),
 
     "armenian": NoFusionCodec(_build_char_list(
-        _ASCII_COMMON,
+        ASCII_COMMON,
         [(0x0531, 0x058F)],     # Armenian
-        _TYPOGRAPHIC_COMMON,
+        TYPOGRAPHIC_COMMON,
         [(0x2024, 0x2024)],     # one dot leader
     )),
 
     "ethiopic": NoFusionCodec(_build_char_list(
-        _ASCII_COMMON,
+        ASCII_COMMON,
         [(0x1200, 0x1399)],     # Ethiopic
         [(0x2D80, 0x2DDF)],     # Ethiopic Extended
-        _TYPOGRAPHIC_COMMON,
+        TYPOGRAPHIC_COMMON,
     )),
 
     "emoji": NoFusionCodec(_build_char_list(
         [(0x0020, 0x007E)],     # Full printable ASCII
         [(0x00AB, 0x00AB)],     # «
         [(0x00BB, 0x00BB)],     # »
-        _TYPOGRAPHIC_COMMON,
+        TYPOGRAPHIC_COMMON,
     )),
 
     "kana": NoFusionCodec(_build_char_list(
-        _ASCII_COMMON,
+        ASCII_COMMON,
         [(0x3040, 0x309F)],     # Hiragana
         [(0x30A0, 0x30FF)],     # Katakana
         [(0x31F0, 0x31FF)],     # Katakana Phonetic Extensions
-        _TYPOGRAPHIC_COMMON,
+        TYPOGRAPHIC_COMMON,
     )),
 }
 
@@ -362,109 +362,109 @@ _build_virama_pairs()
 
 FUSION_BASE_RANGES: dict[str, list[list[tuple[int, int]]]] = {
     "arabic": [
-        _ASCII_COMMON,
+        ASCII_COMMON,
         [(0x0600, 0x06FF)],     # Arabic (covers Arabic, Urdu, Persian, Pashto)
-        _TYPOGRAPHIC_COMMON,
+        TYPOGRAPHIC_COMMON,
     ],
     "devanagari": [
-        _ASCII_COMMON,
+        ASCII_COMMON,
         [(0x0900, 0x094D)],     # Devanagari signs + vowels + consonants + matras + virama
         [(0x0950, 0x0956)],     # OM + vowel signs (skip Kashmiri 094E-094F)
         [(0x0958, 0x0972)],     # Nukta consonants + digits + dandas (skip 0957)
         [(0x0979, 0x097F)],     # Extended consonants (skip Sindhi/Marwari 0973-0978)
-        _TYPOGRAPHIC_COMMON,
+        TYPOGRAPHIC_COMMON,
         _INDIC_CURRENCY,
         [(0x2015, 0x2015)],     # horizontal bar
     ],
     "gurmukhi": [
-        _ASCII_COMMON,
+        ASCII_COMMON,
         [(0x0A00, 0x0A7F)],     # Gurmukhi
         [(0x0964, 0x0964)],     # Devanagari danda
-        _TYPOGRAPHIC_COMMON,
+        TYPOGRAPHIC_COMMON,
         _INDIC_CURRENCY,
     ],
     "gujarati": [
-        _ASCII_COMMON,
+        ASCII_COMMON,
         [(0x0A80, 0x0AFF)],     # Gujarati
-        _TYPOGRAPHIC_COMMON,
+        TYPOGRAPHIC_COMMON,
         _INDIC_CURRENCY,
     ],
     "bengali": [
-        _ASCII_COMMON,
+        ASCII_COMMON,
         [(0x0981, 0x09FB)],     # Bengali (skip 0980 Anji, 09FC-09FE Vedic)
         [(0x0964, 0x0964)],     # Devanagari danda
         [(0x0970, 0x0970)],     # Devanagari abbreviation sign
-        _TYPOGRAPHIC_COMMON,
+        TYPOGRAPHIC_COMMON,
         _INDIC_CURRENCY,
         [(0x2032, 0x2032)],     # prime
     ],
     "odia": [
-        _ASCII_COMMON,
+        ASCII_COMMON,
         [(0x0B00, 0x0B73)],     # Odia (skip 0B74-0B77 fractions)
         [(0x0964, 0x0964)],     # Devanagari danda
         [(0x0970, 0x0970)],     # Devanagari abbreviation sign
-        _TYPOGRAPHIC_COMMON,
+        TYPOGRAPHIC_COMMON,
         _INDIC_CURRENCY,
     ],
     "kannada": [
-        _ASCII_COMMON,
+        ASCII_COMMON,
         [(0x0C80, 0x0CFF)],     # Kannada
-        _TYPOGRAPHIC_COMMON,
+        TYPOGRAPHIC_COMMON,
         _INDIC_CURRENCY,
     ],
     "telugu": [
-        _ASCII_COMMON,
+        ASCII_COMMON,
         [(0x0C00, 0x0C7F)],     # Telugu
-        _TYPOGRAPHIC_COMMON,
+        TYPOGRAPHIC_COMMON,
         _INDIC_CURRENCY,
     ],
     "malayalam": [
-        _ASCII_COMMON,
+        ASCII_COMMON,
         [(0x0D01, 0x0D57)],     # Malayalam (skip 0D00 Vedic, 0D58-0D5E fractions)
         [(0x0D5F, 0x0D7F)],     # Malayalam letters + chillu + au length mark
-        _TYPOGRAPHIC_COMMON,
+        TYPOGRAPHIC_COMMON,
         _INDIC_CURRENCY,
     ],
     "tamil": [
-        _ASCII_COMMON,
+        ASCII_COMMON,
         [(0x0B80, 0x0BF9)],     # Tamil (skip 0BFA number sign)
-        _TYPOGRAPHIC_COMMON,
+        TYPOGRAPHIC_COMMON,
         _INDIC_CURRENCY,
     ],
     "sinhala": [
-        _ASCII_COMMON,
+        ASCII_COMMON,
         [(0x0D82, 0x0DE5)],     # Sinhala (skip 0D81 candrabindu, 0DE6-0DEF Lith digits)
         [(0x00A0, 0x00A0)],     # no-break space
-        _TYPOGRAPHIC_COMMON,
+        TYPOGRAPHIC_COMMON,
         _INDIC_CURRENCY,
     ],
     "thai": [
-        _ASCII_COMMON,
+        ASCII_COMMON,
         [(0x0E00, 0x0E7F)],     # Thai
-        _TYPOGRAPHIC_COMMON,
+        TYPOGRAPHIC_COMMON,
     ],
     "lao": [
-        _ASCII_COMMON,
+        ASCII_COMMON,
         [(0x0E80, 0x0EFF)],     # Lao
         [(0x3001, 0x3001)],     # ideographic comma
         [(0xFF08, 0xFF09)],     # fullwidth parentheses
-        _TYPOGRAPHIC_COMMON,
+        TYPOGRAPHIC_COMMON,
     ],
     "burmese": [
-        _ASCII_COMMON,
+        ASCII_COMMON,
         [(0x1000, 0x109F)],     # Myanmar
-        _TYPOGRAPHIC_COMMON,
+        TYPOGRAPHIC_COMMON,
     ],
     "khmer": [
-        _ASCII_COMMON,
+        ASCII_COMMON,
         [(0x1780, 0x17FF)],     # Khmer
-        _TYPOGRAPHIC_COMMON,
+        TYPOGRAPHIC_COMMON,
     ],
     "tibetan": [
-        _ASCII_COMMON,
+        ASCII_COMMON,
         [(0x0F00, 0x0FFF)],     # Tibetan
         [(0xFF08, 0xFF08)],     # fullwidth left paren
-        _TYPOGRAPHIC_COMMON,
+        TYPOGRAPHIC_COMMON,
     ],
 }
 
@@ -618,10 +618,10 @@ class KoreanCodec:
 
 # Build Korean common chars
 _KOREAN_COMMON = _build_char_list(
-    _ASCII_COMMON,
+    ASCII_COMMON,
     [(0x3000, 0x303F)],     # CJK Symbols and Punctuation
     [(0x2018, 0x201F)],     # Smart quotes
-    _TYPOGRAPHIC_COMMON,
+    TYPOGRAPHIC_COMMON,
 )
 
 _KOREAN_VOCAB_SIZE = 1500
@@ -768,10 +768,10 @@ _CJK_RADICALS: list[tuple[int, int]] = [
 
 # Han base chars: ASCII + CJK punctuation + 214 radicals (NO kana here)
 _HAN_BASE = _build_char_list(
-    _ASCII_COMMON,
+    ASCII_COMMON,
     [(0x3000, 0x303F)],     # CJK Symbols and Punctuation
     _CJK_RADICALS,          # 214 radicals
-    _TYPOGRAPHIC_COMMON,
+    TYPOGRAPHIC_COMMON,
 )
 
 # Kana range set — used to filter kana out of cjk_vocab / cjk_visual_mapping

@@ -210,7 +210,7 @@ def main():
     print("SUMMARY")
     print("=" * 70)
     print("If Test 1 shows >80% routing to latin AND Test 3 shows >80% CTC")
-    print("accuracy, it's safe to remove _ASCII_COMMON from non-latin codecs")
+    print("accuracy, it's safe to remove ASCII_COMMON from non-latin codecs")
     print("(after implementing boundary splitting in the data generator).")
 
 

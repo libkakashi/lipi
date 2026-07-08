@@ -260,13 +260,13 @@ def split_by_script(text, parent_script):
 # Latin punctuation/number segments for non-latin plans
 # ---------------------------------------------------------------------------
 
-from src.encoding.config import _ASCII_COMMON, _TYPOGRAPHIC_COMMON
+from src.encoding.config import ASCII_COMMON, TYPOGRAPHIC_COMMON
 
 # Build flat char lists from the encoding config ranges
-_ASCII_COMMON_CHARS = [chr(cp) for start, end in _ASCII_COMMON
+_ASCII_COMMON_CHARS = [chr(cp) for start, end in ASCII_COMMON
                        for cp in range(start, end + 1)
                        if chr(cp).strip()]
-_TYPO_COMMON_CHARS = [chr(cp) for start, end in _TYPOGRAPHIC_COMMON
+_TYPO_COMMON_CHARS = [chr(cp) for start, end in TYPOGRAPHIC_COMMON
                       for cp in range(start, end + 1)]
 
 
