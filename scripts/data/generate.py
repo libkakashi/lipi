@@ -25,7 +25,7 @@ from src.taxonomy import SCRIPTS, SCRIPT_TO_GROUP, GROUP_TO_ID, SCRIPT_TO_ID
 from src.data.color import rgb_to_input
 from src.data.augmentation import (
     RandAugmentOCR, CHAINS_BY_NAME,
-    jpeg_compress, blur, low_resolution, photocopy,
+    jpeg_compress, blur, low_resolution, photocopy, binarize,
     exposure_jitter, uneven_lighting, glare, striped_shadow,
     rotation, perspective_warp, wave_distortion,
     bleed_through, fold_crease, aged_document, scanner_edge, water_stain,
@@ -75,7 +75,7 @@ STYLES = {
     },
     "printed": {
         "proportion": 0.35,
-        "ops": [jpeg_compress, blur, photocopy, uneven_lighting,
+        "ops": [jpeg_compress, blur, photocopy, binarize, uneven_lighting,
                 fold_crease, bleed_through, aged_document, scanner_edge,
                 water_stain, exposure_jitter, noise, to_grayscale,
                 adjacent_line_clutter,

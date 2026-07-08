@@ -122,6 +122,53 @@ def low_resolution(img: Image.Image) -> Image.Image:
     return small.resize((w, h), upsample)
 
 
+def binarize(img: Image.Image) -> Image.Image:
+    """1-bit scan / fax — hard threshold, jagged edges, broken strokes.
+
+    A large share of enterprise document input is bilevel (fax, TIFF G4,
+    aggressive scanner presets): no anti-aliasing, thin strokes broken by
+    the threshold, or dither speckle. Three variants:
+      - global: one threshold for the page region
+      - adaptive: local-mean threshold (window minus offset) — what real
+        scanner binarization does, keeps text under uneven lighting
+      - dither: error-diffusion speckle (fax halftone)
+    Optionally erodes thin strokes and re-blurs slightly (re-scan of a
+    binarized page).
+    """
+    gray = np.array(img.convert("L"), dtype=np.float32)
+    style = random.choice(["global", "adaptive", "dither"])
+
+    if style == "global":
+        # Threshold between the ink and background modes (an arbitrary
+        # percentile can land inside the ink mass on text-dense crops
+        # and wipe the text entirely).
+        lo, hi = np.percentile(gray, (10, 90))
+        t = lo + (hi - lo) * random.uniform(0.35, 0.65)
+        binary = (gray > t)
+    elif style == "adaptive":
+        radius = random.randint(4, 10)
+        local_mean = np.array(
+            Image.fromarray(gray.astype(np.uint8)).filter(
+                ImageFilter.BoxBlur(radius)), dtype=np.float32)
+        offset = random.uniform(2, 12)
+        binary = (gray > local_mean - offset)
+    else:  # dither
+        one_bit = img.convert("L").convert("1")  # Floyd-Steinberg
+        binary = np.array(one_bit, dtype=bool)
+
+    out = np.where(binary, 255, 0).astype(np.uint8)
+    result = Image.fromarray(out).convert("RGB")
+
+    # Broken thin strokes: erode the ink a step
+    if random.random() < 0.3:
+        result = result.filter(ImageFilter.MaxFilter(size=3))
+    # Re-scan softness on top of the hard edges
+    if random.random() < 0.4:
+        result = result.filter(
+            ImageFilter.GaussianBlur(radius=random.uniform(0.4, 0.9)))
+    return result
+
+
 def photocopy(img: Image.Image) -> Image.Image:
     """Photocopy degradation — contrast boost + speckle noise."""
     arr = np.array(img, dtype=np.float32)
@@ -1204,18 +1251,19 @@ def adjacent_line_clutter(img: Image.Image) -> Image.Image:
 
 
 # =========================================================================
-# Op registry — 33 ops
+# Op registry — 34 ops
 # Excluded (handwriting-specific, used via style op lists in generate.py):
 # variable_baseline, slant, ink_fade, variable_stroke, lined_paper,
 # wave_distortion, bleed_through
 # =========================================================================
 
 AUGMENT_OPS: list[Callable] = [
-    # Quality (4)
+    # Quality (5)
     jpeg_compress,
     blur,
     low_resolution,
     photocopy,
+    binarize,
     # Lighting (4)
     exposure_jitter,
     uneven_lighting,
@@ -1290,7 +1338,7 @@ SCENARIO_CHAINS: list[tuple[str, list[Callable], float]] = [
         screen_artifacts, jpeg_compress, partial_crop,
     ], 1.5),
     ("photocopy_fax", [
-        photocopy, noise, low_resolution, to_grayscale,
+        photocopy, noise, low_resolution, binarize,
     ], 1.5),
     ("book_page", [
         uneven_lighting, fold_crease, blur, camera_noise,

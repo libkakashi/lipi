@@ -59,3 +59,37 @@ class TestTableRules:
     def test_tiny_image_passthrough(self):
         img = Image.fromarray(np.full((4, 8, 3), 255, np.uint8))
         assert table_rules(img).size == img.size
+
+
+class TestBinarize:
+
+    def test_output_is_bilevel_ish(self):
+        from src.data.augmentation import binarize
+        for seed in range(8):
+            random.seed(seed)
+            img = _text_image()
+            out = np.asarray(binarize(img).convert("L"), dtype=np.float32)
+            assert out.shape == (32, 120)
+            # text still present (dark pixels survive the threshold)
+            assert (out < 100).sum() > 50
+            # without the re-blur step the histogram is strictly bilevel;
+            # with it, still strongly bimodal — mid-gray is a small minority
+            mid = ((out > 80) & (out < 175)).mean()
+            assert mid < 0.35
+
+    def test_readable_under_gradient(self):
+        """Adaptive variant keeps text under uneven lighting."""
+        from src.data.augmentation import binarize
+        arr = np.full((32, 120, 3), 250, np.float32)
+        arr[10:24, 8:112] = 40
+        arr *= np.linspace(0.45, 1.0, 120)[None, :, None]  # strong shading
+        img = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+        random.seed(3)
+        found = False
+        for _ in range(20):
+            out = np.asarray(binarize(img).convert("L"))
+            # text pixels darker than background on BOTH ends of the image
+            if out[16, 15] < 100 and out[16, 100] < 100 and out[3, 15] > 150:
+                found = True
+                break
+        assert found
