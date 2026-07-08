@@ -1,13 +1,18 @@
 """
 Building blocks for the Lipi v5 MoE encoder.
 
-Layer modules (DropPath, LayerScale, WindowedAttention, SWABlock, ExpertBlock,
+Layer modules (DropPath, LayerScale, WindowedAttention, SWABlock, MoELayer,
 ConvNeXtBlock, BlurPool2d, CTCHead, GroupCTCModule, ConvStem, MLP) plus the
-small pure-function helpers (_patch_merge_h, _per_sample_key_lens,
-_collect_segments, _scatter_segments, _run_expert_block) that LipiMoEEncoder
-composes together.
+small pure-function helpers (_patch_merge_h, _per_sample_key_lens) that
+LipiMoEEncoder composes together.
 
 The encoder itself lives in encoder.py.
+
+MoELayer is the workhorse of the expert stages: one shared windowed
+attention over the full frame sequence + N per-frame routed MLPs + one
+always-on shared MLP. Attention is script-agnostic (all scripts read as
+horizontal 1D glyph sequences), so it lives once per layer; MLPs are the
+per-script channel-transform work and are routed per frame.
 """
 
 import torch
@@ -256,34 +261,109 @@ class MLP(nn.Module):
         return self.fc2(self.act(self.fc1(x)))
 
 
-class ExpertBlock(nn.Module):
-    """Per-expert block with shifted windowed attention + MLP.
+class MoELayer(nn.Module):
+    """DeepSeek-style MoE layer: shared attn + routed MLPs + shared MLP.
 
-    Has N parallel attention+MLP experts. Each sample is routed to
-    one expert based on its expert_id.
+    Runs on the full unpacked frame sequence (B, T, dim). Every frame passes
+    through the same windowed attention, then splits into two MLP branches
+    that are summed:
+      - routed: per-frame expert lookup; frame at (b, t) uses MLP indexed by
+        expert_ids[b, t]. Frames whose id is out of range contribute zero.
+      - shared: one MLP that always runs, on every frame.
 
-    LayerScale + DropPath are applied per-sample on the residual branches
-    (shared across experts — they affect the residual, not the expert op).
+    Attention is position-aware and sees true geometry (no packing/stitching
+    across routing boundaries). MLPs are position-wise, so per-frame routing
+    is just an indexed matmul — no sequence gather/scatter.
+
+    Init:
+      - LayerScale on both residual branches (small init, block starts
+        near-identity).
+      - Routed MLP output projections are zero-init so at step 0 the routed
+        branch contributes nothing while the shared MLP already carries the
+        MLP branch. Routed experts specialize gradually from there.
     """
 
     def __init__(self, dim: int, num_heads: int, num_experts: int,
-                 window_h: int = 2, window_w: int = 16, shift: bool = False,
-                 mlp_ratio: int = 4, drop_path: float = 0.0,
-                 layer_scale_init: float = 1e-4):
+                 window_w: int = 16, shift: bool = False,
+                 routed_mlp_ratio: int = 4, shared_mlp_ratio: int = 2,
+                 drop_path: float = 0.0, layer_scale_init: float = 1e-4):
         super().__init__()
         self.num_experts = num_experts
+
+        # Shared attention branch (one set of weights for the whole layer).
         self.norm1 = nn.LayerNorm(dim)
-        self.expert_attns = nn.ModuleList([
-            WindowedAttention(dim, num_heads, window_h, window_w, shift=shift)
-            for _ in range(num_experts)
-        ])
-        self.norm2 = nn.LayerNorm(dim)
-        self.expert_mlps = nn.ModuleList([
-            MLP(dim, mlp_ratio) for _ in range(num_experts)
-        ])
+        self.attn = WindowedAttention(
+            dim, num_heads, window_h=1, window_w=window_w, shift=shift)
         self.ls1 = LayerScale(dim, layer_scale_init)
+
+        # Routed + shared MLP branch.
+        self.norm2 = nn.LayerNorm(dim)
+        self.routed_mlps = nn.ModuleList([
+            MLP(dim, routed_mlp_ratio) for _ in range(num_experts)
+        ])
+        self.shared_mlp = MLP(dim, shared_mlp_ratio)
         self.ls2 = LayerScale(dim, layer_scale_init)
+
         self.drop_path = DropPath(drop_path)
+
+        # Zero-init the routed MLPs' output projections so the routed branch
+        # contributes zero at step 0. The shared MLP carries the MLP branch
+        # immediately; routed experts specialize as they receive gradient.
+        for mlp in self.routed_mlps:
+            nn.init.zeros_(mlp.fc2.weight)
+            nn.init.zeros_(mlp.fc2.bias)
+
+    def forward(self, x: Tensor, expert_ids: Tensor,
+                expert_lens_cpu: list | None, T: int) -> Tensor:
+        """Run one MoE layer on the full frame sequence.
+
+        Args:
+            x:               (B, T, dim) frame features.
+            expert_ids:      (B, T) per-frame expert id. Values outside
+                             [0, num_experts) route no MLP for that frame
+                             (blank / unrouted frames).
+            expert_lens_cpu: (B, num_experts) precomputed Python list of
+                             frame counts, used to skip empty experts
+                             without a GPU→CPU sync. If None, all experts
+                             are attempted (uses mask.any() instead).
+            T:               sequence length (== x.shape[1]).
+        """
+        # Shared attention on the full sequence (h=1).
+        normed = self.norm1(x)
+        attn_out = self.attn(normed, 1, T)
+        x = x + self.drop_path(self.ls1(attn_out.to(x.dtype)))
+
+        # MLP branch: routed + shared, summed then LayerScaled together.
+        normed = self.norm2(x)
+        routed_out = self._routed_mlp(normed, expert_ids, expert_lens_cpu)
+        shared_out = self.shared_mlp(normed)
+        x = x + self.drop_path(self.ls2((routed_out + shared_out).to(x.dtype)))
+        return x
+
+    def _routed_mlp(self, x: Tensor, expert_ids: Tensor,
+                    expert_lens_cpu: list | None) -> Tensor:
+        """Apply per-frame routed MLPs.
+
+        Iterates expert 0..num_experts, selects that expert's frames via
+        boolean mask, runs the MLP on the (K, dim) selection, scatters
+        back. Frames with expert_id outside [0, num_experts) get zero
+        contribution — the shared MLP still runs on them upstream, so
+        blank frames end up as attn + shared_mlp only.
+        """
+        B = x.shape[0]
+        out = torch.zeros_like(x)
+        for e in range(self.num_experts):
+            # Skip empty experts without a GPU→CPU sync when counts are
+            # provided by the caller (one upfront .tolist() at the encoder
+            # level covers every layer that shares these routing ids).
+            if expert_lens_cpu is not None:
+                if not any(expert_lens_cpu[b][e] > 0 for b in range(B)):
+                    continue
+            mask = (expert_ids == e)
+            if expert_lens_cpu is None and not mask.any():
+                continue
+            out[mask] = self.routed_mlps[e](x[mask])
+        return out
 
 
 def _patch_merge_h(x: Tensor, h: int, w: int, proj: nn.Linear) -> tuple[Tensor, int]:
@@ -402,10 +482,10 @@ class BlurPool2d(nn.Module):
 
 
 class SWABlock(nn.Module):
-    """Windowed attention + MLP block (non-expert version of ExpertBlock).
+    """Windowed attention + MLP block — one set of weights for all frames.
 
-    Used in the shared stem-post stages where all frames go through the
-    same weights.
+    Used in the shared trunk (SWA-C, SWA-D) and for the LID-1 attention
+    branch. The routed-MLP variant lives in `MoELayer`.
     """
 
     def __init__(self, dim: int, num_heads: int,
@@ -497,96 +577,3 @@ def _per_sample_key_lens(frame_ids: Tensor, num_classes: int) -> Tensor:
     return counts
 
 
-def _collect_segments(
-    x: Tensor,
-    mask: Tensor,
-) -> tuple[Tensor | None, list[tuple[int, int]] | None]:
-    """Collect per-sample frames matching `mask` into a padded batch.
-
-    Args:
-        x:    (B, T, d)
-        mask: (B, T) boolean — which frames belong to this expert
-
-    Returns:
-        batch_x:   (N, max_seg_len, d)  — N = # samples with any frames in
-                   this expert. Padded with zeros.
-        batch_info: list of (b_idx, seg_len) — for scatter_segments.
-        Both None if no samples have any frames in this expert.
-
-    Implementation note: vectorized via one nonzero + one cumsum + one
-    index_put. Replaces the prior per-sample Python loop (which launched
-    one kernel per active sample).
-    """
-    B, _, d = x.shape
-    seg_lens = mask.sum(dim=1)  # (B,)
-    has_g = seg_lens > 0
-    b_indices = has_g.nonzero(as_tuple=True)[0]
-    if b_indices.numel() == 0:
-        return None, None
-
-    # Single sync for the Python-side batch_info list.
-    lens_list = seg_lens[b_indices].tolist()
-    b_list = b_indices.tolist()
-    max_len = max(lens_list)
-    N = len(b_list)
-
-    # Dense map b_idx → active_idx in [0, N); -1 for inactive samples.
-    b_to_active = torch.full((B,), -1, dtype=torch.long, device=x.device)
-    b_to_active[b_indices] = torch.arange(N, device=x.device)
-
-    # Source (b, t) positions where mask is True.
-    bs, ts = mask.nonzero(as_tuple=True)  # both (M,) where M = mask.sum()
-    # Position within the sample's segment at each True (b, t).
-    pos_in_seg = mask.long().cumsum(dim=1) - 1  # (B, T)
-    p_dst = pos_in_seg[bs, ts]  # (M,)
-    i_dst = b_to_active[bs]    # (M,)
-
-    batch_x = torch.zeros(N, max_len, d, device=x.device, dtype=x.dtype)
-    batch_x[i_dst, p_dst] = x[bs, ts]
-
-    return batch_x, list(zip(b_list, lens_list))
-
-
-def _scatter_segments(
-    x_out: Tensor,
-    batch_out: Tensor,
-    mask: Tensor,
-    batch_info: list[tuple[int, int]],
-) -> None:
-    """Scatter packed batch results back to per-sample positions.
-
-    Vectorized: one nonzero + cumsum + index_put, no Python loop.
-    """
-    if not batch_info:
-        return
-    B = x_out.shape[0]
-    N = len(batch_info)
-    b_indices_cpu = torch.tensor(
-        [b for b, _ in batch_info], dtype=torch.long, device=x_out.device)
-    b_to_active = torch.full((B,), -1, dtype=torch.long, device=x_out.device)
-    b_to_active[b_indices_cpu] = torch.arange(N, device=x_out.device)
-
-    bs, ts = mask.nonzero(as_tuple=True)
-    pos_in_seg = mask.long().cumsum(dim=1) - 1
-    p_src = pos_in_seg[bs, ts]
-    i_src = b_to_active[bs]
-
-    x_out[bs, ts] = batch_out[i_src, p_src]
-
-
-def _run_expert_block(block, x, expert_id, h, w):
-    """Run one sample through a specific expert in an ExpertBlock.
-
-    Applies LayerScale and DropPath on both residual branches (same as a
-    standard modern transformer block, but the attn/mlp ops themselves are
-    expert-specific).
-    """
-    normed = block.norm1(x)
-    attn = block.expert_attns[expert_id]
-    attn_out = attn(normed, h, w)
-    x = x + block.drop_path(block.ls1(attn_out.to(x.dtype)))
-    normed = block.norm2(x)
-    mlp = block.expert_mlps[expert_id]
-    mlp_out = mlp(normed)
-    x = x + block.drop_path(block.ls2(mlp_out.to(x.dtype)))
-    return x

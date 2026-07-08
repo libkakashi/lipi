@@ -39,10 +39,12 @@ from src.training.eval import evaluate
 
 # Parameter-name prefixes for the "expert" param split (distinct LR / clip
 # group from the shared backbone and LID heads). Must be kept in sync with
-# encoder.py module names.
+# encoder.py module names. group_layers / script_layers each contain a
+# stack of MoELayers — attention/shared_mlp inside them are formally
+# "shared", but keeping the whole MoE stack together makes the split
+# clean and matches how experts scale with num_scripts.
 EXPERT_PARAM_PREFIXES = (
-    "group_local_blocks.", "group_wide_blocks.",
-    "script_local_blocks.", "script_wide_blocks.",
+    "group_layers.", "script_layers.",
     "ctc_modules.",
 )
 
@@ -613,7 +615,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
 
             if lid1_weight != 0:
                 fp = group_logits.argmax(dim=-1)
-                fl = group_labels[:, ::2][:, :T_acc].to(fp.device)
+                fl = group_labels[:, ::4][:, :T_acc].to(fp.device)
                 non_pad = (fl >= 0)
                 log_lid1_correct += ((fp == fl) & non_pad).sum()
                 log_lid1_total += non_pad.sum()
@@ -719,8 +721,9 @@ def main():
                 k for k in EXPERT_PARAM_PREFIXES if k != "ctc_modules."])
         if "backbone" in components:
             unfreeze_prefixes.extend([
-                "stem.", "shared_a.", "shared_b.", "shared_c.",
-                "merge_a.", "merge_b.", "merge_c.", "norm."])
+                "stem.", "convA.", "convB.", "blur_ab.", "blur_bc.",
+                "swac_in_proj.", "swa_c.", "swa_d.",
+                "merge_cd.", "merge_d1.", "norm."])
 
         frozen = 0
         trainable = 0

@@ -1,7 +1,7 @@
 """
 Lipi v5 MoE Vision Encoder (from scratch — no pretrained backbone).
 
-New backbone (2× width downsample overall, so T = W/4):
+Backbone (2× width downsample overall, so T = W/4):
 
     Input: (B, 3, 32, W)
     -> ConvStem:  conv3×3 s(2,2) 3→64 → conv3×3 s(1,1) 64→96   (16, W/2, 96)
@@ -15,10 +15,17 @@ New backbone (2× width downsample overall, so T = W/4):
     -> SWA-D:     3× SWA block, dim 384, window 2×64           ( 2, W/4, 384)
     -> LID-1 branch: pool h=2→1, lid1_attn (w=32), group_head
     -> merge h=2→1, Linear(768→384)                            ( 1, W/4, 384)
-    -> Group experts (local w=16 + wide w=64, per-group, dim=384)
+    -> Group MoE stack: N × (shared attn + 15 routed MLPs + shared MLP)
     -> LID-2 heads (multi-script groups)
-    -> Script experts (local w=16 + wide w=64, per-script, dim=384)
+    -> Script MoE stack: N × (shared attn + 27 routed MLPs + shared MLP)
     -> Per-script CTC heads (T = W/4)
+
+MoE layers (DeepSeek-style): each layer runs one windowed attention on the
+full unpacked frame sequence, then splits into a routed-MLP branch
+(per-frame expert lookup by group_id / flat_script_id) and a shared-MLP
+branch that runs on every frame, summed. Attention weights are shared —
+scripts are all 1D horizontal glyph sequences, so the attention pattern
+generalizes; only the channel-wise MLP transform is per-script.
 """
 
 import torch
@@ -26,81 +33,29 @@ import torch.nn as nn
 from torch import Tensor
 
 from src.model.blocks import (
-    ConvStem, ConvNeXtBlock, BlurPool2d, SWABlock, ExpertBlock, GroupCTCModule,
+    ConvStem, ConvNeXtBlock, BlurPool2d, SWABlock, MoELayer, GroupCTCModule,
     _patch_merge_h, _per_sample_key_lens,
-    _collect_segments, _scatter_segments, _run_expert_block,
 )
 from src.taxonomy import NUM_GROUPS
 
 
-def _make_expert_stream(num_blocks: int, dim: int, num_experts: int,
-                        window_w: int, drop_path: float, mlp_ratio: int,
-                        layer_scale_init: float) -> nn.ModuleList:
-    """Build a stack of ExpertBlocks with alternating shift, shared across experts.
-
-    Used four times in LipiMoEEncoder: (group_local, group_wide) at
-    num_experts=num_groups and (script_local, script_wide) at
-    num_experts=total_scripts. Only window_w differs between local and wide.
-    """
-    return nn.ModuleList([
-        ExpertBlock(dim=dim, num_heads=dim // 64, num_experts=num_experts,
-                    window_h=1, window_w=window_w, shift=(i % 2 == 1),
-                    mlp_ratio=mlp_ratio, drop_path=drop_path,
-                    layer_scale_init=layer_scale_init)
-        for i in range(num_blocks)
-    ])
-
-
-def _zero_init_expert_output_projs(*block_lists: nn.ModuleList) -> None:
-    """Zero the attn.proj and mlp.fc2 of every expert in every block.
-
-    Keeps residual paths at identity at init so freshly-added experts pass
-    features through untouched until they learn to specialize. Consumes
-    no RNG — safe to insert anywhere in __init__ without affecting the
-    random-init trajectory of surrounding modules.
-    """
-    for block_list in block_lists:
-        for block in block_list:
-            for attn in block.expert_attns:
-                nn.init.zeros_(attn.proj.weight)
-                nn.init.zeros_(attn.proj.bias)
-            for mlp in block.expert_mlps:
-                nn.init.zeros_(mlp.fc2.weight)
-                nn.init.zeros_(mlp.fc2.bias)
-
-
-def _make_identity_aggregates(n: int, dim: int) -> nn.ModuleList:
-    """Build n Linear(dim*2, dim) aggregators pre-initialized to average the
-    two halves of the input (`0.5*I` on the left half, `0.5*I` on the right
-    half, zero bias). At init time each aggregator computes (local + wide) / 2.
-    """
-    aggs = nn.ModuleList()
-    for _ in range(n):
-        agg = nn.Linear(dim * 2, dim)
-        nn.init.zeros_(agg.bias)
-        with torch.no_grad():
-            agg.weight.zero_()
-            agg.weight[:, :dim] = 0.5 * torch.eye(dim)
-            agg.weight[:, dim:] = 0.5 * torch.eye(dim)
-        aggs.append(agg)
-    return aggs
-
-
 class LipiMoEEncoder(nn.Module):
-    """Lipi v5: ConvStem + ConvNeXt(A,B) + SWA-C/D + LID-1 + group/script experts.
+    """Lipi v5: ConvStem + ConvNeXt(A,B) + SWA-C/D + LID-1 + MoE stacks.
 
     Two-level expert routing:
-      1. LID-1 classifies each frame into a script group (15 + blank). A
-         dedicated `lid1_attn` SWA block sits between SWA-D output (pooled
-         to h=1) and the classifier so LID-1 has its own capacity for
-         script-family discrimination without forcing the CTC feature path
-         into a compromise between family and character features.
-      2. Group expert blocks process frames per-group (local + wide streams)
+      1. LID-1 classifies each frame into a script group (15 + blank).
+         A dedicated `lid1_attn` SWA block sits between SWA-D (pooled to
+         h=1) and the classifier so LID-1 has its own capacity for
+         script-family discrimination without forcing the CTC feature
+         path into a family/character compromise.
+      2. Group MoE stack: N stacked MoELayers with 15 routed MLPs each.
+         Every frame passes through the same attention; its MLP is
+         picked by group_id, and a shared MLP always runs alongside.
       3. LID-2 classifies each frame into a script within its group
-      4. Script expert blocks process frames per-script (local + wide streams)
-      5. Per-script CTC heads decode characters
-
-    Single-script groups skip LID-2 (only 1 script, trivially assigned).
+         (multi-script groups only; single-script groups skip it).
+      4. Script MoE stack: N stacked MoELayers with 27 routed MLPs each,
+         routed by flat script id.
+      5. Per-script CTC heads decode characters.
 
     Time downsampling: overall W is downsampled by 4× (stem s=2 then
     BlurPool s=2 on width) so the output length is T = W/4.  This is
@@ -122,16 +77,15 @@ class LipiMoEEncoder(nn.Module):
         num_convB_blocks: int = 3,
         num_swa_c_blocks: int = 3,
         num_swa_d_blocks: int = 3,
-        num_group_local_blocks: int = 1,
-        num_group_wide_blocks: int = 1,
-        num_script_local_blocks: int = 1,
-        num_script_wide_blocks: int = 1,
+        num_group_layers: int = 3,
+        num_script_layers: int = 3,
         swa_c_window_w: int = 32,
         swa_d_window_w: int = 64,
         local_window_w: int = 16,
         wide_window_w: int = 64,
         mlp_ratio: int = 4,
         shared_mlp_ratio: int = 4,
+        moe_shared_mlp_ratio: int = 2,
         drop_path_rate: float = 0.1,
         layer_scale_init: float = 1.0,
         num_groups: int = NUM_GROUPS,
@@ -141,7 +95,7 @@ class LipiMoEEncoder(nn.Module):
     ):
         super().__init__()
         # Silently drop any unknown kwargs — old checkpoint configs may still
-        # carry names like num_shared_a_blocks / num_super_groups / etc.
+        # carry names like num_group_local_blocks / num_super_groups / etc.
         del unused_kwargs
         self.num_groups = num_groups
         self.blank_group_id = num_groups
@@ -180,16 +134,15 @@ class LipiMoEEncoder(nn.Module):
             "num_convB_blocks": num_convB_blocks,
             "num_swa_c_blocks": num_swa_c_blocks,
             "num_swa_d_blocks": num_swa_d_blocks,
-            "num_group_local_blocks": num_group_local_blocks,
-            "num_group_wide_blocks": num_group_wide_blocks,
-            "num_script_local_blocks": num_script_local_blocks,
-            "num_script_wide_blocks": num_script_wide_blocks,
+            "num_group_layers": num_group_layers,
+            "num_script_layers": num_script_layers,
             "swa_c_window_w": swa_c_window_w,
             "swa_d_window_w": swa_d_window_w,
             "local_window_w": local_window_w,
             "wide_window_w": wide_window_w,
             "mlp_ratio": mlp_ratio,
             "shared_mlp_ratio": shared_mlp_ratio,
+            "moe_shared_mlp_ratio": moe_shared_mlp_ratio,
             "drop_path_rate": drop_path_rate,
             "layer_scale_init": layer_scale_init,
             "num_groups": num_groups,
@@ -198,13 +151,11 @@ class LipiMoEEncoder(nn.Module):
         }
 
         # Drop-path schedule: linear ramp from 0 → drop_path_rate across
-        # ConvA + ConvB + SWA-C + SWA-D + (group expert stage) + (script
-        # expert stage). Parallel local/wide streams share one rate per
-        # stage so residual scaling matches.
+        # ConvA + ConvB + SWA-C + SWA-D + group MoE stack + script MoE
+        # stack. Each MoE layer counts as one stage in the schedule.
         n_stages = (num_convA_blocks + num_convB_blocks
                     + num_swa_c_blocks + num_swa_d_blocks
-                    + max(num_group_local_blocks, num_group_wide_blocks)
-                    + max(num_script_local_blocks, num_script_wide_blocks))
+                    + num_group_layers + num_script_layers)
         dp_schedule = [drop_path_rate * i / max(n_stages - 1, 1)
                        for i in range(n_stages)]
         dp_iter = iter(dp_schedule)
@@ -281,9 +232,10 @@ class LipiMoEEncoder(nn.Module):
             self.merge_d1.weight[:, dim:] = 0.5 * torch.eye(dim)
             self.merge_d1.bias.zero_()
 
-        # Parallel expert stages share one drop-path rate per stage.
-        group_dp = next(dp_iter) if max(num_group_local_blocks, num_group_wide_blocks) > 0 else 0.0
-        script_dp = next(dp_iter) if max(num_script_local_blocks, num_script_wide_blocks) > 0 else 0.0
+        # Each MoE layer consumes one entry from the drop-path schedule.
+        # Same order as construction below: group layers first, then script.
+        group_dps = [next(dp_iter) for _ in range(num_group_layers)]
+        script_dps = [next(dp_iter) for _ in range(num_script_layers)]
 
         # ── LID-1: per-frame group classification ─────────────────────
         # Branches off SWA-D output (at h=2) before merge_d1. Pool h=2→1,
@@ -307,21 +259,22 @@ class LipiMoEEncoder(nn.Module):
             nn.Linear(dim // 2, num_groups + 1),
         )
 
-        # ── Group expert blocks (routed by group_id) ──────────────────
-        # Local vs wide streams differ only in window_w. Output
-        # projections zero-init so residuals pass features through at
-        # step 0 — experts specialize gradually.
-        self.group_local_blocks = _make_expert_stream(
-            num_group_local_blocks, dim, num_groups,
-            local_window_w, group_dp, mlp_ratio, layer_scale_init)
-        self.group_wide_blocks = _make_expert_stream(
-            num_group_wide_blocks, dim, num_groups,
-            wide_window_w, group_dp, mlp_ratio, layer_scale_init)
-        _zero_init_expert_output_projs(
-            self.group_local_blocks, self.group_wide_blocks)
-
-        # Group aggregation: concat local + wide → dim, init averaging.
-        self.group_aggregates = _make_identity_aggregates(num_groups, dim)
+        # ── Group MoE stack (routed by group_id) ──────────────────────
+        # N stacked MoELayers, alternating local/wide window widths and
+        # shifts. Each layer: shared attention + 15 routed MLPs (one per
+        # group) + shared MLP (always on).
+        self.group_layers = nn.ModuleList([
+            MoELayer(
+                dim=dim, num_heads=max(dim // 64, 1), num_experts=num_groups,
+                window_w=(local_window_w if i % 2 == 0 else wide_window_w),
+                shift=(i % 2 == 1),
+                routed_mlp_ratio=mlp_ratio,
+                shared_mlp_ratio=moe_shared_mlp_ratio,
+                drop_path=group_dps[i],
+                layer_scale_init=layer_scale_init,
+            )
+            for i in range(num_group_layers)
+        ])
 
         # ── LID-2: per-frame script classification (multi-script groups)
         self.lid2_heads = nn.ModuleDict()
@@ -334,18 +287,22 @@ class LipiMoEEncoder(nn.Module):
                     nn.Linear(dim // 2, n_scripts),
                 )
 
-        # ── Script expert blocks (routed by flat script_id) ───────────
-        self.script_local_blocks = _make_expert_stream(
-            num_script_local_blocks, dim, self.total_scripts,
-            local_window_w, script_dp, mlp_ratio, layer_scale_init)
-        self.script_wide_blocks = _make_expert_stream(
-            num_script_wide_blocks, dim, self.total_scripts,
-            wide_window_w, script_dp, mlp_ratio, layer_scale_init)
-        _zero_init_expert_output_projs(
-            self.script_local_blocks, self.script_wide_blocks)
-
-        # Script aggregation.
-        self.script_aggregates = _make_identity_aggregates(self.total_scripts, dim)
+        # ── Script MoE stack (routed by flat script_id) ───────────────
+        # Same shape as group_layers but with total_scripts routed MLPs
+        # per layer (27 for the full taxonomy).
+        self.script_layers = nn.ModuleList([
+            MoELayer(
+                dim=dim, num_heads=max(dim // 64, 1),
+                num_experts=self.total_scripts,
+                window_w=(local_window_w if i % 2 == 0 else wide_window_w),
+                shift=(i % 2 == 1),
+                routed_mlp_ratio=mlp_ratio,
+                shared_mlp_ratio=moe_shared_mlp_ratio,
+                drop_path=script_dps[i],
+                layer_scale_init=layer_scale_init,
+            )
+            for i in range(num_script_layers)
+        ])
 
         # Output
         self.enc_out_dim = dim
@@ -361,57 +318,6 @@ class LipiMoEEncoder(nn.Module):
             for g in range(num_groups)
         ])
 
-    def _route_expert_stage(
-        self,
-        x_in: Tensor,
-        ids_2d: Tensor,
-        ids_lens_cpu: list,
-        num_stages: int,
-        local_blocks: nn.ModuleList,
-        wide_blocks: nn.ModuleList,
-        aggregates: nn.ModuleList,
-    ) -> Tensor:
-        """Route each (b, t) frame to its expert (indexed by ids_2d[b, t]),
-        run it through both the local and wide expert-block stacks, then
-        aggregate the two streams via the per-expert aggregator Linear.
-
-        Both group-experts and script-experts stages share this exact
-        shape — iterate expert-id 0..num_stages, collect its frames, run
-        local + wide, concat + aggregate, scatter back.
-
-        Args:
-            x_in:         (B, T, d) input features.
-            ids_2d:       (B, T) per-frame expert id (-1 or >=num_stages skipped).
-            ids_lens_cpu: (B, num_stages) Python list — pre-transferred counts
-                          so the outer loop can skip empty experts without
-                          a GPU→CPU sync.
-            num_stages:   number of experts (num_groups or total_scripts).
-        """
-        B, w, _ = x_in.shape
-        x_out = torch.zeros_like(x_in)
-        for s in range(num_stages):
-            # Skip without a sync — checks the pre-transferred CPU list.
-            if not any(ids_lens_cpu[b][s] > 0 for b in range(B)):
-                continue
-            mask_s = (ids_2d == s)
-            batch_x, batch_info = _collect_segments(x_in, mask_s)
-            if batch_x is None:
-                continue
-            max_len = batch_x.shape[1]
-
-            local = batch_x
-            for block in local_blocks:
-                local = _run_expert_block(block, local, s, 1, max_len)
-
-            wide = batch_x
-            for block in wide_blocks:
-                wide = _run_expert_block(block, wide, s, 1, max_len)
-
-            comb = torch.cat([local, wide], dim=-1)
-            agg = aggregates[s](comb)
-            _scatter_segments(x_out, agg, mask_s, batch_info)
-        return x_out
-
     def _get_flat_script_ids(self, group_ids, script_ids):
         """Convert (group_id, local_script_id) pairs to flat script indices.
         Blank/whitespace frames (group_id == blank_group_id) get flat_id = -1.
@@ -422,12 +328,11 @@ class LipiMoEEncoder(nn.Module):
             flat[mask] = f
         return flat
 
-    def _run_backbone(self, images: Tensor) -> tuple[Tensor, Tensor, int]:
+    def _run_backbone(self, images: Tensor) -> tuple[Tensor, int, int]:
         """Run stem → ConvA → BlurPool → ConvB → BlurPool → proj → SWA-C
-        → merge → SWA-D. Returns (x_swad_h2, group_logits_input, T).
-
-        x_swad_h2 has shape (B, 2*T, dim) — pre-merge_d1, feeds both the
-        LID-1 branch and merge_d1 (CTC path).
+        → merge → SWA-D. Returns (x, h, w) with x of shape (B, h*w, dim),
+        h=2, w=T = W/4. The h=2 tensor feeds both the LID-1 branch and
+        the final merge_d1 → CTC path.
         """
         B = images.shape[0]
         x = images.float() / 255.0 if images.dtype == torch.uint8 else images
@@ -514,20 +419,21 @@ class LipiMoEEncoder(nn.Module):
             x = x.detach()
 
         # =====================================================================
-        # STAGE 1: Group expert blocks (routed per-segment by group_id)
-        # Iterates by group (≤ num_groups = 15) instead of (B, unique_groups)
-        # to amortize kernel-launch overhead — all samples with the same
-        # group are padded and processed in one batched call per expert.
+        # STAGE 1: Group MoE stack.
+        # Each MoELayer runs shared attention on the full sequence, then
+        # applies per-frame routed MLPs (indexed by frame_groups) plus a
+        # shared MLP. Blank frames (group_id >= num_groups) still get
+        # attention + shared MLP; only the routed MLP is skipped.
         # =====================================================================
 
-        # One upfront sync: per-sample per-group frame counts.
+        # One upfront sync: per-sample per-group frame counts. Reused
+        # across every group layer so the sync-free expert skip in
+        # MoELayer._routed_mlp costs zero per-layer.
         group_lens_cpu = _per_sample_key_lens(
             frame_groups, self.num_groups).tolist()
 
-        x_after_group = self._route_expert_stage(
-            x, frame_groups, group_lens_cpu, self.num_groups,
-            self.group_local_blocks, self.group_wide_blocks,
-            self.group_aggregates)
+        for layer in self.group_layers:
+            x = layer(x, frame_groups, group_lens_cpu, w)
 
         # =====================================================================
         # LID-2: per-frame script classification
@@ -537,7 +443,7 @@ class LipiMoEEncoder(nn.Module):
         lid2_logits_per_group = {}  # g → (B, T, n_scripts)
         for g_str, head in self.lid2_heads.items():
             g = int(g_str)
-            lid2_logits_per_group[g] = head(x_after_group)  # (B, T, n_scripts)
+            lid2_logits_per_group[g] = head(x)  # (B, T, n_scripts)
 
         # Determine per-frame script assignments
         # frame_scripts: (B, T) — local script_id within each frame's group
@@ -585,8 +491,9 @@ class LipiMoEEncoder(nn.Module):
             }
 
         # =====================================================================
-        # STAGE 2: Script expert blocks (routed per-segment by flat script_id)
-        # Same routing pattern as STAGE 1 — see _route_expert_stage.
+        # STAGE 2: Script MoE stack.
+        # Same shape as Stage 1, routed by flat script id. Frames whose
+        # flat_scripts == -1 (blank / unrouted) skip only the routed MLP.
         # =====================================================================
 
         # One upfront sync: per-sample per-script frame counts. flat_scripts
@@ -594,46 +501,32 @@ class LipiMoEEncoder(nn.Module):
         script_lens_cpu = _per_sample_key_lens(
             flat_scripts, self.total_scripts).tolist()
 
-        x_after_script = self._route_expert_stage(
-            x_after_group, flat_scripts, script_lens_cpu, self.total_scripts,
-            self.script_local_blocks, self.script_wide_blocks,
-            self.script_aggregates)
+        for layer in self.script_layers:
+            x = layer(x, flat_scripts, script_lens_cpu, w)
 
         # =====================================================================
-        # CTC heads (per-segment routing)
+        # CTC heads (per-frame routing via boolean mask — no packing)
         # =====================================================================
 
-        x = self.norm(x_after_script)
+        x = self.norm(x)
         T = x.shape[1]
 
         max_vocab = max(m.max_vocab for m in self.ctc_modules)
         logits = torch.zeros(B, T, max_vocab, device=x.device, dtype=x.dtype)
 
-        # CTC routing: iterate by group. Within each group, per-sample
-        # script_ids are passed to the GroupCTCModule which handles
-        # per-script head routing internally.
-        for g in range(self.num_groups):
-            # Skip without a sync using the pre-transferred group counts.
-            if not any(group_lens_cpu[b][g] > 0 for b in range(B)):
+        # CTC heads are position-wise Linear(dim → vocab), so we can
+        # dispatch them by boolean mask on the full sequence — no need
+        # to pack frames into contiguous segments. Iterate by (group,
+        # local_script); use flat_scripts to skip empty (g, s) without a
+        # GPU→CPU sync via the pre-transferred script_lens_cpu.
+        for (g, s), flat_id in self._flat_script_id.items():
+            if not any(script_lens_cpu[b][flat_id] > 0 for b in range(B)):
                 continue
-            mask_g = (frame_groups == g)  # (B, T)
-            batch_feats, batch_info = _collect_segments(x, mask_g)
-            if batch_feats is None:
-                continue
-
-            # One script_id per segment (all frames in a group segment share
-            # a script). Build batch_sids on GPU via gather: first-True
-            # column per sample, then index frame_scripts. Single H2D
-            # transfer for b_tensor; no per-sample .item() sync.
-            b_tensor = torch.tensor(
-                [b for b, _ in batch_info], device=x.device, dtype=torch.long)
-            first_col = mask_g[b_tensor].int().argmax(dim=1)  # (N,)
-            batch_sids = frame_scripts[b_tensor, first_col]
-
-            seg_logits, _ = self.ctc_modules[g](batch_feats, script_ids=batch_sids)
-            vs = seg_logits.shape[-1]
-            for i, (b, sl) in enumerate(batch_info):
-                logits[b, mask_g[b], :vs] = seg_logits[i, :sl].to(logits.dtype)
+            mask = (flat_scripts == flat_id)  # (B, T)
+            head = self.ctc_modules[g].heads[s]
+            vs = head.vocab_size
+            head_out = head(x[mask]).to(logits.dtype)  # (K, vs)
+            logits[mask, :vs] = head_out
 
         lengths = torch.full((B,), T, dtype=torch.long, device=x.device)
 

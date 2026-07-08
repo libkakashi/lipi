@@ -95,13 +95,11 @@ def main():
         "swa_d (3 blocks)": model.swa_d,
         "merge_cd / merge_d1": [model.merge_cd, model.merge_d1],
         "lid1_attn + group_head": [model.lid1_attn, model.group_head],
-        "group experts (15 × local+wide)":
-            [model.group_local_blocks, model.group_wide_blocks],
-        "group aggregates (15)": model.group_aggregates,
+        "group MoE stack (N × shared_attn + 15 routed MLPs + shared MLP)":
+            model.group_layers,
         "lid2 heads": model.lid2_heads,
-        "script experts (27 × local+wide)":
-            [model.script_local_blocks, model.script_wide_blocks],
-        "script aggregates (27)": model.script_aggregates,
+        "script MoE stack (N × shared_attn + 27 routed MLPs + shared MLP)":
+            model.script_layers,
         "norm": model.norm,
         "ctc heads (27 scripts)": model.ctc_modules,
     }
