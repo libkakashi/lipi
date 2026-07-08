@@ -16,7 +16,7 @@ import numpy as np
 import torch
 from PIL import Image, ImageDraw, ImageFont
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.data.color import rgb_to_input
 from src.encoding.decompose import decode_ids, script_vocab_size
@@ -170,7 +170,7 @@ def ctc_confidence(logits: torch.Tensor, vocab_size: int) -> float:
 # Spell checker
 # ---------------------------------------------------------------------------
 
-DICT_DIR = Path(__file__).parent.parent / "training_data" / "dictionaries"
+DICT_DIR = Path(__file__).parent.parent.parent / "training_data" / "dictionaries"
 
 # Map scripts to hunspell dictionary files
 _SCRIPT_DICT_FILES: dict[str, list[str]] = {
