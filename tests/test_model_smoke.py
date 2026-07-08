@@ -63,3 +63,38 @@ def test_model_inference_mode():
 
     assert out["logits"].shape[0] == B
     assert out["group_logits"].shape[2] == 3
+
+
+def test_inter_ctc_logits():
+    """inter_ctc=True returns pre-script-stack logits with the same shape
+    and routing as the final logits, and no inter_logits otherwise."""
+    from src.model.encoder import LipiMoEEncoder
+
+    model = LipiMoEEncoder(
+        dim=128,
+        num_groups=2,
+        group_script_vocab_sizes=[[100], [80, 120]],
+        group_script_names=[["test1"], ["test2a", "test2b"]],
+    )
+
+    B, H, W = 2, 32, 64
+    images = torch.randn(B, 3, H, W)
+    T = W // 4
+    group_ids = torch.tensor([[0] * T, [1] * T])
+    script_ids = torch.tensor([[0] * T, [1] * T])
+
+    model.eval()
+    with torch.no_grad():
+        out = model(images, group_ids=group_ids, script_ids=script_ids,
+                    inter_ctc=True)
+        out_plain = model(images, group_ids=group_ids, script_ids=script_ids)
+
+    assert "inter_logits" not in out_plain
+    assert out["inter_logits"].shape == out["logits"].shape
+    # Same head dispatch: unrouted vocab tail stays zero in both
+    assert torch.equal(out["inter_logits"][0, :, 100:],
+                       torch.zeros_like(out["inter_logits"][0, :, 100:]))
+    # Final logits pass through the script stack, intermediate don't —
+    # they must differ (script MoE layers aren't identity even at init
+    # due to shared MLP + attention branches).
+    assert not torch.allclose(out["inter_logits"], out["logits"])

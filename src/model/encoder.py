@@ -318,6 +318,29 @@ class LipiMoEEncoder(nn.Module):
             for g in range(num_groups)
         ])
 
+    def _ctc_logits(self, x: Tensor, flat_scripts: Tensor,
+                    script_lens_cpu: list) -> Tensor:
+        """Dispatch per-script CTC heads over routed frames.
+
+        CTC heads are position-wise Linear(dim → vocab), so we can
+        dispatch them by boolean mask on the full sequence — no need
+        to pack frames into contiguous segments. Iterate by (group,
+        local_script); use script_lens_cpu to skip empty (g, s) without
+        a GPU→CPU sync.
+        """
+        B, T, _ = x.shape
+        max_vocab = max(m.max_vocab for m in self.ctc_modules)
+        logits = torch.zeros(B, T, max_vocab, device=x.device, dtype=x.dtype)
+        for (g, s), flat_id in self._flat_script_id.items():
+            if not any(script_lens_cpu[b][flat_id] > 0 for b in range(B)):
+                continue
+            mask = (flat_scripts == flat_id)  # (B, T)
+            head = self.ctc_modules[g].heads[s]
+            vs = head.vocab_size
+            head_out = head(x[mask]).to(logits.dtype)  # (K, vs)
+            logits[mask, :vs] = head_out
+        return logits
+
     def _get_flat_script_ids(self, group_ids, script_ids):
         """Convert (group_id, local_script_id) pairs to flat script indices.
         Blank/whitespace frames (group_id == blank_group_id) get flat_id = -1.
@@ -377,12 +400,20 @@ class LipiMoEEncoder(nn.Module):
         script_ids: Tensor | None = None,
         detach_for_experts: bool = False,
         compute_ctc: bool = True,
+        inter_ctc: bool = False,
     ) -> dict:
         """Run the encoder forward pass.
 
         compute_ctc=False skips the script experts + final norm + CTC
         heads. Useful when the CTC loss weight is 0 and we don't need
         character predictions (e.g. LID-only pretraining).
+
+        inter_ctc=True additionally decodes the features after the group
+        MoE stack (before script experts) through the same norm + CTC
+        heads and returns them as "inter_logits" — an intermediate-CTC
+        auxiliary target that regularizes the trunk and forces character
+        information to exist before script specialization. Training-only;
+        no extra parameters (heads are shared with the final CTC).
         """
         B = images.shape[0]
 
@@ -434,6 +465,9 @@ class LipiMoEEncoder(nn.Module):
 
         for layer in self.group_layers:
             x = layer(x, frame_groups, group_lens_cpu, w)
+
+        # Features entering the script stack — kept for intermediate CTC.
+        x_inter = x if (inter_ctc and compute_ctc) else None
 
         # =====================================================================
         # LID-2: per-frame script classification
@@ -511,26 +545,11 @@ class LipiMoEEncoder(nn.Module):
         x = self.norm(x)
         T = x.shape[1]
 
-        max_vocab = max(m.max_vocab for m in self.ctc_modules)
-        logits = torch.zeros(B, T, max_vocab, device=x.device, dtype=x.dtype)
-
-        # CTC heads are position-wise Linear(dim → vocab), so we can
-        # dispatch them by boolean mask on the full sequence — no need
-        # to pack frames into contiguous segments. Iterate by (group,
-        # local_script); use flat_scripts to skip empty (g, s) without a
-        # GPU→CPU sync via the pre-transferred script_lens_cpu.
-        for (g, s), flat_id in self._flat_script_id.items():
-            if not any(script_lens_cpu[b][flat_id] > 0 for b in range(B)):
-                continue
-            mask = (flat_scripts == flat_id)  # (B, T)
-            head = self.ctc_modules[g].heads[s]
-            vs = head.vocab_size
-            head_out = head(x[mask]).to(logits.dtype)  # (K, vs)
-            logits[mask, :vs] = head_out
+        logits = self._ctc_logits(x, flat_scripts, script_lens_cpu)
 
         lengths = torch.full((B,), T, dtype=torch.long, device=x.device)
 
-        return {
+        out = {
             "logits": logits,
             "lengths": lengths,
             "group_logits": group_logits,
@@ -539,3 +558,11 @@ class LipiMoEEncoder(nn.Module):
             "frame_scripts": frame_scripts,
             "flat_scripts": flat_scripts,
         }
+
+        # Intermediate CTC: same norm + heads applied to the pre-script-
+        # stack features, routed identically.
+        if x_inter is not None:
+            out["inter_logits"] = self._ctc_logits(
+                self.norm(x_inter), flat_scripts, script_lens_cpu)
+
+        return out

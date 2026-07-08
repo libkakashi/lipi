@@ -130,6 +130,13 @@ def parse_args():
                              "before joint training — random features into "
                              "CTC cause blank collapse, structured features "
                              "from LID-pretraining let CTC escape cleanly.")
+    parser.add_argument("--inter-ctc-weight", type=float, default=0.3,
+                        help="Auxiliary CTC loss on the features after the "
+                             "group MoE stack (before script experts), "
+                             "through the same norm + CTC heads (no new "
+                             "params, training-only). Regularizes the trunk "
+                             "and forces character info to exist before "
+                             "script specialization. 0 disables.")
     parser.add_argument("--lid1-weight", type=float, default=1.0)
     parser.add_argument("--lid2-weight", type=float, default=1.0,
                         help="Set to 0 to disable LID-2 loss "
@@ -537,7 +544,8 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                     group_script_vocabs, group_script_names,
                     detach_for_experts=False,
                     save_dir=None, args=None,
-                    ema=None, ema_model=None):
+                    ema=None, ema_model=None,
+                    inter_ctc_weight=0.0):
     model.train()
     steps = len(train_loader)
     n_batches = 0
@@ -559,6 +567,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
     lid1_loss_accum = torch.zeros(1, device=device)
     total_loss_accum = torch.zeros(1, device=device)
     log_ctc = torch.zeros(1, device=device)
+    log_ictc = torch.zeros(1, device=device)
     log_lid1 = torch.zeros(1, device=device)
     log_lid2 = torch.zeros(1, device=device)
     log_total = torch.zeros(1, device=device)
@@ -588,7 +597,8 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
 
             out = model(imgs_, group_ids=gl_for_model, script_ids=sl_frames,
                         detach_for_experts=detach_for_experts,
-                        compute_ctc=(ctc_weight != 0))
+                        compute_ctc=(ctc_weight != 0),
+                        inter_ctc=(inter_ctc_weight != 0 and ctc_weight != 0))
 
         # LID-1 loss. Skip when weight is 0.
         T = out["group_logits"].shape[1]
@@ -610,6 +620,14 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         else:
             ctc_loss = torch.zeros(1, device=device)
 
+        # Intermediate CTC on the pre-script-stack features (same segments)
+        if "inter_logits" in out:
+            inter_ctc_loss = compute_ctc_loss_segments(
+                out["inter_logits"], segments_, out["lengths"],
+                group_script_names, group_script_vocabs)
+        else:
+            inter_ctc_loss = torch.zeros(1, device=device)
+
         # LID-2 loss: per-frame CE within multi-script groups. Skip when
         # weight is 0 or when lid2_logits_per_group is empty.
         if lid2_weight != 0:
@@ -620,6 +638,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             lid2_loss = torch.zeros(1, device=device)
 
         loss = (ctc_weight * ctc_loss
+                + inter_ctc_weight * inter_ctc_loss
                 + lid1_weight * lid1_loss.float()
                 + lid2_weight * lid2_loss.float())
 
@@ -633,7 +652,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         detached_lid2 = {
             g: lg.detach() for g, lg in out.get("lid2_logits_per_group", {}).items()
         }
-        return (ctc_loss, lid1_loss, lid2_loss, loss,
+        return (ctc_loss, inter_ctc_loss, lid1_loss, lid2_loss, loss,
                 out["group_logits"].detach(), detached_lid2,
                 gl_for_model.detach(), sl_frames.detach())
 
@@ -655,7 +674,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             group_labels = group_labels.to(device, non_blocking=True)
 
         try:
-            (ctc_loss, lid1_loss, lid2_loss, loss,
+            (ctc_loss, inter_ctc_loss, lid1_loss, lid2_loss, loss,
              group_logits, lid2_logits,
              gt_groups, gt_scripts) = \
                 _forward_backward(imgs, targets, tgt_lens, gids, sids, scale=1.0,
@@ -690,6 +709,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         lid1_loss_accum += lid1_loss.detach()
         total_loss_accum += loss.detach() * mult
         log_ctc += ctc_loss.detach()
+        log_ictc += inter_ctc_loss.detach()
         log_lid1 += lid1_loss.detach()
         log_lid2 += lid2_loss.detach()
         log_total += loss.detach() * mult
@@ -725,14 +745,15 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         if n_batches % log_interval == 0:
             # Batch all the per-interval counters into one GPU→CPU transfer.
             stats = torch.stack([
-                log_ctc.squeeze(), log_lid1.squeeze(),
+                log_ctc.squeeze(), log_ictc.squeeze(), log_lid1.squeeze(),
                 log_lid2.squeeze(), log_total.squeeze(),
                 log_lid1_correct.float(), log_lid1_total.float(),
                 log_lid2_correct.float(), log_lid2_total.float(),
             ]).tolist()
-            (avg_ctc, avg_lid1, avg_lid2, avg_total,
+            (avg_ctc, avg_ictc, avg_lid1, avg_lid2, avg_total,
              lid1_c, lid1_t, lid2_c, lid2_t) = stats
             avg_ctc /= log_count
+            avg_ictc /= log_count
             avg_lid1 /= log_count
             avg_lid2 /= log_count
             avg_total /= log_count
@@ -742,16 +763,19 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             ms_per_step = elapsed / log_count * 1000
             samples_per_sec = imgs.shape[0] * log_count / elapsed
             batch_str = f"{batch_idx+1}/{steps}"
+            ictc_str = f"ictc {avg_ictc:.4f}  " if inter_ctc_weight != 0 else ""
             print(
                 f"  [{epoch:>2}/{total_epochs}] {batch_str:>9}  "
                 f"loss {avg_total:.4f}  "
-                f"ctc {avg_ctc:.4f}  lid1 {avg_lid1:.4f}  lid2 {avg_lid2:.4f}  "
+                f"ctc {avg_ctc:.4f}  {ictc_str}"
+                f"lid1 {avg_lid1:.4f}  lid2 {avg_lid2:.4f}  "
                 f"| acc {lid1_acc:5.1f}% {lid2_acc:5.1f}%  "
                 f"| {samples_per_sec:.0f} img/s  {ms_per_step:.0f}ms/step  "
                 f"gnorm {shared_norm:.1f}/{expert_norm:.1f}"
             )
             log_time = time.time()
             log_ctc.zero_()
+            log_ictc.zero_()
             log_lid1.zero_()
             log_lid2.zero_()
             log_total.zero_()
@@ -896,8 +920,8 @@ def main():
     print(f"\n{'=' * 60}")
     print(f"TRAINING: epochs {start_epoch}-{args.epochs}, lr={args.lr}")
     print(f"  Batch: {eff_batch} x {args.grad_accum} (pixel-budgeted)")
-    print(f"  Losses: CTC x{args.ctc_weight} + LID1 x{args.lid1_weight} "
-          f"+ LID2 x{args.lid2_weight}")
+    print(f"  Losses: CTC x{args.ctc_weight} + interCTC x{args.inter_ctc_weight} "
+          f"+ LID1 x{args.lid1_weight} + LID2 x{args.lid2_weight}")
     print(f"  Routing: ground truth (CTC on all samples)")
     print(f"  Per-script vocabs: {data['group_script_vocab_sizes']}")
     print(f"{'=' * 60}")
@@ -918,7 +942,8 @@ def main():
             group_script_names=data["group_script_names"],
             detach_for_experts=detach,
             save_dir=save_dir, args=args,
-            ema=ema, ema_model=base_model)
+            ema=ema, ema_model=base_model,
+            inter_ctc_weight=args.inter_ctc_weight)
 
         elapsed = time.time() - t0
         if metrics:
