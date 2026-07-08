@@ -159,8 +159,10 @@ def binarize(img: Image.Image) -> Image.Image:
     out = np.where(binary, 255, 0).astype(np.uint8)
     result = Image.fromarray(out).convert("RGB")
 
-    # Broken thin strokes: erode the ink a step
-    if random.random() < 0.3:
+    # Broken thin strokes: erode the ink a step. Never after dither —
+    # the speckle inside dithered ink expands into holes and wipes the
+    # text entirely.
+    if style != "dither" and random.random() < 0.3:
         result = result.filter(ImageFilter.MaxFilter(size=3))
     # Re-scan softness on top of the hard edges
     if random.random() < 0.4:
