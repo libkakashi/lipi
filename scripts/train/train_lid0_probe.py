@@ -31,7 +31,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.model.encoder import ConvStem, SWABlock, _patch_merge_h
 from src.taxonomy import GROUPS, NUM_GROUPS, SCRIPT_TO_GROUP
