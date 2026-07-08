@@ -33,6 +33,7 @@ from src.training.dataloader import (
 from src.training.losses import (
     compute_lid1_loss, compute_lid2_loss, compute_ctc_loss_segments,
 )
+from src.training.ema import ModelEMA
 from src.training.routing import build_frame_labels_from_segments
 from src.training.eval import evaluate
 
@@ -118,6 +119,11 @@ def parse_args():
     # Model
     parser.add_argument("--dim", type=int, default=384)
     parser.add_argument("--no-compile", action="store_true")
+    parser.add_argument("--ema-decay", type=float, default=0.999,
+                        help="Weight EMA decay per optimizer step; eval and "
+                             "the 'ema' checkpoint entry use the averaged "
+                             "weights. 0 disables. Costs one fp32 copy of "
+                             "the params in VRAM.")
     parser.add_argument("--ctc-weight", type=float, default=1.0,
                         help="Set to 0 to disable CTC loss. Useful for "
                              "pretraining stem + shared SWA on LID alone "
@@ -476,6 +482,7 @@ def resume_from_checkpoint(args, model, optimizer, base_optimizer, scaler, sched
         optimizer.load_state_dict(ckpt["optimizer"])
     if "scaler" in ckpt:
         scaler.load_state_dict(ckpt["scaler"])
+    ema_state = ckpt.get("ema")
     start_epoch = ckpt.get("epoch", 0) + 1
 
     # Always rebuild scheduler on resume — checkpoint might have a different
@@ -493,16 +500,17 @@ def resume_from_checkpoint(args, model, optimizer, base_optimizer, scaler, sched
         torch.cuda.empty_cache()
     vram("after resume", device_type)
 
-    return start_epoch, scheduler
+    return start_epoch, scheduler, ema_state
 
 
 # ---------------------------------------------------------------------------
 # Checkpoint saving
 # ---------------------------------------------------------------------------
 
-def save_checkpoint(model, optimizer, scheduler, scaler, epoch, args, save_dir):
+def save_checkpoint(model, optimizer, scheduler, scaler, epoch, args, save_dir,
+                    ema=None):
     ckpt_path = save_dir / f"moe_epoch{epoch}.pt"
-    torch.save({
+    payload = {
         "model": {k: v.cpu() for k, v in model.state_dict().items()},
         "model_config": model.config,
         "optimizer": optimizer.state_dict(),
@@ -510,7 +518,10 @@ def save_checkpoint(model, optimizer, scheduler, scaler, epoch, args, save_dir):
         "scaler": scaler.state_dict(),
         "epoch": epoch,
         "args": vars(args),
-    }, ckpt_path)
+    }
+    if ema is not None:
+        payload["ema"] = ema.state_dict()
+    torch.save(payload, ckpt_path)
     print(f"  Saved: {ckpt_path}")
 
 
@@ -525,7 +536,8 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                     ctc_weight, lid1_weight, lid2_weight,
                     group_script_vocabs, group_script_names,
                     detach_for_experts=False,
-                    save_dir=None, args=None):
+                    save_dir=None, args=None,
+                    ema=None, ema_model=None):
     model.train()
     steps = len(train_loader)
     n_batches = 0
@@ -667,6 +679,10 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             optimizer.zero_grad(set_to_none=True)
             if scaler.get_scale() >= old_scale:
                 scheduler.step()
+                # EMA tracks the uncompiled module (same tensors as the
+                # compiled wrapper, but stable parameter names).
+                if ema is not None:
+                    ema.update(ema_model)
 
         # Accumulate on GPU — no sync
         mult = float(grad_accum)
@@ -704,7 +720,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
 
         if save_dir and n_batches % 500 == 0:
             save_checkpoint(model, optimizer, scheduler, scaler,
-                            epoch, args, save_dir)
+                            epoch, args, save_dir, ema=ema)
 
         if n_batches % log_interval == 0:
             # Batch all the per-interval counters into one GPU→CPU transfer.
@@ -849,10 +865,22 @@ def main():
     # optimizer state dict loading from non-compiled checkpoints.
 
     start_epoch = 1
+    ema_state = None
     if args.resume:
-        start_epoch, opt["scheduler"] = resume_from_checkpoint(
+        start_epoch, opt["scheduler"], ema_state = resume_from_checkpoint(
             args, model, opt["optimizer"], opt["base_optimizer"], opt["scaler"],
             opt["scheduler"], steps_per_epoch, device_type)
+
+    # Weight EMA: snapshot after resume so a fresh EMA starts from the
+    # loaded weights, and before compile so parameter names are stable.
+    ema = None
+    base_model = model
+    if args.ema_decay > 0:
+        ema = ModelEMA(base_model, decay=args.ema_decay)
+        if ema_state is not None:
+            ema.load_state_dict(ema_state)
+            print(f"  Resumed EMA state ({ema.updates} updates)")
+        print(f"EMA: decay={args.ema_decay} (eval uses averaged weights)")
 
     # torch.compile after optimizer + resume (avoids param group mismatch)
     if device_type == "cuda" and not args.no_compile:
@@ -889,7 +917,8 @@ def main():
             group_script_vocabs=data["group_script_vocab_sizes"],
             group_script_names=data["group_script_names"],
             detach_for_experts=detach,
-            save_dir=save_dir, args=args)
+            save_dir=save_dir, args=args,
+            ema=ema, ema_model=base_model)
 
         elapsed = time.time() - t0
         if metrics:
@@ -898,7 +927,7 @@ def main():
                   f"time={elapsed:.0f}s")
 
         save_checkpoint(model, opt["optimizer"], opt["scheduler"], opt["scaler"],
-                        epoch, args, save_dir)
+                        epoch, args, save_dir, ema=ema)
 
         # Move optimizer state to CPU to free VRAM for eval
         optimizer = opt["optimizer"]
@@ -908,11 +937,21 @@ def main():
                     state[k] = v.cpu()
         torch.cuda.empty_cache()
 
-        print(f"\n  Eval epoch {epoch}:")
-        evaluate(model, data["val_loader"], data["group_tokenizers"],
-                 data["group_script_names"], data["active_groups"],
-                 device, device_type, opt["use_amp"], opt["amp_dtype"],
-                 group_script_vocab_sizes=data["group_script_vocab_sizes"])
+        print(f"\n  Eval epoch {epoch}:"
+              + (" (EMA weights)" if ema is not None else ""))
+        if ema is not None:
+            # Swap averaged weights into the (shared) parameter tensors;
+            # the compiled wrapper sees them too.
+            with ema.average_parameters(base_model):
+                evaluate(model, data["val_loader"], data["group_tokenizers"],
+                         data["group_script_names"], data["active_groups"],
+                         device, device_type, opt["use_amp"], opt["amp_dtype"],
+                         group_script_vocab_sizes=data["group_script_vocab_sizes"])
+        else:
+            evaluate(model, data["val_loader"], data["group_tokenizers"],
+                     data["group_script_names"], data["active_groups"],
+                     device, device_type, opt["use_amp"], opt["amp_dtype"],
+                     group_script_vocab_sizes=data["group_script_vocab_sizes"])
 
         # Move optimizer state back to GPU
         for state in optimizer.state.values():
