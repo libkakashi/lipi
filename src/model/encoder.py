@@ -31,6 +31,59 @@ from src.model.blocks import (
 from src.taxonomy import NUM_GROUPS
 
 
+def _make_expert_stream(num_blocks: int, dim: int, num_experts: int,
+                        window_w: int, drop_path: float, mlp_ratio: int,
+                        layer_scale_init: float) -> nn.ModuleList:
+    """Build a stack of ExpertBlocks with alternating shift, shared across experts.
+
+    Used four times in LipiMoEEncoder: (group_local, group_wide) at
+    num_experts=num_groups and (script_local, script_wide) at
+    num_experts=total_scripts. Only window_w differs between local and wide.
+    """
+    return nn.ModuleList([
+        ExpertBlock(dim=dim, num_heads=dim // 64, num_experts=num_experts,
+                    window_h=1, window_w=window_w, shift=(i % 2 == 1),
+                    mlp_ratio=mlp_ratio, drop_path=drop_path,
+                    layer_scale_init=layer_scale_init)
+        for i in range(num_blocks)
+    ])
+
+
+def _zero_init_expert_output_projs(*block_lists: nn.ModuleList) -> None:
+    """Zero the attn.proj and mlp.fc2 of every expert in every block.
+
+    Keeps residual paths at identity at init so freshly-added experts pass
+    features through untouched until they learn to specialize. Consumes
+    no RNG — safe to insert anywhere in __init__ without affecting the
+    random-init trajectory of surrounding modules.
+    """
+    for block_list in block_lists:
+        for block in block_list:
+            for attn in block.expert_attns:
+                nn.init.zeros_(attn.proj.weight)
+                nn.init.zeros_(attn.proj.bias)
+            for mlp in block.expert_mlps:
+                nn.init.zeros_(mlp.fc2.weight)
+                nn.init.zeros_(mlp.fc2.bias)
+
+
+def _make_identity_aggregates(n: int, dim: int) -> nn.ModuleList:
+    """Build n Linear(dim*2, dim) aggregators pre-initialized to average the
+    two halves of the input (`0.5*I` on the left half, `0.5*I` on the right
+    half, zero bias). At init time each aggregator computes (local + wide) / 2.
+    """
+    aggs = nn.ModuleList()
+    for _ in range(n):
+        agg = nn.Linear(dim * 2, dim)
+        nn.init.zeros_(agg.bias)
+        with torch.no_grad():
+            agg.weight.zero_()
+            agg.weight[:, :dim] = 0.5 * torch.eye(dim)
+            agg.weight[:, dim:] = 0.5 * torch.eye(dim)
+        aggs.append(agg)
+    return aggs
+
+
 class LipiMoEEncoder(nn.Module):
     """Lipi v5: ConvStem + shared SWA + LID-1 + group experts + LID-2 + script experts.
 
@@ -246,45 +299,22 @@ class LipiMoEEncoder(nn.Module):
             nn.Linear(dim // 2, num_groups + 1),
         )
 
-        # Group expert blocks (routed by group_id, 15 experts)
-        # Init output projections near-zero so residual connections pass
-        # features through initially — experts learn to specialize gradually
-        # without destroying features that CTC needs.
-        # Both streams run at h=1; local/wide differentiate via window_w.
-        self.group_local_blocks = nn.ModuleList([
-            ExpertBlock(dim=dim, num_heads=dim // 64, num_experts=num_groups,
-                        window_h=1, window_w=local_window_w, shift=(i % 2 == 1),
-                        mlp_ratio=mlp_ratio, drop_path=group_dp,
-                        layer_scale_init=layer_scale_init)
-            for i in range(num_group_local_blocks)
-        ])
-        self.group_wide_blocks = nn.ModuleList([
-            ExpertBlock(dim=dim, num_heads=dim // 64, num_experts=num_groups,
-                        window_h=1, window_w=wide_window_w, shift=(i % 2 == 1),
-                        mlp_ratio=mlp_ratio, drop_path=group_dp,
-                        layer_scale_init=layer_scale_init)
-            for i in range(num_group_wide_blocks)
-        ])
-        for block_list in [self.group_local_blocks, self.group_wide_blocks]:
-            for block in block_list:
-                for attn in block.expert_attns:
-                    nn.init.zeros_(attn.proj.weight)
-                    nn.init.zeros_(attn.proj.bias)
-                for mlp in block.expert_mlps:
-                    nn.init.zeros_(mlp.fc2.weight)
-                    nn.init.zeros_(mlp.fc2.bias)
+        # Group expert blocks (routed by group_id, 15 experts).
+        # Local vs wide streams differ only in window_w.
+        # Output projections zero-init so residual connections pass features
+        # through at step 0 — experts specialize gradually without destroying
+        # features CTC needs.
+        self.group_local_blocks = _make_expert_stream(
+            num_group_local_blocks, dim, num_groups,
+            local_window_w, group_dp, mlp_ratio, layer_scale_init)
+        self.group_wide_blocks = _make_expert_stream(
+            num_group_wide_blocks, dim, num_groups,
+            wide_window_w, group_dp, mlp_ratio, layer_scale_init)
+        _zero_init_expert_output_projs(
+            self.group_local_blocks, self.group_wide_blocks)
 
-        # Group aggregation: concat local + wide → dim
-        # Init as average of local+wide (near-identity)
-        self.group_aggregates = nn.ModuleList()
-        for _ in range(num_groups):
-            agg = nn.Linear(dim * 2, dim)
-            nn.init.zeros_(agg.bias)
-            with torch.no_grad():
-                agg.weight.zero_()
-                agg.weight[:, :dim] = 0.5 * torch.eye(dim)
-                agg.weight[:, dim:] = 0.5 * torch.eye(dim)
-            self.group_aggregates.append(agg)
+        # Group aggregation: concat local + wide → dim, init averaging.
+        self.group_aggregates = _make_identity_aggregates(num_groups, dim)
 
         # LID-2: per-frame script classification within multi-script groups
         # One head per multi-script group
@@ -298,47 +328,20 @@ class LipiMoEEncoder(nn.Module):
                     nn.Linear(dim // 2, n_scripts),
                 )
 
-        # Script expert blocks (routed by flat script_id, 27 experts)
-        # Initialize output projections near-zero so residual connections
-        # pass features through initially (prevents randomly initialized
-        # script experts from destroying group-expert features)
-        self.script_local_blocks = nn.ModuleList([
-            ExpertBlock(dim=dim, num_heads=dim // 64,
-                        num_experts=self.total_scripts,
-                        window_h=1, window_w=local_window_w, shift=(i % 2 == 1),
-                        mlp_ratio=mlp_ratio, drop_path=script_dp,
-                        layer_scale_init=layer_scale_init)
-            for i in range(num_script_local_blocks)
-        ])
-        self.script_wide_blocks = nn.ModuleList([
-            ExpertBlock(dim=dim, num_heads=dim // 64,
-                        num_experts=self.total_scripts,
-                        window_h=1, window_w=wide_window_w, shift=(i % 2 == 1),
-                        mlp_ratio=mlp_ratio, drop_path=script_dp,
-                        layer_scale_init=layer_scale_init)
-            for i in range(num_script_wide_blocks)
-        ])
-        for block_list in [self.script_local_blocks, self.script_wide_blocks]:
-            for block in block_list:
-                for attn in block.expert_attns:
-                    nn.init.zeros_(attn.proj.weight)
-                    nn.init.zeros_(attn.proj.bias)
-                for mlp in block.expert_mlps:
-                    nn.init.zeros_(mlp.fc2.weight)
-                    nn.init.zeros_(mlp.fc2.bias)
+        # Script expert blocks (routed by flat script_id, 27 experts).
+        # Same construction pattern as group blocks; only num_experts
+        # (total_scripts) and drop-path rate differ.
+        self.script_local_blocks = _make_expert_stream(
+            num_script_local_blocks, dim, self.total_scripts,
+            local_window_w, script_dp, mlp_ratio, layer_scale_init)
+        self.script_wide_blocks = _make_expert_stream(
+            num_script_wide_blocks, dim, self.total_scripts,
+            wide_window_w, script_dp, mlp_ratio, layer_scale_init)
+        _zero_init_expert_output_projs(
+            self.script_local_blocks, self.script_wide_blocks)
 
-        # Script aggregation: concat local + wide → dim
-        # Initialize as near-identity (average of local+wide) so untrained
-        # script experts pass features through without destroying them
-        self.script_aggregates = nn.ModuleList()
-        for _ in range(self.total_scripts):
-            agg = nn.Linear(dim * 2, dim)
-            nn.init.zeros_(agg.bias)
-            with torch.no_grad():
-                agg.weight.zero_()
-                agg.weight[:, :dim] = 0.5 * torch.eye(dim)
-                agg.weight[:, dim:] = 0.5 * torch.eye(dim)
-            self.script_aggregates.append(agg)
+        # Script aggregation.
+        self.script_aggregates = _make_identity_aggregates(self.total_scripts, dim)
 
         # Output
         self.enc_out_dim = dim
@@ -353,6 +356,57 @@ class LipiMoEEncoder(nn.Module):
             )
             for g in range(num_groups)
         ])
+
+    def _route_expert_stage(
+        self,
+        x_in: Tensor,
+        ids_2d: Tensor,
+        ids_lens_cpu: list,
+        num_stages: int,
+        local_blocks: nn.ModuleList,
+        wide_blocks: nn.ModuleList,
+        aggregates: nn.ModuleList,
+    ) -> Tensor:
+        """Route each (b, t) frame to its expert (indexed by ids_2d[b, t]),
+        run it through both the local and wide expert-block stacks, then
+        aggregate the two streams via the per-expert aggregator Linear.
+
+        Both group-experts and script-experts stages share this exact
+        shape — iterate expert-id 0..num_stages, collect its frames, run
+        local + wide, concat + aggregate, scatter back.
+
+        Args:
+            x_in:         (B, T, d) input features.
+            ids_2d:       (B, T) per-frame expert id (-1 or >=num_stages skipped).
+            ids_lens_cpu: (B, num_stages) Python list — pre-transferred counts
+                          so the outer loop can skip empty experts without
+                          a GPU→CPU sync.
+            num_stages:   number of experts (num_groups or total_scripts).
+        """
+        B, w, _ = x_in.shape
+        x_out = torch.zeros_like(x_in)
+        for s in range(num_stages):
+            # Skip without a sync — checks the pre-transferred CPU list.
+            if not any(ids_lens_cpu[b][s] > 0 for b in range(B)):
+                continue
+            mask_s = (ids_2d == s)
+            batch_x, batch_info = _collect_segments(x_in, mask_s)
+            if batch_x is None:
+                continue
+            max_len = batch_x.shape[1]
+
+            local = batch_x
+            for block in local_blocks:
+                local = _run_expert_block(block, local, s, 1, max_len)
+
+            wide = batch_x
+            for block in wide_blocks:
+                wide = _run_expert_block(block, wide, s, 1, max_len)
+
+            comb = torch.cat([local, wide], dim=-1)
+            agg = aggregates[s](comb)
+            _scatter_segments(x_out, agg, mask_s, batch_info)
+        return x_out
 
     def _get_flat_script_ids(self, group_ids, script_ids):
         """Convert (group_id, local_script_id) pairs to flat script indices.
@@ -452,33 +506,14 @@ class LipiMoEEncoder(nn.Module):
         # group are padded and processed in one batched call per expert.
         # =====================================================================
 
-        x_after_group = torch.zeros(B, w, d, device=x.device, dtype=x.dtype)
-
         # One upfront sync: per-sample per-group frame counts.
         group_lens_cpu = _per_sample_key_lens(
             frame_groups, self.num_groups).tolist()
 
-        for g in range(self.num_groups):
-            # Skip without a sync: checks a pre-transferred Python list.
-            if not any(group_lens_cpu[b][g] > 0 for b in range(B)):
-                continue
-            mask_g = (frame_groups == g)  # (B, w)
-            batch_x, batch_info = _collect_segments(x, mask_g)
-            if batch_x is None:
-                continue
-            max_len = batch_x.shape[1]
-
-            local = batch_x
-            for block in self.group_local_blocks:
-                local = _run_expert_block(block, local, g, 1, max_len)
-
-            wide = batch_x
-            for block in self.group_wide_blocks:
-                wide = _run_expert_block(block, wide, g, 1, max_len)
-
-            comb = torch.cat([local, wide], dim=-1)
-            agg = self.group_aggregates[g](comb)
-            _scatter_segments(x_after_group, agg, mask_g, batch_info)
+        x_after_group = self._route_expert_stage(
+            x, frame_groups, group_lens_cpu, self.num_groups,
+            self.group_local_blocks, self.group_wide_blocks,
+            self.group_aggregates)
 
         # =====================================================================
         # LID-2: per-frame script classification
@@ -537,37 +572,18 @@ class LipiMoEEncoder(nn.Module):
 
         # =====================================================================
         # STAGE 2: Script expert blocks (routed per-segment by flat script_id)
+        # Same routing pattern as STAGE 1 — see _route_expert_stage.
         # =====================================================================
-
-        x_after_script = torch.zeros(B, w, d, device=x.device, dtype=x.dtype)
 
         # One upfront sync: per-sample per-script frame counts. flat_scripts
         # uses -1 for blank/unrouted, which _per_sample_key_lens filters.
         script_lens_cpu = _per_sample_key_lens(
             flat_scripts, self.total_scripts).tolist()
 
-        # Iterate by flat script-id (≤ total_scripts = 26) instead of
-        # (B, unique_scripts). Same batching pattern as group experts.
-        for s in range(self.total_scripts):
-            if not any(script_lens_cpu[b][s] > 0 for b in range(B)):
-                continue
-            mask_s = (flat_scripts == s)  # (B, w)
-            batch_x, batch_info = _collect_segments(x_after_group, mask_s)
-            if batch_x is None:
-                continue
-            max_len = batch_x.shape[1]
-
-            local = batch_x
-            for block in self.script_local_blocks:
-                local = _run_expert_block(block, local, s, 1, max_len)
-
-            wide = batch_x
-            for block in self.script_wide_blocks:
-                wide = _run_expert_block(block, wide, s, 1, max_len)
-
-            comb = torch.cat([local, wide], dim=-1)
-            agg = self.script_aggregates[s](comb)
-            _scatter_segments(x_after_script, agg, mask_s, batch_info)
+        x_after_script = self._route_expert_stage(
+            x_after_group, flat_scripts, script_lens_cpu, self.total_scripts,
+            self.script_local_blocks, self.script_wide_blocks,
+            self.script_aggregates)
 
         # =====================================================================
         # CTC heads (per-segment routing)
