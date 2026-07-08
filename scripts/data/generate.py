@@ -120,6 +120,33 @@ def style_chains(style: str) -> list:
     return [(n, *CHAINS_BY_NAME[n]) for n in STYLES[style]["chains"]]
 
 
+def apply_style_proportions(spec: str):
+    """Override STYLES proportions from 'name=frac,...' and renormalize.
+
+    Unlisted styles keep their default weight; everything is scaled to
+    sum to 1 afterwards, so partial overrides behave intuitively.
+    """
+    for part in spec.split(","):
+        name, sep, val = part.partition("=")
+        name = name.strip()
+        if not sep or name not in STYLES:
+            raise SystemExit(
+                f"--style-proportions: bad entry {part!r} "
+                f"(valid styles: {', '.join(STYLES)})")
+        try:
+            frac = float(val)
+        except ValueError:
+            raise SystemExit(f"--style-proportions: bad value in {part!r}")
+        if frac < 0:
+            raise SystemExit(f"--style-proportions: negative value in {part!r}")
+        STYLES[name]["proportion"] = frac
+    total = sum(s["proportion"] for s in STYLES.values())
+    if total <= 0:
+        raise SystemExit("--style-proportions: proportions sum to 0")
+    for s in STYLES.values():
+        s["proportion"] /= total
+
+
 def filter_fonts_by_style(fonts: list[str], style: str) -> list[str]:
     """Filter font list by style. Falls back to full list if too few matches.
 
@@ -859,6 +886,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-width", type=int, default=2048)
     parser.add_argument("--punct-prob", type=float, default=0.15,
                         help="Probability of mixing punctuation/numbers into a word (default: 0.15)")
+    parser.add_argument("--style-proportions", type=str, default=None,
+                        help="Override style mix, e.g. "
+                             "'printed=0.5,handwritten=0.15,signage=0.1,"
+                             "clean=0.1,degraded=0.15'. Unlisted styles "
+                             "keep their default; values are renormalized "
+                             "to sum to 1. Tune toward the deployment "
+                             "domain (document-heavy → raise printed).")
     parser.add_argument("--mixed-ratio", type=float, default=0.6,
                         help="Fraction of lines that are mixed-script (default: 0.6)")
     parser.add_argument("--include-chars", action="store_true")
@@ -1494,6 +1528,8 @@ def main():
     shard_dir.mkdir(parents=True, exist_ok=True)
 
     # Resolve styles
+    if args.style_proportions:
+        apply_style_proportions(args.style_proportions)
     if args.style == "all":
         styles_to_gen = list(STYLES.keys())
         style_desc = ', '.join(f'{s} ({STYLES[s]["proportion"]:.0%})' for s in styles_to_gen)
