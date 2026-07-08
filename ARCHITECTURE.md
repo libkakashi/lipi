@@ -223,28 +223,52 @@ Active path is ~6.5M params, ~1.7 GFLOPs at W=128.
 
 ```
 src/
+  taxonomy.py           SCRIPTS, GROUPS, mappings (data-only, torch-free)
   model/
     encoder.py          LipiMoEEncoder (ConvStem + shared SWA + MoE experts)
-    lid.py              SCRIPTS, GROUPS, mappings, LIDCoarse
+    blocks.py           DropPath, LayerScale, WindowedAttention, SWABlock,
+                        ExpertBlock, CTCHead, GroupCTCModule, routing helpers
+    lid.py              LIDCoarse module
   encoding/
     config.py           Codec definitions (NoFusion, Fusion, CJK, Korean)
     decompose.py        encode_text / decode_ids routing
     vocab.py            Per-script vocab building
+    renderable.py       get_renderable_chars (codec introspection)
   data/
-    fonts.py            Font discovery and script mapping
+    fonts.py            Font discovery and script mapping (logic only)
+    font_registry.py    FONT_TO_SCRIPTS / FONT_CATEGORIES data tables
     rendering.py        Word/char rendering
     word_lists.py       Word list loading
-    script_detect.py    Unicode-based script detection
+    script_detect.py    detect_script, split_by_script, cp predicates
+    augmentation.py     Image augmentation ops
+    color.py            Colorspace helpers
+    text_renderer.py    Low-level PIL / FreeType rendering
   training/
     dataloader.py       MDS streaming dataset + tokenizer building
-    losses.py           CTC + LID losses (batched by group/script)
+    losses.py           CTC + LID1 + LID2 losses (batched by group/script)
     routing.py          Frame-level label construction from segments
     eval.py             Per-group/per-script evaluation
 
 scripts/
-  train.py              Training loop (selective freeze, staged warm-start)
-  generate.py           Synthetic data generation (split_by_script, ASCII→latin)
-  migrate_checkpoint.py Checkpoint migration (13/14→15 groups)
-  benchmark.py          Standard OCR benchmarks
-  run_doctr.py          Full document OCR pipeline
+  data/                 Data prep
+    generate.py         Synthetic data generation (split_by_script, ASCII→latin)
+    convert_to_mds.py   Convert external .pt shards → MDS
+    build_word_freq.py  Word-frequency table build
+    cjk_visual_similarity.py  CJK codec visual-similarity table build
+    setup/              Source fetchers + real-dataset conversion
+  train/                Training
+    train.py            Training loop (selective freeze, staged warm-start)
+    train_lid0_probe.py Auxiliary LID probe training
+  eval/                 Checkpoint evaluation
+    eval.py             Per-group/per-script eval
+    benchmark.py        Standard OCR benchmarks
+  inference/            Deployable pipelines
+    run_doctr.py        Full document OCR pipeline
+  tools/                Analysis + one-off utilities
+    count_flops.py      FLOP counter
+    migrate_checkpoint.py  Checkpoint migration (13/14→15 groups)
+    test_punct_routing.py  Punctuation routing analysis
+    diagnose.py, merge_checkpoints.py, identify_checkpoint.py,
+    check_fonts.py, check_renders.py
+  experiments/          Experimental architectures
 ```

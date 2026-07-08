@@ -10,20 +10,20 @@ Covers ~95% of the world's literate population.
 
 ```bash
 # Setup fonts and word lists
-python scripts/setup/fonts.py
-python scripts/setup/word_lists.py
+python scripts/data/setup/fonts.py
+python scripts/data/setup/word_lists.py
 
 # Generate synthetic training data (writes MDS shards to data/shards/{train,val})
-python scripts/generate.py --scripts all --samples-per-script 50000 --out data/shards
+python scripts/data/generate.py --scripts all --samples-per-script 50000 --out data/shards
 
 # Train
-python scripts/train.py --data data/shards --epochs 30
+python scripts/train/train.py --data data/shards --epochs 30
 ```
 
 Per-script vocabularies are derived at runtime from `src/encoding/config.py`
 (no separate vocab-build step). The fusion/CJK corpora that feed those codecs
 are prebuilt in `training_data/corpora/` (regenerate with
-`scripts/build_word_freq.py` and `scripts/cjk_visual_similarity.py`).
+`scripts/data/build_word_freq.py` and `scripts/data/cjk_visual_similarity.py`).
 
 ## Project Structure
 
@@ -35,12 +35,17 @@ src/
   training/       Dataloader (MDS streaming), losses, eval, routing
 
 scripts/
-  train.py        Main training script
-  generate.py     Synthetic data generation (MDS output)
-  convert_to_mds.py  Convert external .pt shards → MDS
-  eval.py / benchmark.py  Checkpoint evaluation and OCR benchmarks
-  setup/          One-time setup (fonts, datasets, word lists)
-  tools/          Debugging and diagnostic utilities
+  data/           Data prep — generate.py (synthetic), convert_to_mds.py,
+                  build_word_freq.py, cjk_visual_similarity.py,
+                  and setup/ (fonts, word-list fetchers, real-dataset conversion)
+  train/          Training — train.py, train_lid0_probe.py
+  eval/           Checkpoint evaluation — eval.py, benchmark.py
+  inference/      Deployable pipelines — run_doctr.py
+  tools/          Analysis + one-off utilities — count_flops.py,
+                  migrate_checkpoint.py, test_punct_routing.py, diagnose.py,
+                  identify_checkpoint.py, merge_checkpoints.py, check_fonts.py,
+                  check_renders.py
+  experiments/    Experimental architectures
 
 tests/            Encoding, rendering, CJK, model-smoke, and LID tests
 ```

@@ -138,5 +138,5 @@ If after 2-3 epochs the model hasn't escaped these local minima, consider:
 - `src/training/losses.py` — per-frame LID-2, segment skip diagnostics
 - `src/training/eval.py` — per-frame routing, padding handling
 - `src/training/dataloader.py` — group label remap, padding semantics
-- `scripts/train.py` — ground truth routing, label smoothing
-- `scripts/generate.py` — clean rendering, line-level mixed data
+- `scripts/train/train.py` — ground truth routing, label smoothing
+- `scripts/data/generate.py` — clean rendering, line-level mixed data

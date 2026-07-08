@@ -56,7 +56,7 @@ def _get_sample_chars(script, n=10):
 
 skip_no_fonts = pytest.mark.skipif(
     not _has_fonts(),
-    reason="Fonts not downloaded. Run: python scripts/setup_fonts.py"
+    reason="Fonts not downloaded. Run: python scripts/data/setup/fonts.py"
 )
 
 
