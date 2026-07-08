@@ -17,7 +17,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.model.encoder import LipiMoEEncoder
 from src.taxonomy import SCRIPT_TO_GROUP, NUM_GROUPS, GROUPS

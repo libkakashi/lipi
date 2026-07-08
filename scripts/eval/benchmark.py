@@ -18,7 +18,7 @@ import torch
 import numpy as np
 from PIL import Image
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.model.encoder import LipiMoEEncoder
 from src.taxonomy import GROUPS, NUM_GROUPS, SCRIPT_TO_GROUP
