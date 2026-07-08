@@ -25,6 +25,7 @@ uv.lock
 Thumbs.db
 
 # Training artifacts
+.cache/
 checkpoints/
 wandb/
 runs/

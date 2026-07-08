@@ -3,8 +3,12 @@
 Train Lipi MoE Encoder end-to-end.
 
 Usage:
-    python scripts/train.py --data data/shards --epochs 15 --batch-size 192
+    python scripts/train.py --data data/shards --epochs 15
     python scripts/train.py --data data/shards --epochs 20 --resume checkpoints/moe/moe_epoch15.pt
+
+Batching is fully automatic: width buckets are derived from the data
+distribution and per-bucket batch sizes are measured on the actual GPU
+(cached in .cache/capacities/, self-invalidating on code/config changes).
 """
 
 import os
@@ -14,6 +18,7 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import argparse
 import sys
 import time
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -24,11 +29,11 @@ from torch.utils.data import DataLoader
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.model.encoder import LipiMoEEncoder
-from src.model.memory import estimate_pixel_budget
+from src.model.memory import find_bucket_capacities
 from src.taxonomy import SCRIPT_TO_GROUP, NUM_GROUPS, GROUPS
 from src.training.dataloader import (
-    build_script_tokenizers, collate_moe, WidthSortedBatchSampler,
-    LipiStreamingDataset,
+    build_script_tokenizers, collate_moe, BucketBatchSampler,
+    compute_bucket_edges, LipiStreamingDataset,
 )
 from src.training.losses import (
     compute_lid1_loss, compute_lid2_loss, compute_ctc_loss_segments,
@@ -76,14 +81,6 @@ def parse_args():
     parser.add_argument("--data", type=str, required=True)
     parser.add_argument("--scripts", type=str, default="all")
     parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--batch-size", type=int, default=192,
-                        help="Max batch size (actual size varies by width)")
-    parser.add_argument("--vram", type=float, default=32,
-                        help="GPU VRAM in GB (used to auto-size batches)")
-    parser.add_argument("--vram-safety", type=float, default=0.85,
-                        help="Fraction of calibrated budget to actually use. "
-                             "Lower if you see OOM batches; raise toward 1.0 "
-                             "if OOMs never fire but throughput is low.")
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--grad-accum", type=int, default=1)
     parser.add_argument("--device", type=str, default="auto")
@@ -170,7 +167,6 @@ def parse_args():
 
     # Validation
     assert args.epochs > 0, f"--epochs must be > 0, got {args.epochs}"
-    assert args.batch_size > 0, f"--batch-size must be > 0, got {args.batch_size}"
     assert args.lr > 0, f"--lr must be > 0, got {args.lr}"
     assert 0 < args.val_split < 1, f"--val-split must be in (0, 1), got {args.val_split}"
     assert args.grad_accum >= 1, f"--grad-accum must be >= 1, got {args.grad_accum}"
@@ -324,14 +320,28 @@ def load_and_prepare_data(args, device):
 
     train_widths = np.load(str(Path(train_dir) / "widths.npy"))
 
+    # Spot-check the sidecar against actual sample widths. Old shards
+    # accumulated widths in pool-completion order (a shuffled
+    # correspondence) — with static bucket shapes a misaligned sidecar
+    # puts samples in the wrong bucket, which breaks the measured
+    # capacities and OOMs. Fail loudly instead.
+    rng = np.random.default_rng(0)
+    for i in rng.choice(len(train_widths), size=min(32, len(train_widths)),
+                        replace=False):
+        actual = train_dataset._ds[int(i)]["image"].shape[2]
+        if actual != train_widths[i]:
+            raise RuntimeError(
+                f"widths.npy is misaligned with the dataset (index {i}: "
+                f"sidecar={train_widths[i]}, actual={actual}). Shards "
+                f"predate the sidecar-ordering fix — regenerate them.")
+
     # Script-balanced sampling weights (None → natural distribution)
     train_sample_weights = None
     if args.script_sample_beta >= 0:
         train_sample_weights = build_script_sample_weights(
             train_dir, args.script_sample_beta)
 
-    eval_batch_size = min(args.batch_size, 128)
-    val_loader = DataLoader(val_subset, batch_size=eval_batch_size, shuffle=True,
+    val_loader = DataLoader(val_subset, batch_size=128, shuffle=True,
                             collate_fn=collate_moe,
                             pin_memory=(device_type == "cuda"))
 
@@ -339,6 +349,7 @@ def load_and_prepare_data(args, device):
         "train_dataset": train_dataset,
         "train_widths": train_widths,
         "train_sample_weights": train_sample_weights,
+        "use_two_views": use_two_views,
         "val_loader": val_loader,
         "n_groups": n_groups,
         "active_groups": active_groups,
@@ -399,8 +410,8 @@ def build_optimizer_and_scheduler(args, model, device_type, steps_per_epoch):
 
     use_amp = device_type in ("cuda", "mps")
     if device_type == "cuda":
-        # With WidthSortedBatchSampler, shapes cluster per-bucket and
-        # torch.compile handles dynamic shapes, so cudnn autotune pays off.
+        # Already on (set before the capacity search); with static bucket
+        # shapes each of the K shapes autotunes exactly once.
         torch.backends.cudnn.benchmark = True
         torch.set_float32_matmul_precision('high')
         amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
@@ -570,7 +581,6 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
     model.train()
     steps = len(train_loader)
     n_batches = 0
-    oom_skipped = 0
 
     # Cache param split for grad clipping (avoid iterating named_parameters every step)
     shared_params = []
@@ -736,15 +746,14 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                 _forward_backward(imgs, targets, tgt_lens, gids, sids, scale=1.0,
                                   group_labels_=group_labels, segments_=segments,
                                   imgs2_=imgs2, aligned_=aligned)
-        except torch.cuda.OutOfMemoryError:
-            del imgs, targets, tgt_lens, gids, sids, group_labels, segments
-            del imgs2, aligned
-            optimizer.zero_grad(set_to_none=True)
-            torch.cuda.empty_cache()
-            oom_skipped += 1
-            print(f"  ** OOM at batch {batch_idx+1}/{steps} — "
-                  f"skipping [{oom_skipped} this epoch]", flush=True)
-            continue
+        except torch.cuda.OutOfMemoryError as e:
+            # Should be impossible: every batch uses a measured bucket
+            # shape. Fail loudly instead of skipping (skips silently bias
+            # training against wide / big-vocab batches).
+            raise RuntimeError(
+                f"OOM on measured bucket shape B={imgs.shape[0]} "
+                f"W={imgs.shape[3]} — something changed since the capacity "
+                f"measurement. Delete .cache/capacities/ to re-measure.") from e
 
         if (batch_idx + 1) % grad_accum == 0 or (batch_idx + 1) == len(train_loader):
             scaler.unscale_(base_optimizer)
@@ -847,9 +856,6 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             log_lid2_correct.zero_()
             log_lid2_total.zero_()
 
-    if oom_skipped > 0:
-        print(f"  ** OOM: {oom_skipped} batches skipped this epoch")
-
     if n_batches == 0:
         return {}
 
@@ -910,37 +916,36 @@ def main():
         print(f"Freeze mode: training {args.freeze_except} only")
         print(f"  Trainable: {trainable/1e6:.1f}M, Frozen: {frozen/1e6:.1f}M")
 
-    # Build train_loader with VRAM-estimated pixel budget
+    # Build train_loader: static (B, W) bucket shapes with measured capacities
 
     train_widths = data["train_widths"]
-    max_width = int(train_widths.max())
+    bucket_edges = compute_bucket_edges(train_widths)
 
-    # Match the VRAM calibration to the actual training forward: when
-    # ctc_weight=0 the CTC path is skipped, so the activation footprint
-    # is smaller.
-    pixel_budget = estimate_pixel_budget(
-        model, vram_gb=args.vram, compute_ctc=(args.ctc_weight != 0),
-        safety=args.vram_safety)
-    if args.consistency_weight > 0 and args.train_aug:
-        # Two-view consistency runs a second forward per batch
-        pixel_budget //= 2
-    max_batch_at_widest = pixel_budget // max_width
-    # Cap at --batch-size: pixel budget handles width scaling, but there's
-    # per-sample overhead (autograd nodes, CTC loss, routing) that doesn't
-    # scale with width. --batch-size caps the max samples in any batch.
-    max_batch_size = min(args.batch_size, max(max_batch_at_widest, 1))
+    if device_type == "cuda":
+        # Enable before the capacity search so cudnn autotune runs — and
+        # its workspace spikes get measured — on exactly the (B, W)
+        # shapes training will use.
+        torch.backends.cudnn.benchmark = True
 
-    train_batch_sampler = WidthSortedBatchSampler(
-        train_widths, max_batch_size, max_width=0,
-        pixel_budget=pixel_budget,
+    # Probe flags must match the training forward: ctc_weight=0 skips the
+    # CTC path, two-view consistency runs a second forward per batch.
+    capacities = find_bucket_capacities(
+        model, bucket_edges,
+        group_script_vocabs=data["group_script_vocab_sizes"],
+        compute_ctc=(args.ctc_weight != 0),
+        two_views=data["use_two_views"],
+        ema=args.ema_decay > 0)
+
+    train_batch_sampler = BucketBatchSampler(
+        train_widths, bucket_edges, capacities,
         sample_weights=data["train_sample_weights"])
-    batch_sizes = [len(b) for b in train_batch_sampler._batches]
-    print(f"  Batching: {len(train_batch_sampler)} batches, "
-          f"size {min(batch_sizes)}-{max(batch_sizes)} "
-          f"(max={max_batch_size}, budget={pixel_budget}px)")
+    print(f"  Batching: {len(train_batch_sampler)} batches/epoch, "
+          f"{len(bucket_edges)} static shapes: "
+          + ", ".join(f"{capacities[w]}x{w}" for w in bucket_edges))
 
     train_loader = DataLoader(data["train_dataset"], batch_sampler=train_batch_sampler,
-                              collate_fn=collate_moe,
+                              collate_fn=partial(collate_moe,
+                                                 pad_to_widths=bucket_edges),
                               num_workers=args.num_workers,
                               persistent_workers=args.num_workers > 0,
                               prefetch_factor=4 if args.num_workers > 0 else None,
@@ -981,10 +986,11 @@ def main():
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    eff_batch = f"{min(batch_sizes)}-{max(batch_sizes)}"
+    caps = [capacities[w] for w in bucket_edges]
     print(f"\n{'=' * 60}")
     print(f"TRAINING: epochs {start_epoch}-{args.epochs}, lr={args.lr}")
-    print(f"  Batch: {eff_batch} x {args.grad_accum} (pixel-budgeted)")
+    print(f"  Batch: {min(caps)}-{max(caps)} x {args.grad_accum} "
+          f"({len(bucket_edges)} static bucket shapes)")
     print(f"  Losses: CTC x{args.ctc_weight} + interCTC x{args.inter_ctc_weight} "
           f"+ LID1 x{args.lid1_weight} + LID2 x{args.lid2_weight}"
           + (f" + consistency x{args.consistency_weight}"

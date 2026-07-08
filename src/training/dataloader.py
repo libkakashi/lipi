@@ -5,6 +5,7 @@ Uses MosaicML Streaming for efficient shard-based data loading with
 automatic caching, multi-worker support, and memory-mapped I/O.
 """
 
+import bisect
 import json
 import random
 from pathlib import Path
@@ -239,16 +240,85 @@ class LipiStreamingDataset(Dataset):
 
 
 # ---------------------------------------------------------------------------
-# Dynamic batch sampler
+# Static-shape bucket batching
 # ---------------------------------------------------------------------------
 
-class WidthSortedBatchSampler(Sampler):
-    """Sort by width, budget-aware batching, shuffle batch order.
+def compute_bucket_edges(widths: np.ndarray | list[int],
+                         max_buckets: int = 16,
+                         min_gain: float = 0.005) -> list[int]:
+    """Padding-optimal bucket edges derived from the width distribution.
 
-    Images sorted by width so similar widths are batched together.
-    Each batch gets up to `max_batch_size` images, but is also capped
-    by a pixel budget (max_batch_size * max_width) so wide images
-    get smaller batches and narrow images get larger batches.
+    Exact DP over unique 4px-rounded widths: for each bucket count K the
+    edges minimizing total padded pixels, then the smallest K where
+    adding one more bucket would save less than `min_gain` of the
+    dataset's pixels. Each shape costs a cudnn autotune + torch.compile
+    specialization, so a bucket must buy real padding savings to earn
+    its keep — the distribution decides, not a flag. The last edge
+    always covers max(widths).
+    """
+    w = np.asarray(widths, dtype=np.int64)
+    w4 = (w + 3) // 4 * 4
+    uniq, counts = np.unique(w4, return_counts=True)
+    U = len(uniq)
+    if U == 1:
+        return [int(uniq[0])]
+
+    # cost[i, j]: padded-pixel waste of one bucket covering uniq[i..j],
+    # every sample padded to uniq[j].
+    n_cum = np.concatenate([[0], np.cumsum(counts)])
+    px_cum = np.concatenate([[0], np.cumsum(counts * uniq)])
+    i_idx = np.arange(U)[:, None]
+    j_idx = np.arange(U)[None, :]
+    n_ij = n_cum[j_idx + 1] - n_cum[i_idx]
+    px_ij = px_cum[j_idx + 1] - px_cum[i_idx]
+    cost = np.where(i_idx <= j_idx, uniq[j_idx] * n_ij - px_ij,
+                    np.inf).astype(np.float64)
+
+    total_px = float(px_cum[-1])
+    k_max = min(max_buckets, U)
+
+    # waste_k[j] = min waste covering uniq[0..j] with k buckets;
+    # parent_k[j] = start index of the last bucket in that optimum.
+    waste = cost[0].copy()
+    tables = [waste.copy()]
+    parents = [np.zeros(U, dtype=np.int64)]
+    for _ in range(2, k_max + 1):
+        m = np.full((U, U), np.inf)
+        m[1:, :] = waste[:-1, None] + cost[1:, :]
+        parent = m.argmin(axis=0)
+        waste = m[parent, np.arange(U)]
+        tables.append(waste.copy())
+        parents.append(parent)
+
+    K = k_max
+    for k in range(1, k_max):
+        if (tables[k - 1][-1] - tables[k][-1]) / total_px < min_gain:
+            K = k
+            break
+
+    edges = []
+    j = U - 1
+    for k in range(K, 0, -1):
+        edges.append(int(uniq[j]))
+        j = int(parents[k - 1][j]) - 1
+    return edges[::-1]
+
+
+class BucketBatchSampler(Sampler):
+    """Static-shape batches: quantile width buckets × measured batch sizes.
+
+    Each sample belongs to the smallest bucket edge >= its width; each
+    batch holds exactly `bucket_capacities[edge]` samples from one
+    bucket, so collate (padding to the edge) produces one of
+    len(bucket_edges) fixed (B_k, C, H, W_k) shapes. Static shapes are
+    what makes the measured VRAM capacities valid forever — and they let
+    cudnn.benchmark / torch.compile specialize each shape exactly once.
+
+    Batch composition reshuffles every epoch (the old width-sorted
+    sampler froze composition across epochs). Each bucket's leftover
+    partial batch rides up into the next wider bucket; the single
+    remainder at the widest edge is topped up with random extra samples
+    (any width fits there) so even it keeps a static shape.
 
     With `sample_weights`, each epoch draws len(widths) indices with
     replacement (p ∝ weights) instead of visiting every index once —
@@ -257,28 +327,24 @@ class WidthSortedBatchSampler(Sampler):
     undersampled ones rotate across epochs via the per-epoch redraw.
     """
 
-    def __init__(self, widths: list[int] | np.ndarray, max_batch_size: int,
-                 max_width: int = 0, pixel_budget: int = 0,
+    def __init__(self, widths: list[int] | np.ndarray,
+                 bucket_edges: list[int],
+                 bucket_capacities: dict[int, int],
                  sample_weights: np.ndarray | None = None):
-        self.max_batch_size = max_batch_size
-        if isinstance(widths, np.ndarray):
-            widths = widths.tolist()
-        self.widths = widths
+        self.widths = np.asarray(widths, dtype=np.int64)
+        self.edges = np.asarray(sorted(bucket_edges), dtype=np.int64)
+        assert self.widths.max() <= self.edges[-1], \
+            f"max width {self.widths.max()} exceeds last bucket edge {self.edges[-1]}"
+        self.capacities = [int(bucket_capacities[int(e)]) for e in self.edges]
+        # Smallest edge >= width (edges are right-inclusive)
+        self.bucket_of = np.searchsorted(self.edges, self.widths)
 
         self.sample_weights = None
         if sample_weights is not None:
             w = np.asarray(sample_weights, dtype=np.float64)
-            assert len(w) == len(widths), \
-                f"sample_weights length {len(w)} != widths length {len(widths)}"
+            assert len(w) == len(self.widths), \
+                f"sample_weights length {len(w)} != widths length {len(self.widths)}"
             self.sample_weights = w / w.sum()
-
-        # Pixel budget: either provided directly or derived from max batch size
-        if pixel_budget > 0:
-            self.pixel_budget = pixel_budget
-        else:
-            if max_width <= 0:
-                max_width = max(widths)
-            self.pixel_budget = max_batch_size * max_width
 
         # Pre-build batches so __len__ is accurate
         self._batches = self._build_batches(self._draw_indices())
@@ -286,35 +352,33 @@ class WidthSortedBatchSampler(Sampler):
     def _draw_indices(self):
         n = len(self.widths)
         if self.sample_weights is None:
-            return range(n)
+            return np.arange(n)
         return np.random.choice(n, size=n, replace=True, p=self.sample_weights)
 
     def _build_batches(self, indices):
-        sorted_indices = sorted(indices, key=lambda i: self.widths[i])
         batches = []
-        i = 0
-        while i < len(sorted_indices):
-            # Width of the widest image in this batch (last one, since sorted)
-            # Peek ahead to find how many fit under the budget
-            batch = [sorted_indices[i]]
-            i += 1
-            while i < len(sorted_indices) and len(batch) < self.max_batch_size:
-                w = self.widths[sorted_indices[i]]
-                # All images padded to max width in batch, so cost = (len+1) * w
-                if (len(batch) + 1) * w > self.pixel_budget:
-                    break
-                batch.append(sorted_indices[i])
-                i += 1
-            batches.append(batch)
+        buckets = self.bucket_of[indices]
+        carry = np.empty(0, dtype=np.int64)
+        for k in range(len(self.edges)):
+            idx = np.concatenate([carry, indices[buckets == k]])
+            np.random.shuffle(idx)
+            B = self.capacities[k]
+            n_full = (idx.size // B) * B
+            batches.extend(idx[i:i + B].tolist()
+                           for i in range(0, n_full, B))
+            carry = idx[n_full:]
+        if carry.size:
+            B = self.capacities[-1]
+            extra = np.random.choice(indices, size=B - carry.size,
+                                     replace=indices.size < B - carry.size)
+            batches.append(np.concatenate([carry, extra]).tolist())
+        random.shuffle(batches)
         return batches
 
     def __iter__(self):
-        if self.sample_weights is not None:
-            # Fresh weighted draw each epoch
-            self._batches = self._build_batches(self._draw_indices())
-        batches = list(self._batches)
-        random.shuffle(batches)
-        yield from batches
+        # Fresh shuffle (and weighted redraw) every epoch
+        self._batches = self._build_batches(self._draw_indices())
+        yield from self._batches
 
     def __len__(self):
         return len(self._batches)
@@ -337,8 +401,15 @@ def _pad_images_to(imgs, max_w):
     return padded
 
 
-def collate_moe(batch):
+def collate_moe(batch, pad_to_widths: list[int] | None = None):
     """Stack batch, padding images, targets, and group_labels to max size.
+
+    pad_to_widths: optional ascending list of static bucket widths. When
+    given, images and group labels pad to the smallest entry >= the
+    batch's max width (instead of the max width itself) so every batch
+    from a bucket collates to the same static shape. None keeps dynamic
+    padding (max width rounded up to a multiple of 4) — used by val/eval
+    loaders where shape variety is harmless under no_grad.
 
     Two-view batches (10-tuples from two_views datasets) additionally
     return (images2, aligned) appended to the standard 8-tuple.
@@ -351,9 +422,11 @@ def collate_moe(batch):
         imgs, targets, tgt_lens, gids, sids, labels, group_labels, segments = \
             zip(*batch)
 
-    # Pad images to max width in batch, rounded up to multiple of 4
     max_w = max(img.shape[2] for img in imgs)
-    max_w = (max_w + 3) // 4 * 4
+    if pad_to_widths is not None and max_w <= pad_to_widths[-1]:
+        max_w = pad_to_widths[bisect.bisect_left(pad_to_widths, max_w)]
+    else:
+        max_w = (max_w + 3) // 4 * 4
     padded = _pad_images_to(imgs, max_w)
 
     # Pad targets to max length in batch
