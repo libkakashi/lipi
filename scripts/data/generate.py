@@ -584,6 +584,15 @@ def save_rendered_samples(samples, primary_script, train_dir, val_dir, chunk_id)
                 tw.write(sample)
                 train_widths.append(img_np.shape[2])
 
+    # Per-chunk widths sidecars. The top-level widths.npy is assembled
+    # from these in sorted chunk order after generation, which matches
+    # LipiStreamingDataset's stream order (pool completion order does
+    # not) and survives resumed runs (existing chunks keep their file).
+    np.save(str(Path(t_dir) / "widths.npy"),
+            np.array(train_widths, dtype=np.int32))
+    np.save(str(Path(v_dir) / "widths.npy"),
+            np.array(val_widths, dtype=np.int32))
+
     return len(samples), train_widths, val_widths
 
 
@@ -893,7 +902,11 @@ def run_generation_pool(chunks, worker_fn, n_workers, label,
                         initializer=None, initargs=()):
     """Run a generation function over chunks using a multiprocessing pool.
 
-    Returns (total_done, all_train_widths, all_val_widths).
+    Returns total_done. Widths are NOT returned: results arrive in
+    completion order (imap_unordered), which does not match the sorted
+    chunk order LipiStreamingDataset reads in. Per-chunk sidecar files
+    written by save_rendered_samples are assembled after generation
+    instead (see assemble_width_sidecars).
     """
     # Estimate total: line chunks have count at c[1], char chunks at len(c[1])*c[2]
     def _est(c):
@@ -911,24 +924,42 @@ def run_generation_pool(chunks, worker_fn, n_workers, label,
 
     start = time.time()
     done = 0
-    all_train_widths = []
-    all_val_widths = []
     with Pool(processes=n_procs,
               initializer=initializer, initargs=initargs) as pool:
         if initializer:
             # Workers are initializing — first result confirms they're ready
             print(f"  Workers initialized, generating...", flush=True)
         for result in pool.imap_unordered(worker_fn, chunks):
-            _, script, n, tw, vw = result
+            _, script, n, _tw, _vw = result
             done += n
-            all_train_widths.extend(tw)
-            all_val_widths.extend(vw)
             elapsed = time.time() - start
             print(f"    total: {done}/{total_est} ({done/elapsed:.0f} img/s)", flush=True)
     elapsed = time.time() - start
     print(f"  Done: {done} {label} images in {elapsed:.0f}s "
           f"({done/max(elapsed,0.1):.0f} img/s)", flush=True)
-    return done, all_train_widths, all_val_widths
+    return done
+
+
+def assemble_width_sidecars(split_dir: Path) -> np.ndarray:
+    """Concatenate per-chunk widths.npy files in sorted chunk order.
+
+    Sorted chunk order is exactly the order LipiStreamingDataset streams
+    samples in, so index i here corresponds to dataset[i]. (Widths were
+    previously accumulated in pool completion order — a shuffled
+    correspondence — and resumed runs dropped skipped chunks' widths
+    from the top-level file entirely.)
+    """
+    parts = []
+    for chunk in sorted(split_dir.glob("chunk_*")):
+        f = chunk / "widths.npy"
+        if not f.exists():
+            raise FileNotFoundError(
+                f"{f} missing — chunk predates per-chunk width sidecars. "
+                f"Regenerate this shard directory from scratch.")
+        parts.append(np.load(str(f)))
+    if not parts:
+        return np.zeros(0, dtype=np.int32)
+    return np.concatenate(parts).astype(np.int32)
 
 
 # ---------------------------------------------------------------------------
@@ -1221,9 +1252,6 @@ def main():
     (shard_dir / "train").mkdir(parents=True, exist_ok=True)
     (shard_dir / "val").mkdir(parents=True, exist_ok=True)
 
-    all_train_widths = []
-    all_val_widths = []
-
     # Line images (mixed + single-script)
     mixed_ratio = args.mixed_ratio
     print(f"\nLine generation: {mixed_ratio:.0%} mixed, "
@@ -1235,13 +1263,11 @@ def main():
         print(f"\nResuming: {skipped} lines in existing chunks, "
               f"{sum(c[1] for c in chunks)} remaining")
     if chunks:
-        _, tw, vw = run_generation_pool(
+        run_generation_pool(
             chunks, _generate_line_batch, args.workers, "line",
             initializer=_init_line_worker,
             initargs=(style_configs, mixed_ratio, args.height,
                       args.punct_prob))
-        all_train_widths.extend(tw)
-        all_val_widths.extend(vw)
     else:
         print("All chunks exist. Done.")
 
@@ -1252,18 +1278,18 @@ def main():
         if char_chunks:
             print(f"\n  {len(char_chunks)} char chunks across "
                   f"{min(args.workers, len(char_chunks))} workers\n")
-            _, tw, vw = run_generation_pool(char_chunks, _generate_char_batch, args.workers, "char")
-            all_train_widths.extend(tw)
-            all_val_widths.extend(vw)
+            run_generation_pool(char_chunks, _generate_char_batch,
+                                args.workers, "char")
         else:
             print("  All char chunks exist.")
 
-    # Save widths for batch sampling
+    # Assemble top-level widths from per-chunk sidecars, in sorted chunk
+    # order (= dataset stream order). Covers resumed chunks too.
     print("\nSaving widths and metadata...", flush=True)
-    np.save(str(shard_dir / "train" / "widths.npy"),
-            np.array(all_train_widths, dtype=np.int32))
-    np.save(str(shard_dir / "val" / "widths.npy"),
-            np.array(all_val_widths, dtype=np.int32))
+    all_train_widths = assemble_width_sidecars(shard_dir / "train")
+    all_val_widths = assemble_width_sidecars(shard_dir / "val")
+    np.save(str(shard_dir / "train" / "widths.npy"), all_train_widths)
+    np.save(str(shard_dir / "val" / "widths.npy"), all_val_widths)
 
     # Save metadata
     active_groups = []
