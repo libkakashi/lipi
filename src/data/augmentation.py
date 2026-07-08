@@ -825,15 +825,17 @@ def colored_background(img: Image.Image) -> Image.Image:
 # Crop & boundary (imperfect text detection)
 # =========================================================================
 
-def partial_crop(img: Image.Image) -> Image.Image:
-    """Partial character cropping — real text detectors give imperfect crops.
+def partial_crop_with_transform(
+        img: Image.Image) -> tuple[Image.Image, tuple[float, float]]:
+    """partial_crop variant that also reports its x-geometry transform.
 
-    Simulates bounding boxes that are slightly too tight, cutting off
-    parts of characters at the edges. Common in IIIT5K, IC13, IC15.
+    Returns (img, (a, b)) where x_new = a * x_old + b maps source-image
+    x coordinates to output-image x coordinates, so pixel-space labels
+    (segment offsets, per-pixel group labels) can follow the content.
     """
     w, h = img.size
     if w < 8 or h < 8:
-        return img
+        return img, (1.0, 0.0)
 
     # Crop 5-15% from 1-2 random edges
     n_edges = random.choices([1, 2], weights=[0.6, 0.4])[0]
@@ -852,14 +854,25 @@ def partial_crop(img: Image.Image) -> Image.Image:
 
     cropped = img.crop((left, top, right, bottom))
     # Resize back to original dimensions
-    return cropped.resize((w, h), Image.BILINEAR)
+    a = w / (right - left)
+    return cropped.resize((w, h), Image.BILINEAR), (a, -left * a)
 
 
-def pad_with_border(img: Image.Image) -> Image.Image:
-    """Add irregular padding/border — detector bbox larger than text.
+def partial_crop(img: Image.Image) -> Image.Image:
+    """Partial character cropping — real text detectors give imperfect crops.
 
-    Opposite of partial_crop: simulates loose bounding boxes that include
-    extra background around the text. Common in real detection pipelines.
+    Simulates bounding boxes that are slightly too tight, cutting off
+    parts of characters at the edges. Common in IIIT5K, IC13, IC15.
+    """
+    return partial_crop_with_transform(img)[0]
+
+
+def pad_with_border_with_transform(
+        img: Image.Image) -> tuple[Image.Image, tuple[float, float]]:
+    """pad_with_border variant that also reports its x-geometry transform.
+
+    Returns (img, (a, b)) with x_new = a * x_old + b, matching
+    partial_crop_with_transform's convention.
     """
     w, h = img.size
     pad_frac = random.uniform(0.03, 0.12)
@@ -879,7 +892,17 @@ def pad_with_border(img: Image.Image) -> Image.Image:
     padded = Image.new("RGB", (new_w, new_h), bg)
     padded.paste(img, (pad_l, pad_t))
     # Resize back to original
-    return padded.resize((w, h), Image.BILINEAR)
+    a = w / new_w
+    return padded.resize((w, h), Image.BILINEAR), (a, pad_l * a)
+
+
+def pad_with_border(img: Image.Image) -> Image.Image:
+    """Add irregular padding/border — detector bbox larger than text.
+
+    Opposite of partial_crop: simulates loose bounding boxes that include
+    extra background around the text. Common in real detection pipelines.
+    """
+    return pad_with_border_with_transform(img)[0]
 
 
 # =========================================================================
@@ -1200,6 +1223,18 @@ def _pick_scenario(chains: list[tuple[str, list[Callable], float]]) -> list[Call
     return chains[-1][1]
 
 
+# Ops that change x-geometry and therefore invalidate pixel-space labels
+# (segment offsets, per-pixel group labels). Maps each op to a variant
+# returning (img, (a, b)) with x_new = a * x_old + b so callers can keep
+# labels aligned with the augmented image. rotation / perspective_warp /
+# wave_distortion cause small local displacements but no global shift, so
+# they are treated as x-preserving.
+X_TRANSFORM_OPS: dict[Callable, Callable] = {
+    partial_crop: partial_crop_with_transform,
+    pad_with_border: pad_with_border_with_transform,
+}
+
+
 class RandAugmentOCR:
     """Augmentation for OCR: mix of random ops and realistic scenario chains.
 
@@ -1218,17 +1253,33 @@ class RandAugmentOCR:
         self.chains = chains if chains is not None else SCENARIO_CHAINS
 
     def __call__(self, img: Image.Image) -> Image.Image:
+        return self.apply_with_transform(img)[0]
+
+    def apply_with_transform(
+            self, img: Image.Image) -> tuple[Image.Image, tuple[float, float]]:
+        """Apply augmentation, returning (img, (a, b)) with x_new = a*x_old + b.
+
+        The composed x-affine covers every applied op that shifts content
+        horizontally (X_TRANSFORM_OPS); all other ops contribute identity.
+        Callers that hold pixel-space labels must remap them by (a, b).
+        """
         if random.random() > self.p:
-            return img
+            return img, (1.0, 0.0)
 
         if self.chains and random.random() < 0.5:
             # Scenario chain: apply all ops in a realistic combination
-            chain = _pick_scenario(self.chains)
-            for op in chain:
-                img = op(img)
+            ops = _pick_scenario(self.chains)
         else:
             # Random ops: original RandAugment behavior
             ops = random.sample(self.ops, min(self.n_ops, len(self.ops)))
-            for op in ops:
+
+        a, b = 1.0, 0.0
+        for op in ops:
+            with_transform = X_TRANSFORM_OPS.get(op)
+            if with_transform is not None:
+                img, (oa, ob) = with_transform(img)
+                # Compose: x → oa*(a*x + b) + ob
+                a, b = oa * a, oa * b + ob
+            else:
                 img = op(img)
-        return img
+        return img, (a, b)

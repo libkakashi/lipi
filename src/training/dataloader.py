@@ -61,6 +61,49 @@ def build_script_tokenizers(
 
 
 # ---------------------------------------------------------------------------
+# Pixel-space label remapping under augmentation x-transforms
+# ---------------------------------------------------------------------------
+
+def shift_labels_x(labels: np.ndarray, a: float, b: float,
+                   fill: int) -> np.ndarray:
+    """Resample a per-pixel label row under x_new = a * x_old + b.
+
+    Output pixel x takes the label of source pixel (x - b) / a; pixels
+    that map outside the source get `fill` (whitespace/blank).
+    """
+    W = labels.shape[0]
+    src = np.round((np.arange(W) - b) / a).astype(np.int64)
+    valid = (src >= 0) & (src < W)
+    out = np.full_like(labels, fill)
+    out[valid] = labels[src[valid]]
+    return out
+
+
+def shift_segments_x(segments: list[dict], a: float, b: float,
+                     width: int) -> list[dict]:
+    """Map segment pixel offsets/widths under x_new = a * x_old + b.
+
+    Segments pushed entirely outside the image (partial_crop can do this
+    to edge segments) are dropped — their pixels are gone, so keeping the
+    text would train the model to hallucinate. Partially visible segments
+    keep their full text, matching partial_crop's intent that the model
+    learns to read clipped characters.
+    """
+    out = []
+    for seg in segments:
+        x0 = seg["offset"] * a + b
+        x1 = (seg["offset"] + seg["width"]) * a + b
+        x0c = max(0, int(round(x0)))
+        x1c = min(width, int(round(x1)))
+        if x1c - x0c < 1:
+            continue
+        seg["offset"] = x0c
+        seg["width"] = x1c - x0c
+        out.append(seg)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Streaming dataset
 # ---------------------------------------------------------------------------
 
@@ -85,6 +128,9 @@ class LipiStreamingDataset(Dataset):
         # baked into the shards at generation time — one fixed appearance
         # per sample forever, and ~65% of samples fully clean.)
         # All ops are size-preserving, so stored widths stay valid.
+        # Ops that shift content horizontally (partial_crop /
+        # pad_with_border) report an x-affine that __getitem__ applies to
+        # segment offsets and per-pixel group labels.
         self._aug = RandAugmentOCR(n_ops=2, p=augment_p) if augment else None
 
         local_path = Path(local)
@@ -115,9 +161,13 @@ class LipiStreamingDataset(Dataset):
         sample = self._ds[idx]
 
         img_np = sample["image"]                            # (3, 32, W) uint8
+        xa, xb = 1.0, 0.0
         if self._aug is not None:
             pil = Image.fromarray(img_np.transpose(1, 2, 0))
-            pil = self._aug(pil)
+            # (xa, xb) is the composed x-geometry map of any content-shifting
+            # ops (partial_crop / pad_with_border): x_new = xa * x_old + xb.
+            # Pixel-space labels below are remapped to follow the content.
+            pil, (xa, xb) = self._aug.apply_with_transform(pil)
             img_np = np.asarray(pil, dtype=np.uint8).transpose(2, 0, 1)
         img = torch.from_numpy(img_np.copy())              # (3, 32, W) uint8
         label = sample["label"]                             # str
@@ -134,6 +184,8 @@ class LipiStreamingDataset(Dataset):
         # Per-pixel group labels → remap to local group IDs
         # Blank pixels (NUM_GROUPS) must stay as NUM_GROUPS, not become 0
         gl = sample["group_labels"].copy()
+        if (xa, xb) != (1.0, 0.0):
+            gl = shift_labels_x(gl, xa, xb, fill=NUM_GROUPS)
         remapped = np.full_like(gl, NUM_GROUPS)  # default to blank
         for gid_global, gid_local in self._global_to_local_group.items():
             remapped[gl == gid_global] = gid_local
@@ -141,6 +193,8 @@ class LipiStreamingDataset(Dataset):
 
         # Segments: per-word metadata for mixed-script CTC loss
         segments = json.loads(sample["segments"])
+        if (xa, xb) != (1.0, 0.0):
+            segments = shift_segments_x(segments, xa, xb, img_np.shape[2])
         for seg in segments:
             seg["group_id"] = self._global_to_local_group.get(seg["group_id"], NUM_GROUPS)
             seg["script_id"] = self._global_sid_to_local.get(seg["script_id"], 0)
