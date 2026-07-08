@@ -23,14 +23,11 @@ from src.encoding.decompose import encode_text as _encode_text, script_vocab_siz
 # Cache encoded token sequences — segments repeat the same (text, script)
 # pairs across batches (e.g. char-level data uses same 1-char texts), and
 # encode_text is pure-Python with unicode normalization and codec lookups.
-# Cache size 100K fits typical dedup factor of 10-100x.
+# Cache size 100K fits typical dedup factor of 10-100x. Returns a tuple
+# so the lru_cache can hold it; callers do list(...) if they need mutation.
 @functools.lru_cache(maxsize=100_000)
 def _encode_text_cached(text: str, script: str) -> tuple:
     return tuple(_encode_text(text, script))
-
-
-def encode_text(text: str, script: str) -> list:
-    return list(_encode_text_cached(text, script))
 
 
 def _ctc_loss_pure(
@@ -193,7 +190,7 @@ def compute_ctc_loss_segments(
             if not script_name:
                 skipped_no_script += 1
                 continue
-            ids = encode_text(text, script_name)
+            ids = list(_encode_text_cached(text, script_name))
             if not ids:
                 skipped_no_ids += 1
                 continue
