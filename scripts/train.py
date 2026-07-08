@@ -19,7 +19,6 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -32,7 +31,7 @@ from src.training.dataloader import (
     LipiStreamingDataset,
 )
 from src.training.losses import (
-    compute_lid1_loss, compute_ctc_loss_segments,
+    compute_lid1_loss, compute_lid2_loss, compute_ctc_loss_segments,
 )
 from src.training.routing import build_frame_labels_from_segments
 from src.training.eval import evaluate
@@ -526,24 +525,12 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
 
         # LID-2 loss: per-frame CE within multi-script groups. Skip when
         # weight is 0 or when lid2_logits_per_group is empty.
-        lid2_loss = torch.zeros(1, device=device)
         if lid2_weight != 0:
-            lid2_count = 0
-            T_lid2 = out["group_logits"].shape[1]
-            sl_for_loss = sl_frames[:, :T_lid2]
-            gl_for_loss = gl_for_model[:, :T_lid2]
-            for g_str, lid2_logits in out.get("lid2_logits_per_group", {}).items():
-                g = int(g_str)
-                g_mask = (gl_for_loss == g)
-                if not g_mask.any():
-                    continue
-                pred = lid2_logits[g_mask]
-                target = sl_for_loss[g_mask]
-                lid2_loss = lid2_loss + F.cross_entropy(
-                    pred, target, label_smoothing=0.1)
-                lid2_count += 1
-            if lid2_count > 0:
-                lid2_loss = lid2_loss / lid2_count
+            lid2_loss = compute_lid2_loss(
+                out.get("lid2_logits_per_group", {}),
+                gl_for_model[:, :T], sl_frames[:, :T])
+        else:
+            lid2_loss = torch.zeros(1, device=device)
 
         loss = (ctc_weight * ctc_loss
                 + lid1_weight * lid1_loss.float()

@@ -6,9 +6,8 @@ Each loss function takes explicit inputs and returns a scalar tensor.
 
 Provides:
   - compute_lid1_loss: per-frame group classification (cross-entropy)
+  - compute_lid2_loss: per-frame script classification within multi-script groups
   - compute_ctc_loss_segments: per-segment CTC, batched by (group, script)
-
-(LID-2 script cross-entropy is computed inline in the training loop.)
 """
 
 import functools
@@ -110,6 +109,37 @@ def compute_lid1_loss(
     else:
         frame_labels = true_group_ids
     return ce_loss_fn(group_logits.reshape(B * T, G), frame_labels.reshape(B * T))
+
+
+def compute_lid2_loss(
+    lid2_logits_per_group: dict,
+    frame_group_ids: Tensor,
+    frame_script_ids: Tensor,
+    label_smoothing: float = 0.1,
+) -> Tensor:
+    """LID-2 per-frame script cross-entropy within multi-script groups.
+
+    Averages cross-entropy across the multi-script groups that have any
+    frames present in the batch. Returns a zero scalar if none do.
+
+    lid2_logits_per_group: {group_id_str: (B, T, num_scripts_in_group)}.
+    frame_group_ids / frame_script_ids: (B, T) — pre-truncated to match T.
+    """
+    device = frame_group_ids.device
+    total = torch.zeros(1, device=device)
+    n = 0
+    for g_str, lid2_logits in lid2_logits_per_group.items():
+        g = int(g_str)
+        mask = (frame_group_ids == g)
+        if not mask.any():
+            continue
+        total = total + F.cross_entropy(
+            lid2_logits[mask], frame_script_ids[mask],
+            label_smoothing=label_smoothing)
+        n += 1
+    if n > 0:
+        total = total / n
+    return total
 
 
 def compute_ctc_loss_segments(
