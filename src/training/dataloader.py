@@ -17,7 +17,9 @@ from torch.utils.data import Dataset, Sampler
 from streaming import Stream, StreamingDataset
 
 from src.taxonomy import SCRIPT_TO_GROUP, SCRIPT_TO_ID, GROUP_TO_ID, NUM_GROUPS
-from src.data.augmentation import RandAugmentOCR
+from src.data.augmentation import (
+    AUGMENT_OPS, SCENARIO_CHAINS, X_TRANSFORM_OPS, RandAugmentOCR,
+)
 from src.encoding.decompose import encode_text, script_vocab_size
 
 
@@ -122,6 +124,7 @@ class LipiStreamingDataset(Dataset):
         active_groups: list[str],
         augment: bool = False,
         augment_p: float = 0.75,
+        two_views: bool = False,
     ):
         # Train-time augmentation: shards store clean renders and each
         # epoch sees a fresh degradation. (Previously augmentation was
@@ -132,6 +135,22 @@ class LipiStreamingDataset(Dataset):
         # pad_with_border) report an x-affine that __getitem__ applies to
         # segment offsets and per-pixel group labels.
         self._aug = RandAugmentOCR(n_ops=2, p=augment_p) if augment else None
+
+        # Two-view mode (consistency regularization): each sample also
+        # returns a second, independently augmented view of the same
+        # clean render. View 2 uses only x-preserving ops so its frames
+        # align with view 1 whenever view 1's transform is identity —
+        # the returned `aligned` flag gates the consistency loss.
+        self._aug2 = None
+        if augment and two_views:
+            safe_ops = [op for op in AUGMENT_OPS
+                        if op not in X_TRANSFORM_OPS]
+            safe_chains = [
+                (name, [op for op in ops if op not in X_TRANSFORM_OPS], w)
+                for name, ops, w in SCENARIO_CHAINS
+            ]
+            self._aug2 = RandAugmentOCR(n_ops=2, p=augment_p,
+                                        ops=safe_ops, chains=safe_chains)
 
         local_path = Path(local)
         # Support both flat MDS dirs and dirs with chunk_* sub-directories
@@ -160,16 +179,25 @@ class LipiStreamingDataset(Dataset):
     def __getitem__(self, idx):
         sample = self._ds[idx]
 
-        img_np = sample["image"]                            # (3, 32, W) uint8
+        raw_np = sample["image"]                            # (3, 32, W) uint8
+        img_np = raw_np
         xa, xb = 1.0, 0.0
         if self._aug is not None:
-            pil = Image.fromarray(img_np.transpose(1, 2, 0))
+            pil = Image.fromarray(raw_np.transpose(1, 2, 0))
             # (xa, xb) is the composed x-geometry map of any content-shifting
             # ops (partial_crop / pad_with_border): x_new = xa * x_old + xb.
             # Pixel-space labels below are remapped to follow the content.
             pil, (xa, xb) = self._aug.apply_with_transform(pil)
             img_np = np.asarray(pil, dtype=np.uint8).transpose(2, 0, 1)
         img = torch.from_numpy(img_np.copy())              # (3, 32, W) uint8
+
+        # Second view for consistency training (x-preserving ops only)
+        img2 = None
+        if self._aug2 is not None:
+            pil2 = Image.fromarray(raw_np.transpose(1, 2, 0))
+            pil2 = self._aug2(pil2)
+            img2 = torch.from_numpy(
+                np.asarray(pil2, dtype=np.uint8).transpose(2, 0, 1).copy())
         label = sample["label"]                             # str
         global_sid = sample["script_id"]                    # int
         global_gid = sample["group_id"]                     # int
@@ -199,10 +227,15 @@ class LipiStreamingDataset(Dataset):
             seg["group_id"] = self._global_to_local_group.get(seg["group_id"], NUM_GROUPS)
             seg["script_id"] = self._global_sid_to_local.get(seg["script_id"], 0)
 
-        return (img, tids, tlen,
+        base = (img, tids, tlen,
                 torch.tensor(local_gid, dtype=torch.long),
                 torch.tensor(local_sid, dtype=torch.long),
                 label, group_labels, segments)
+        if self._aug2 is None:
+            return base
+        # Two-view mode: view 2 is x-preserving, so the pair is aligned
+        # frame-for-frame iff view 1's x-transform was identity.
+        return base + (img2, (xa, xb) == (1.0, 0.0))
 
 
 # ---------------------------------------------------------------------------
@@ -291,13 +324,8 @@ class WidthSortedBatchSampler(Sampler):
 # Collate
 # ---------------------------------------------------------------------------
 
-def collate_moe(batch):
-    """Stack batch, padding images, targets, and group_labels to max size."""
-    imgs, targets, tgt_lens, gids, sids, labels, group_labels, segments = zip(*batch)
-
-    # Pad images to max width in batch, rounded up to multiple of 4
-    max_w = max(img.shape[2] for img in imgs)
-    max_w = (max_w + 3) // 4 * 4
+def _pad_images_to(imgs, max_w):
+    """Right-pad each (C, H, W) image with zeros to width max_w."""
     padded = []
     for img in imgs:
         w = img.shape[2]
@@ -306,6 +334,27 @@ def collate_moe(batch):
                               dtype=img.dtype)
             img = torch.cat([img, pad], dim=2)
         padded.append(img)
+    return padded
+
+
+def collate_moe(batch):
+    """Stack batch, padding images, targets, and group_labels to max size.
+
+    Two-view batches (10-tuples from two_views datasets) additionally
+    return (images2, aligned) appended to the standard 8-tuple.
+    """
+    two_views = len(batch[0]) == 10
+    if two_views:
+        (imgs, targets, tgt_lens, gids, sids, labels, group_labels,
+         segments, imgs2, aligneds) = zip(*batch)
+    else:
+        imgs, targets, tgt_lens, gids, sids, labels, group_labels, segments = \
+            zip(*batch)
+
+    # Pad images to max width in batch, rounded up to multiple of 4
+    max_w = max(img.shape[2] for img in imgs)
+    max_w = (max_w + 3) // 4 * 4
+    padded = _pad_images_to(imgs, max_w)
 
     # Pad targets to max length in batch
     max_tgt = max(t.shape[0] for t in targets)
@@ -328,6 +377,11 @@ def collate_moe(batch):
         else:
             padded_gl.append(gl[:max_w])
 
-    return (torch.stack(padded), torch.stack(padded_tgt), torch.stack(tgt_lens),
+    base = (torch.stack(padded), torch.stack(padded_tgt), torch.stack(tgt_lens),
             torch.stack(gids), torch.stack(sids), list(labels),
             torch.stack(padded_gl), list(segments))
+    if not two_views:
+        return base
+    padded2 = _pad_images_to(imgs2, max_w)
+    return base + (torch.stack(padded2),
+                   torch.tensor(aligneds, dtype=torch.bool))

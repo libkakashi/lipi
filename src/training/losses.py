@@ -8,6 +8,7 @@ Provides:
   - compute_lid1_loss: per-frame group classification (cross-entropy)
   - compute_lid2_loss: per-frame script classification within multi-script groups
   - compute_ctc_loss_segments: per-segment CTC, batched by (group, script)
+  - compute_consistency_loss: symmetric KL between two augmented views
 """
 
 import functools
@@ -136,6 +137,76 @@ def compute_lid2_loss(
         n += 1
     if n > 0:
         total = total / n
+    return total
+
+
+def _sym_kl(logits_a: Tensor, logits_b: Tensor) -> Tensor:
+    """Symmetric KL between two batches of logits over the last dim."""
+    lp_a = F.log_softmax(logits_a.float(), dim=-1)
+    lp_b = F.log_softmax(logits_b.float(), dim=-1)
+    return 0.5 * (
+        F.kl_div(lp_a, lp_b, log_target=True, reduction="batchmean")
+        + F.kl_div(lp_b, lp_a, log_target=True, reduction="batchmean"))
+
+
+def compute_consistency_loss(
+    logits1: Tensor | None,     # (B, T, max_vocab) view 1, or None to skip CTC term
+    logits2: Tensor | None,     # (B, T, max_vocab) view 2
+    group_logits1: Tensor,      # (B, T, num_groups+1) view 1
+    group_logits2: Tensor,      # (B, T, num_groups+1) view 2
+    flat_scripts: Tensor,       # (B, T) GT flat script routing (-1 blank)
+    gl_frames: Tensor,          # (B, T) LID-1 CE targets (-100 padding)
+    aligned: Tensor,            # (B,) bool — views geometrically aligned
+    group_script_vocabs: list[list[int]],
+) -> Tensor:
+    """Two-view consistency: symmetric KL between augmented views.
+
+    Optimizes the robustness objective directly — the same clean render
+    under two different degradations must produce the same posteriors,
+    not merely the correct label on each. Applied to per-frame LID-1
+    distributions (non-padding frames) and per-frame CTC distributions
+    (segment frames, per-script vocab slice). Samples whose view-1
+    x-geometry was shifted by augmentation (aligned=False) are skipped —
+    their frames don't correspond.
+
+    Averages the LID term and per-script CTC terms.
+    """
+    device = group_logits1.device
+    total = torch.zeros(1, device=device)
+    n_terms = 0
+
+    a_mask = aligned[:, None]  # (B, 1) broadcast over T
+
+    # LID-1 consistency over real (non-padding) frames
+    T = group_logits1.shape[1]
+    lid_mask = (gl_frames[:, :T] >= 0) & a_mask
+    if lid_mask.any():
+        total = total + _sym_kl(group_logits1[lid_mask],
+                                group_logits2[lid_mask])
+        n_terms += 1
+
+    # CTC consistency per present script, over that script's vocab slice
+    # (logits are zero-padded past each script's vocab — comparing the
+    # full max_vocab width would let the padding dilute the KL).
+    if logits1 is not None and logits2 is not None:
+        flat_vocabs = [vs for vs_list in group_script_vocabs for vs in vs_list]
+        fs = torch.where(a_mask, flat_scripts, torch.full_like(flat_scripts, -1))
+        # One sync for all per-script counts
+        counts = torch.zeros(len(flat_vocabs), dtype=torch.long, device=device)
+        valid = fs >= 0
+        counts.scatter_add_(0, fs[valid].reshape(-1),
+                            torch.ones_like(fs[valid].reshape(-1)))
+        counts = counts.tolist()
+        for fid, n in enumerate(counts):
+            if n == 0:
+                continue
+            m = (fs == fid)
+            vs = flat_vocabs[fid]
+            total = total + _sym_kl(logits1[m][:, :vs], logits2[m][:, :vs])
+            n_terms += 1
+
+    if n_terms > 0:
+        total = total / n_terms
     return total
 
 

@@ -32,6 +32,7 @@ from src.training.dataloader import (
 )
 from src.training.losses import (
     compute_lid1_loss, compute_lid2_loss, compute_ctc_loss_segments,
+    compute_consistency_loss,
 )
 from src.training.ema import ModelEMA
 from src.training.routing import build_frame_labels_from_segments
@@ -130,6 +131,15 @@ def parse_args():
                              "before joint training — random features into "
                              "CTC cause blank collapse, structured features "
                              "from LID-pretraining let CTC escape cleanly.")
+    parser.add_argument("--consistency-weight", type=float, default=0.0,
+                        help="Two-view consistency: each sample is "
+                             "augmented twice and the symmetric KL between "
+                             "the views' CTC + LID-1 posteriors is added "
+                             "to the loss. Directly optimizes 'same text "
+                             "under any degradation → same output'. "
+                             "Doubles forward compute (pixel budget is "
+                             "halved automatically); requires train-aug. "
+                             "0 disables; 0.5 is a sensible starting value.")
     parser.add_argument("--inter-ctc-weight", type=float, default=0.3,
                         help="Auxiliary CTC loss on the features after the "
                              "group MoE stack (before script experts), "
@@ -282,10 +292,14 @@ def load_and_prepare_data(args, device):
     val_dir = str(data_path / "val")
     print(f"Loading MDS datasets from {data_path}/...")
 
+    use_two_views = args.consistency_weight > 0 and args.train_aug
+    if args.consistency_weight > 0 and not args.train_aug:
+        print("  WARNING: --consistency-weight needs --train-aug; disabled.")
     train_dataset = LipiStreamingDataset(
         local=train_dir, active_scripts=all_scripts,
         active_groups=active_groups,
-        augment=args.train_aug, augment_p=args.train_aug_p)
+        augment=args.train_aug, augment_p=args.train_aug_p,
+        two_views=use_two_views)
     val_dataset = LipiStreamingDataset(
         local=val_dir, active_scripts=all_scripts,
         active_groups=active_groups)  # val stays clean
@@ -551,7 +565,8 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                     detach_for_experts=False,
                     save_dir=None, args=None,
                     ema=None, ema_model=None,
-                    inter_ctc_weight=0.0, route_sample_p=0.0):
+                    inter_ctc_weight=0.0, route_sample_p=0.0,
+                    consistency_weight=0.0):
     model.train()
     steps = len(train_loader)
     n_batches = 0
@@ -574,6 +589,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
     total_loss_accum = torch.zeros(1, device=device)
     log_ctc = torch.zeros(1, device=device)
     log_ictc = torch.zeros(1, device=device)
+    log_cons = torch.zeros(1, device=device)
     log_lid1 = torch.zeros(1, device=device)
     log_lid2 = torch.zeros(1, device=device)
     log_total = torch.zeros(1, device=device)
@@ -587,7 +603,8 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
     expert_norm = 0.0
 
     def _forward_backward(imgs_, targets_, tgt_lens_, gids_, sids_, scale,
-                          group_labels_=None, segments_=None):
+                          group_labels_=None, segments_=None,
+                          imgs2_=None, aligned_=None):
         """Run forward + backward on a (sub-)batch. scale adjusts loss."""
         with torch.amp.autocast(device_type, enabled=use_amp, dtype=amp_dtype):
             # Per-frame group labels: -100 = padding (loss ignores),
@@ -606,6 +623,15 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                         compute_ctc=(ctc_weight != 0),
                         inter_ctc=(inter_ctc_weight != 0 and ctc_weight != 0),
                         route_sample_p=route_sample_p)
+
+            # Second view for consistency: GT routing, no scheduled
+            # sampling — the reference posterior view 1 is pulled toward.
+            out2 = None
+            if consistency_weight != 0 and imgs2_ is not None:
+                out2 = model(imgs2_, group_ids=gl_for_model,
+                             script_ids=sl_frames,
+                             detach_for_experts=detach_for_experts,
+                             compute_ctc=(ctc_weight != 0))
 
         # LID-1 loss. Skip when weight is 0.
         T = out["group_logits"].shape[1]
@@ -644,10 +670,22 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         else:
             lid2_loss = torch.zeros(1, device=device)
 
+        # Two-view consistency: symmetric KL between the views' posteriors
+        if out2 is not None:
+            cons_loss = compute_consistency_loss(
+                out["logits"] if ctc_weight != 0 else None,
+                out2["logits"] if ctc_weight != 0 else None,
+                out["group_logits"], out2["group_logits"],
+                out2["flat_scripts"], gl_frames, aligned_,
+                group_script_vocabs)
+        else:
+            cons_loss = torch.zeros(1, device=device)
+
         loss = (ctc_weight * ctc_loss
                 + inter_ctc_weight * inter_ctc_loss
                 + lid1_weight * lid1_loss.float()
-                + lid2_weight * lid2_loss.float())
+                + lid2_weight * lid2_loss.float()
+                + consistency_weight * cons_loss.float())
 
         loss = loss * scale
         if grad_accum > 1:
@@ -659,12 +697,18 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         detached_lid2 = {
             g: lg.detach() for g, lg in out.get("lid2_logits_per_group", {}).items()
         }
-        return (ctc_loss, inter_ctc_loss, lid1_loss, lid2_loss, loss,
-                out["group_logits"].detach(), detached_lid2,
+        return (ctc_loss, inter_ctc_loss, lid1_loss, lid2_loss, cons_loss,
+                loss, out["group_logits"].detach(), detached_lid2,
                 gl_for_model.detach(), sl_frames.detach())
 
     for batch_idx, batch in enumerate(train_loader):
-        imgs, targets, tgt_lens, gids, sids, _labels, group_labels, segments = batch
+        if len(batch) == 10:  # two-view consistency batches
+            (imgs, targets, tgt_lens, gids, sids, _labels, group_labels,
+             segments, imgs2, aligned) = batch
+        else:
+            (imgs, targets, tgt_lens, gids, sids, _labels, group_labels,
+             segments) = batch
+            imgs2 = aligned = None
         if batch_idx < 5:
             print(f"    [shape] batch {batch_idx}: B={imgs.shape[0]} "
                   f"C={imgs.shape[1]} H={imgs.shape[2]} W={imgs.shape[3]}", flush=True)
@@ -679,15 +723,20 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         sids = sids.to(device, non_blocking=True)
         if group_labels is not None:
             group_labels = group_labels.to(device, non_blocking=True)
+        if imgs2 is not None:
+            imgs2 = imgs2.to(device, non_blocking=True)
+            aligned = aligned.to(device, non_blocking=True)
 
         try:
-            (ctc_loss, inter_ctc_loss, lid1_loss, lid2_loss, loss,
-             group_logits, lid2_logits,
+            (ctc_loss, inter_ctc_loss, lid1_loss, lid2_loss, cons_loss,
+             loss, group_logits, lid2_logits,
              gt_groups, gt_scripts) = \
                 _forward_backward(imgs, targets, tgt_lens, gids, sids, scale=1.0,
-                                  group_labels_=group_labels, segments_=segments)
+                                  group_labels_=group_labels, segments_=segments,
+                                  imgs2_=imgs2, aligned_=aligned)
         except torch.cuda.OutOfMemoryError:
             del imgs, targets, tgt_lens, gids, sids, group_labels, segments
+            del imgs2, aligned
             optimizer.zero_grad(set_to_none=True)
             torch.cuda.empty_cache()
             oom_skipped += 1
@@ -717,6 +766,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         total_loss_accum += loss.detach() * mult
         log_ctc += ctc_loss.detach()
         log_ictc += inter_ctc_loss.detach()
+        log_cons += cons_loss.detach()
         log_lid1 += lid1_loss.detach()
         log_lid2 += lid2_loss.detach()
         log_total += loss.detach() * mult
@@ -752,15 +802,16 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         if n_batches % log_interval == 0:
             # Batch all the per-interval counters into one GPU→CPU transfer.
             stats = torch.stack([
-                log_ctc.squeeze(), log_ictc.squeeze(), log_lid1.squeeze(),
-                log_lid2.squeeze(), log_total.squeeze(),
+                log_ctc.squeeze(), log_ictc.squeeze(), log_cons.squeeze(),
+                log_lid1.squeeze(), log_lid2.squeeze(), log_total.squeeze(),
                 log_lid1_correct.float(), log_lid1_total.float(),
                 log_lid2_correct.float(), log_lid2_total.float(),
             ]).tolist()
-            (avg_ctc, avg_ictc, avg_lid1, avg_lid2, avg_total,
+            (avg_ctc, avg_ictc, avg_cons, avg_lid1, avg_lid2, avg_total,
              lid1_c, lid1_t, lid2_c, lid2_t) = stats
             avg_ctc /= log_count
             avg_ictc /= log_count
+            avg_cons /= log_count
             avg_lid1 /= log_count
             avg_lid2 /= log_count
             avg_total /= log_count
@@ -771,10 +822,11 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             samples_per_sec = imgs.shape[0] * log_count / elapsed
             batch_str = f"{batch_idx+1}/{steps}"
             ictc_str = f"ictc {avg_ictc:.4f}  " if inter_ctc_weight != 0 else ""
+            cons_str = f"cons {avg_cons:.4f}  " if consistency_weight != 0 else ""
             print(
                 f"  [{epoch:>2}/{total_epochs}] {batch_str:>9}  "
                 f"loss {avg_total:.4f}  "
-                f"ctc {avg_ctc:.4f}  {ictc_str}"
+                f"ctc {avg_ctc:.4f}  {ictc_str}{cons_str}"
                 f"lid1 {avg_lid1:.4f}  lid2 {avg_lid2:.4f}  "
                 f"| acc {lid1_acc:5.1f}% {lid2_acc:5.1f}%  "
                 f"| {samples_per_sec:.0f} img/s  {ms_per_step:.0f}ms/step  "
@@ -783,6 +835,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             log_time = time.time()
             log_ctc.zero_()
             log_ictc.zero_()
+            log_cons.zero_()
             log_lid1.zero_()
             log_lid2.zero_()
             log_total.zero_()
@@ -866,6 +919,9 @@ def main():
     pixel_budget = estimate_pixel_budget(
         model, vram_gb=args.vram, compute_ctc=(args.ctc_weight != 0),
         safety=args.vram_safety)
+    if args.consistency_weight > 0 and args.train_aug:
+        # Two-view consistency runs a second forward per batch
+        pixel_budget //= 2
     max_batch_at_widest = pixel_budget // max_width
     # Cap at --batch-size: pixel budget handles width scaling, but there's
     # per-sample overhead (autograd nodes, CTC loss, routing) that doesn't
@@ -928,7 +984,9 @@ def main():
     print(f"TRAINING: epochs {start_epoch}-{args.epochs}, lr={args.lr}")
     print(f"  Batch: {eff_batch} x {args.grad_accum} (pixel-budgeted)")
     print(f"  Losses: CTC x{args.ctc_weight} + interCTC x{args.inter_ctc_weight} "
-          f"+ LID1 x{args.lid1_weight} + LID2 x{args.lid2_weight}")
+          f"+ LID1 x{args.lid1_weight} + LID2 x{args.lid2_weight}"
+          + (f" + consistency x{args.consistency_weight}"
+             if args.consistency_weight > 0 else ""))
     print(f"  Routing: ground truth + scheduled sampling "
           f"(0 → {args.route_sample_max} over training)")
     print(f"  Per-script vocabs: {data['group_script_vocab_sizes']}")
@@ -956,7 +1014,8 @@ def main():
             save_dir=save_dir, args=args,
             ema=ema, ema_model=base_model,
             inter_ctc_weight=args.inter_ctc_weight,
-            route_sample_p=route_p)
+            route_sample_p=route_p,
+            consistency_weight=args.consistency_weight)
 
         elapsed = time.time() - t0
         if metrics:
