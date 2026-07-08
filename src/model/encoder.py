@@ -31,6 +31,7 @@ generalizes; only the channel-wise MLP transform is per-script.
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch import Tensor
 
 from src.model.blocks import (
@@ -347,7 +348,10 @@ class LipiMoEEncoder(nn.Module):
             head = self.ctc_modules[g].heads[s]
             vs = head.vocab_size
             head_out = head(x[mask]).to(logits.dtype)  # (K, vs)
-            logits[mask, :vs] = head_out
+            # NOTE: logits[mask, :vs] = head_out silently ignores the
+            # trailing slice with a 2-D boolean mask (indexes the full
+            # (K, max_vocab) region) — pad to full width instead.
+            logits[mask] = F.pad(head_out, (0, max_vocab - vs))
         return logits
 
     def _ctc_feedback(self, inter_logits: Tensor, flat_scripts: Tensor,
