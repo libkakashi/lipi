@@ -186,7 +186,7 @@ def main():
         tensor = img_to_tensor(img).to(device)
         # Run with forced latin group routing
         B, _, _, W = tensor.shape
-        T = W // 2
+        T = W // 4
         latin_gids = torch.full((1, T), latin_gid, dtype=torch.long, device=device)
         latin_sids = torch.zeros(1, T, dtype=torch.long, device=device)
         with torch.no_grad():

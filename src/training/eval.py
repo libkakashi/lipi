@@ -52,8 +52,8 @@ def _batched_ctc_val_loss(logits, segments_batch, group_script_names,
             if not script_name:
                 continue
 
-            frame_start = seg["offset"] // 2
-            frame_end = min((seg["offset"] + seg["width"] + 1) // 2, T)
+            frame_start = seg["offset"] // 4
+            frame_end = min((seg["offset"] + seg["width"] + 3) // 4, T)
             seg_len = frame_end - frame_start
             if seg_len < 1:
                 continue
@@ -152,7 +152,7 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
             out = model(imgs, group_ids=None)
 
         T = out["group_logits"].shape[1]
-        gl_frames = group_labels[:, ::2][:, :T]
+        gl_frames = group_labels[:, ::4][:, :T]
 
         # --- LID-1 val loss ---
         lid1_l = compute_lid1_loss(out["group_logits"], gl_frames, ce_fn)
@@ -181,7 +181,7 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
                 g_lid_frame_correct[g] += (frame_preds[g_frame_mask] == g).sum().item()
 
         # --- LID-2 per-frame accuracy ---
-        T_est = imgs.shape[3] // 2
+        T_est = imgs.shape[3] // 4
         segs = batch_segments if batch_segments is not None else [[] for _ in range(B)]
         _, sl_frames = build_frame_labels_from_segments(segs, T_est, n_groups, device)
         sl_frames_gt = sl_frames[:, :T]
@@ -224,7 +224,7 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
                 img_segs = batch_segments[i]
             else:
                 img_segs = [{"group_id": true_g, "script_id": local_sid,
-                             "text": label, "width": T_logits * 2, "offset": 0}]
+                             "text": label, "width": T_logits * 4, "offset": 0}]
 
             for seg in img_segs:
                 seg_text = seg["text"]
@@ -235,8 +235,8 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
                 if not ref_s:
                     continue
 
-                frame_start = seg["offset"] // 2
-                frame_end = min((seg["offset"] + seg["width"] + 1) // 2, T_logits)
+                frame_start = seg["offset"] // 4
+                frame_end = min((seg["offset"] + seg["width"] + 3) // 4, T_logits)
                 if frame_end <= frame_start:
                     continue
 

@@ -95,7 +95,7 @@ def parse_args():
                              "multiprocessing (useful for debugging). Lower "
                              "this if you have <16 CPU cores.")
     # Model
-    parser.add_argument("--dim", type=int, default=256)
+    parser.add_argument("--dim", type=int, default=384)
     parser.add_argument("--no-compile", action="store_true")
     parser.add_argument("--ctc-weight", type=float, default=1.0,
                         help="Set to 0 to disable CTC loss. Useful for "
@@ -336,8 +336,9 @@ def resume_from_checkpoint(args, model, optimizer, base_optimizer, scaler, sched
     # Optionally drop backbone keys so they keep fresh init
     if getattr(args, 'skip_backbone_load', False):
         backbone_prefixes = (
-            "stem.", "shared_a.", "shared_b.", "shared_c.",
-            "merge_a.", "merge_b.", "merge_c.",
+            "stem.", "convA.", "convB.", "blur_ab.", "blur_bc.",
+            "swac_in_proj.", "swa_c.", "swa_d.",
+            "merge_cd.", "merge_d1.",
             "group_head.", "group_h_pool.", "lid1_attn.",
             "lid2_heads.", "norm.",
         )
@@ -491,9 +492,9 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             # Per-frame group labels: -100 = padding (loss ignores),
             # NUM_GROUPS = whitespace (learnable). For model routing,
             # both padding and whitespace should skip expert blocks.
-            T_est = imgs_.shape[3] // 2
+            T_est = imgs_.shape[3] // 4
             # LID-1 CE target: keep -100 for padding so ignore_index works
-            gl_frames = group_labels_[:, ::2][:, :T_est]
+            gl_frames = group_labels_[:, ::4][:, :T_est]
             # Model routing + CTC segment ranges: derived from segments so
             # both see identical frame boundaries.
             gl_for_model, sl_frames = build_frame_labels_from_segments(

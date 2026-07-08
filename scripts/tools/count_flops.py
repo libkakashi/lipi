@@ -45,8 +45,7 @@ def measure_flops(model, image_w: int, group_id: int, script_id: int):
 
 def build_model(mlp_ratio: int, shared_mlp_ratio: int):
     return LipiMoEEncoder(
-        dim=256,
-        stem_out_ch=128,
+        dim=384,
         mlp_ratio=mlp_ratio,
         shared_mlp_ratio=shared_mlp_ratio,
         group_script_vocab_sizes=GROUP_SCRIPT_VOCAB_SIZES,
@@ -56,7 +55,6 @@ def build_model(mlp_ratio: int, shared_mlp_ratio: int):
 def main():
     configs_to_compare = [
         ("baseline (all r=2)", 2, 2),
-        ("shared_c→4 only", 2, 2),  # handled separately below
         ("all shared r=4, experts r=2", 2, 4),
         ("all r=4", 4, 4),
     ]
@@ -66,19 +64,7 @@ def main():
 
     base_flops = None
     for label, mlp_r, shared_r in configs_to_compare:
-        if "shared_c→4" in label:
-            # Build all-r=2 model and only swap shared_c blocks to r=4
-            model = build_model(mlp_ratio=2, shared_mlp_ratio=2)
-            from src.model.encoder import SWABlock
-            new_c = torch.nn.ModuleList([
-                SWABlock(dim=256, num_heads=4, window_h=2, window_w=64,
-                         shift=(i % 2 == 1), mlp_ratio=4)
-                for i in range(2)
-            ])
-            model.shared_c = new_c
-            model.eval()
-        else:
-            model = build_model(mlp_ratio=mlp_r, shared_mlp_ratio=shared_r)
+        model = build_model(mlp_ratio=mlp_r, shared_mlp_ratio=shared_r)
 
         n_params = sum(p.numel() for p in model.parameters())
         flops = measure_flops(model, image_w=128, group_id=0, script_id=0)
@@ -101,10 +87,13 @@ def main():
     # Per-component param breakdown
     breakdown = {
         "stem": model.stem,
-        "shared_a (2 blocks)": model.shared_a,
-        "shared_b (2 blocks)": model.shared_b,
-        "shared_c (2 blocks)": model.shared_c,
-        "merge_a/b/c": [model.merge_a, model.merge_b, model.merge_c],
+        "convA (3 blocks)": model.convA,
+        "convB (3 blocks)": model.convB,
+        "blur_ab / blur_bc": [model.blur_ab, model.blur_bc],
+        "swac_in_proj + swa_c (3 blocks)":
+            [model.swac_in_proj, model.swa_c],
+        "swa_d (3 blocks)": model.swa_d,
+        "merge_cd / merge_d1": [model.merge_cd, model.merge_d1],
         "lid1_attn + group_head": [model.lid1_attn, model.group_head],
         "group experts (15 × local+wide)":
             [model.group_local_blocks, model.group_wide_blocks],
@@ -127,7 +116,7 @@ def main():
 
     # Measure FLOPs for several widths and scripts
     print("Active-path inference FLOPs (single sample):")
-    print(f"{'Width':>6} {'L=W/2':>6} {'Script':>10} {'Group':>3} "
+    print(f"{'Width':>6} {'L=W/4':>6} {'Script':>10} {'Group':>3} "
           f"{'GFLOPs':>8} {'M·L':>8}")
     print("-" * 56)
 
@@ -143,7 +132,7 @@ def main():
     ]
     for w, gid, sid, label in configs:
         flops = measure_flops(model, w, gid, sid)
-        L = w // 2
+        L = w // 4
         gflops = flops / 1e9
         per_l = flops / L / 1e6
         print(f"{w:>6} {L:>6} {label:>10} {gid:>3} "

@@ -1,22 +1,24 @@
 """
 Lipi v5 MoE Vision Encoder (from scratch — no pretrained backbone).
 
-Architecture:
-    Input: (B, 3, 32, W) — RGB
-    -> ConvStem: two plain strided convs (small RF ~5px) → (B, 128, 8, W/2)
-    -> Shared SWA-A:   2× blocks at h=8, w=16 (local features)
-    -> Patch-merge 8→4
-    -> Shared SWA-B: 2× blocks at h=4, w=32 (character-level context)
-    -> Patch-merge 4→2, proj 128→256
-    -> Shared SWA-C:   2× blocks at h=2, w=64 (multi-char script context)
-    -> LID-1 branch: pool h=2→1, lid1_attn (w=32), group classifier
-    -> Patch-merge 2→1 (CTC path only)
-    -> 1 local + 1 wide group expert block (15 experts)
-    -> Per-group aggregation (concat local + wide → dim)
-    -> LID-2: per-frame script classification (multi-script groups)
-    -> 1 local + 1 wide script expert block (27 experts)
-    -> Per-script aggregation (concat local + wide → dim)
-    -> Per-script CTC heads (T=W/2)
+New backbone (2× width downsample overall, so T = W/4):
+
+    Input: (B, 3, 32, W)
+    -> ConvStem:  conv3×3 s(2,2) 3→64 → conv3×3 s(1,1) 64→96   (16, W/2, 96)
+    -> ConvA:     3× ConvNeXt (dw7×7 + pw MLP), ch 96          (16, W/2, 96)
+    -> BlurPool s(2,1), 96→128                                 ( 8, W/2, 128)
+    -> ConvB:     3× ConvNeXt, ch 128                          ( 8, W/2, 128)
+    -> BlurPool s(2,2), 128→192  (second width stride)         ( 4, W/4, 192)
+    -> proj 192→256
+    -> SWA-C:     3× SWA block, dim 256, window 4×32           ( 4, W/4, 256)
+    -> merge h=4→2, Linear(512→384)                            ( 2, W/4, 384)
+    -> SWA-D:     3× SWA block, dim 384, window 2×64           ( 2, W/4, 384)
+    -> LID-1 branch: pool h=2→1, lid1_attn (w=32), group_head
+    -> merge h=2→1, Linear(768→384)                            ( 1, W/4, 384)
+    -> Group experts (local w=16 + wide w=64, per-group, dim=384)
+    -> LID-2 heads (multi-script groups)
+    -> Script experts (local w=16 + wide w=64, per-script, dim=384)
+    -> Per-script CTC heads (T = W/4)
 """
 
 import torch
@@ -24,7 +26,7 @@ import torch.nn as nn
 from torch import Tensor
 
 from src.model.blocks import (
-    ConvStem, SWABlock, ExpertBlock, GroupCTCModule,
+    ConvStem, ConvNeXtBlock, BlurPool2d, SWABlock, ExpertBlock, GroupCTCModule,
     _patch_merge_h, _per_sample_key_lens,
     _collect_segments, _scatter_segments, _run_expert_block,
 )
@@ -85,39 +87,47 @@ def _make_identity_aggregates(n: int, dim: int) -> nn.ModuleList:
 
 
 class LipiMoEEncoder(nn.Module):
-    """Lipi v5: ConvStem + shared SWA + LID-1 + group experts + LID-2 + script experts.
-
-    Trained from scratch (no pretrained backbone). Small-RF stem keeps
-    boundary contamination minimal before attention layers take over.
+    """Lipi v5: ConvStem + ConvNeXt(A,B) + SWA-C/D + LID-1 + group/script experts.
 
     Two-level expert routing:
       1. LID-1 classifies each frame into a script group (15 + blank). A
-         dedicated `lid1_attn` SWA block sits between shared_c and the
-         classifier so LID-1 has its own capacity for script-family
-         discrimination without forcing shared_c into a compromise
-         between family and character features.
+         dedicated `lid1_attn` SWA block sits between SWA-D output (pooled
+         to h=1) and the classifier so LID-1 has its own capacity for
+         script-family discrimination without forcing the CTC feature path
+         into a compromise between family and character features.
       2. Group expert blocks process frames per-group (local + wide streams)
       3. LID-2 classifies each frame into a script within its group
       4. Script expert blocks process frames per-script (local + wide streams)
       5. Per-script CTC heads decode characters
 
     Single-script groups skip LID-2 (only 1 script, trivially assigned).
+
+    Time downsampling: overall W is downsampled by 4× (stem s=2 then
+    BlurPool s=2 on width) so the output length is T = W/4.  This is
+    exposed as the `time_downsample` class attribute so callers can
+    compute frame offsets without hard-coding the factor.
     """
+
+    time_downsample = 4  # imgs W / time_downsample = T (output frames)
 
     def __init__(
         self,
-        dim: int = 256,
-        stem_out_ch: int = 128,
-        num_shared_a_blocks: int = 2,
-        num_shared_b_blocks: int = 2,
-        num_shared_c_blocks: int = 2,
+        dim: int = 384,
+        stem_mid_ch: int = 64,
+        stem_out_ch: int = 96,
+        convb_ch: int = 128,
+        swac_in_ch: int = 192,
+        swac_dim: int = 256,
+        num_convA_blocks: int = 3,
+        num_convB_blocks: int = 3,
+        num_swa_c_blocks: int = 3,
+        num_swa_d_blocks: int = 3,
         num_group_local_blocks: int = 1,
         num_group_wide_blocks: int = 1,
         num_script_local_blocks: int = 1,
         num_script_wide_blocks: int = 1,
-        shared_a_window_w: int = 16,
-        shared_b_window_w: int = 32,
-        shared_c_window_w: int = 64,
+        swa_c_window_w: int = 32,
+        swa_d_window_w: int = 64,
         local_window_w: int = 16,
         wide_window_w: int = 64,
         mlp_ratio: int = 4,
@@ -127,12 +137,12 @@ class LipiMoEEncoder(nn.Module):
         num_groups: int = NUM_GROUPS,
         group_script_vocab_sizes: list[list[int]] | None = None,
         group_script_names: list[list[str]] | None = None,
-        # Accepted for backward compat with checkpoints from the LID-0 era;
-        # silently ignored when rolled back.
-        num_super_groups: int | None = None,
+        **unused_kwargs,  # swallow stale kwargs from old checkpoints
     ):
         super().__init__()
-        del num_super_groups  # unused (rolled back); kept as kwarg for ckpt replay
+        # Silently drop any unknown kwargs — old checkpoint configs may still
+        # carry names like num_shared_a_blocks / num_super_groups / etc.
+        del unused_kwargs
         self.num_groups = num_groups
         self.blank_group_id = num_groups
 
@@ -161,17 +171,21 @@ class LipiMoEEncoder(nn.Module):
 
         self.config = {
             "dim": dim,
+            "stem_mid_ch": stem_mid_ch,
             "stem_out_ch": stem_out_ch,
-            "num_shared_a_blocks": num_shared_a_blocks,
-            "num_shared_b_blocks": num_shared_b_blocks,
-            "num_shared_c_blocks": num_shared_c_blocks,
+            "convb_ch": convb_ch,
+            "swac_in_ch": swac_in_ch,
+            "swac_dim": swac_dim,
+            "num_convA_blocks": num_convA_blocks,
+            "num_convB_blocks": num_convB_blocks,
+            "num_swa_c_blocks": num_swa_c_blocks,
+            "num_swa_d_blocks": num_swa_d_blocks,
             "num_group_local_blocks": num_group_local_blocks,
             "num_group_wide_blocks": num_group_wide_blocks,
             "num_script_local_blocks": num_script_local_blocks,
             "num_script_wide_blocks": num_script_wide_blocks,
-            "shared_a_window_w": shared_a_window_w,
-            "shared_b_window_w": shared_b_window_w,
-            "shared_c_window_w": shared_c_window_w,
+            "swa_c_window_w": swa_c_window_w,
+            "swa_d_window_w": swa_d_window_w,
             "local_window_w": local_window_w,
             "wide_window_w": wide_window_w,
             "mlp_ratio": mlp_ratio,
@@ -183,102 +197,98 @@ class LipiMoEEncoder(nn.Module):
             "group_script_names": group_script_names,
         }
 
-        # Drop-path schedule: linearly increase from 0 → drop_path_rate
-        # across all residual stages along a sample's path.
-        # Stages: shared_a, shared_b, shared_c,
-        # group (local/wide parallel), script (local/wide parallel).
-        n_stages = (num_shared_a_blocks + num_shared_b_blocks
-                    + num_shared_c_blocks
+        # Drop-path schedule: linear ramp from 0 → drop_path_rate across
+        # ConvA + ConvB + SWA-C + SWA-D + (group expert stage) + (script
+        # expert stage). Parallel local/wide streams share one rate per
+        # stage so residual scaling matches.
+        n_stages = (num_convA_blocks + num_convB_blocks
+                    + num_swa_c_blocks + num_swa_d_blocks
                     + max(num_group_local_blocks, num_group_wide_blocks)
                     + max(num_script_local_blocks, num_script_wide_blocks))
         dp_schedule = [drop_path_rate * i / max(n_stages - 1, 1)
                        for i in range(n_stages)]
         dp_iter = iter(dp_schedule)
 
-        # Convolutional stem: (B, 3, 32, W) → (B, stem_out_ch, 8, W/2)
-        self.stem = ConvStem(in_ch=3, out_ch=stem_out_ch)
+        # ── Stem: (B, 3, 32, W) → (B, stem_out_ch, 16, W/2) ────────────
+        self.stem = ConvStem(in_ch=3, mid_ch=stem_mid_ch, out_ch=stem_out_ch)
 
-        # Shared SWA-A at (h=8, w=W/2), dim=stem_out_ch.
-        # Window 8×16: full vertical extent × local horizontal context.
-        # Small LayerScale init (1e-4) gives near-identity at step 0
-        # without zeroing any W_out — all internal weights receive
-        # non-zero gradient immediately. Avoids the ReZero chicken-and-egg
-        # where zero-init of mlp[-1] blocks gradient to mlp[0].
-        self.shared_a = nn.ModuleList([
-            SWABlock(dim=stem_out_ch, num_heads=max(stem_out_ch // 64, 1),
-                     window_h=8, window_w=shared_a_window_w, shift=(i % 2 == 1),
-                     mlp_ratio=shared_mlp_ratio, drop_path=next(dp_iter),
-                     layer_scale_init=1e-4)
-            for i in range(num_shared_a_blocks)
+        # ── ConvA: 3× ConvNeXt @ stem_out_ch at (16, W/2) ─────────────
+        self.convA = nn.ModuleList([
+            ConvNeXtBlock(dim=stem_out_ch, mlp_ratio=shared_mlp_ratio,
+                          drop_path=next(dp_iter),
+                          layer_scale_init=1e-4)
+            for _ in range(num_convA_blocks)
         ])
 
-        # Patch-merge (h=8 → 4): concat 2 adjacent rows, project.
-        # Init as average of the two rows (near-identity).
-        self._post_stem_h = 8
-        self.merge_a = nn.Linear(stem_out_ch * 2, stem_out_ch)
-        with torch.no_grad():
-            self.merge_a.weight.zero_()
-            self.merge_a.weight[:, :stem_out_ch] = 0.5 * torch.eye(stem_out_ch)
-            self.merge_a.weight[:, stem_out_ch:] = 0.5 * torch.eye(stem_out_ch)
-            self.merge_a.bias.zero_()
+        # ── BlurPool s(2,1): 96→128 at (16, W/2) → (8, W/2) ──────────
+        self.blur_ab = BlurPool2d(stem_out_ch, convb_ch, stride=(2, 1))
 
-        # Shared SWA-B at (h=4, w=W/2), dim=stem_out_ch.
-        # Window 4×32: full vertical × medium horizontal context.
-        # Small LayerScale init (1e-4) → near-identity at step 0 while
-        # every internal weight still receives gradient.
-        self.shared_b = nn.ModuleList([
-            SWABlock(dim=stem_out_ch, num_heads=max(stem_out_ch // 64, 1),
-                     window_h=4, window_w=shared_b_window_w, shift=(i % 2 == 1),
-                     mlp_ratio=shared_mlp_ratio, drop_path=next(dp_iter),
-                     layer_scale_init=1e-4)
-            for i in range(num_shared_b_blocks)
+        # ── ConvB: 3× ConvNeXt @ convb_ch at (8, W/2) ─────────────────
+        self.convB = nn.ModuleList([
+            ConvNeXtBlock(dim=convb_ch, mlp_ratio=shared_mlp_ratio,
+                          drop_path=next(dp_iter),
+                          layer_scale_init=1e-4)
+            for _ in range(num_convB_blocks)
         ])
 
-        # Patch-merge (h=4 → 2): concat 2 adjacent rows, project to dim.
-        # Init: each output dim gets average of corresponding dims from
-        # the two input rows (zero-pads if out_dim > in_dim).
-        self.merge_b = nn.Linear(stem_out_ch * 2, dim)
-        with torch.no_grad():
-            self.merge_b.weight.zero_()
-            d_in = stem_out_ch
-            d_out = dim
-            d_copy = min(d_in, d_out)
-            self.merge_b.weight[:d_copy, :d_copy] = 0.5 * torch.eye(d_copy)
-            self.merge_b.weight[:d_copy, d_in:d_in + d_copy] = 0.5 * torch.eye(d_copy)
-            self.merge_b.bias.zero_()
+        # ── BlurPool s(2,2): 128→192 at (8, W/2) → (4, W/4) ──────────
+        # Second (and last) width stride happens here.
+        self.blur_bc = BlurPool2d(convb_ch, swac_in_ch, stride=(2, 2))
 
-        # Shared SWA-C at (h=2, w=W/2), dim.
-        # Window 2×64: full vertical × wide horizontal context for
-        # multi-character script discrimination before LID-1.
-        # Small LayerScale init (1e-4) → near-identity at step 0 while
-        # every internal weight still receives gradient.
-        self.shared_c = nn.ModuleList([
+        # ── SWA-C entry projection: swac_in_ch → swac_dim ─────────────
+        # Kept as a 1×1 conv (channel-last equivalent) so the SWA-C blocks
+        # can run at swac_dim even though BlurPool outputs swac_in_ch.
+        self.swac_in_proj = nn.Linear(swac_in_ch, swac_dim)
+
+        # ── SWA-C: 3× SWA @ swac_dim at (4, W/4), window 4×32 ─────────
+        self.swa_c = nn.ModuleList([
+            SWABlock(dim=swac_dim, num_heads=max(swac_dim // 64, 1),
+                     window_h=4, window_w=swa_c_window_w, shift=(i % 2 == 1),
+                     mlp_ratio=shared_mlp_ratio, drop_path=next(dp_iter),
+                     layer_scale_init=1e-4)
+            for i in range(num_swa_c_blocks)
+        ])
+
+        # ── merge h=4→2, dim swac_dim*2 → dim ────────────────────────
+        # Concatenates pairs of adjacent rows into a single row and
+        # projects to the SWA-D dim. Init averages the two rows into the
+        # first swac_dim output channels; extra output channels start at 0.
+        self.merge_cd = nn.Linear(swac_dim * 2, dim)
+        with torch.no_grad():
+            self.merge_cd.weight.zero_()
+            d_copy = min(swac_dim, dim)
+            self.merge_cd.weight[:d_copy, :d_copy] = 0.5 * torch.eye(d_copy)
+            self.merge_cd.weight[:d_copy, swac_dim:swac_dim + d_copy] = \
+                0.5 * torch.eye(d_copy)
+            self.merge_cd.bias.zero_()
+
+        # ── SWA-D: 3× SWA @ dim at (2, W/4), window 2×64 ─────────────
+        self.swa_d = nn.ModuleList([
             SWABlock(dim=dim, num_heads=max(dim // 64, 1),
-                     window_h=2, window_w=shared_c_window_w, shift=(i % 2 == 1),
+                     window_h=2, window_w=swa_d_window_w, shift=(i % 2 == 1),
                      mlp_ratio=shared_mlp_ratio, drop_path=next(dp_iter),
                      layer_scale_init=1e-4)
-            for i in range(num_shared_c_blocks)
+            for i in range(num_swa_d_blocks)
         ])
 
-        # Patch-merge (h=2 → 1): concat 2 rows → project. Final collapse
-        # to frame sequence before experts.
-        self.merge_c = nn.Linear(dim * 2, dim)
+        # ── merge h=2→1, dim*2 → dim (CTC path only) ──────────────────
+        # Init as average of the two rows so features pass through at
+        # step 0.
+        self.merge_d1 = nn.Linear(dim * 2, dim)
+        with torch.no_grad():
+            self.merge_d1.weight.zero_()
+            self.merge_d1.weight[:, :dim] = 0.5 * torch.eye(dim)
+            self.merge_d1.weight[:, dim:] = 0.5 * torch.eye(dim)
+            self.merge_d1.bias.zero_()
 
-        # Parallel stages share one drop-path rate per stage so local/wide
-        # streams have matched residual scaling.
+        # Parallel expert stages share one drop-path rate per stage.
         group_dp = next(dp_iter) if max(num_group_local_blocks, num_group_wide_blocks) > 0 else 0.0
         script_dp = next(dp_iter) if max(num_script_local_blocks, num_script_wide_blocks) > 0 else 0.0
 
-        # LID-1: per-frame group classification.
-        #
-        # Dedicated `lid1_attn` block sits between shared_c output (pooled
-        # to h=1) and the classifier head. Window w=32 gives LID-1
-        # horizontal context for script discrimination. Output projection
-        # is zero-init so the residual starts as identity. Can pick up
-        # multi-character script signal (e.g. punctuation-only fragments
-        # use neighbor context). Output projection is zero-init so the
-        # residual starts as identity — from a CTC-seeded checkpoint,
-        # LID-1 keeps its existing accuracy and improves from there.
+        # ── LID-1: per-frame group classification ─────────────────────
+        # Branches off SWA-D output (at h=2) before merge_d1. Pool h=2→1,
+        # run a dedicated lid1_attn block (window w=32) for LID-1's own
+        # horizontal-context capacity, then a small MLP head.
         self.group_h_pool = nn.AdaptiveAvgPool2d((1, None))
         self.lid1_attn = SWABlock(
             dim=dim, num_heads=max(dim // 64, 1),
@@ -286,9 +296,7 @@ class LipiMoEEncoder(nn.Module):
             mlp_ratio=mlp_ratio, drop_path=0.0,
             layer_scale_init=layer_scale_init,
         )
-        # Near-identity init: zero the output projections so lid1_attn
-        # starts as x + 0 = x. Preserves pre-rollback LID-1 behavior at
-        # migration time.
+        # Zero the output projections so the residual starts as identity.
         nn.init.zeros_(self.lid1_attn.attn.proj.weight)
         nn.init.zeros_(self.lid1_attn.attn.proj.bias)
         nn.init.zeros_(self.lid1_attn.mlp[-1].weight)
@@ -299,11 +307,10 @@ class LipiMoEEncoder(nn.Module):
             nn.Linear(dim // 2, num_groups + 1),
         )
 
-        # Group expert blocks (routed by group_id, 15 experts).
-        # Local vs wide streams differ only in window_w.
-        # Output projections zero-init so residual connections pass features
-        # through at step 0 — experts specialize gradually without destroying
-        # features CTC needs.
+        # ── Group expert blocks (routed by group_id) ──────────────────
+        # Local vs wide streams differ only in window_w. Output
+        # projections zero-init so residuals pass features through at
+        # step 0 — experts specialize gradually.
         self.group_local_blocks = _make_expert_stream(
             num_group_local_blocks, dim, num_groups,
             local_window_w, group_dp, mlp_ratio, layer_scale_init)
@@ -316,8 +323,7 @@ class LipiMoEEncoder(nn.Module):
         # Group aggregation: concat local + wide → dim, init averaging.
         self.group_aggregates = _make_identity_aggregates(num_groups, dim)
 
-        # LID-2: per-frame script classification within multi-script groups
-        # One head per multi-script group
+        # ── LID-2: per-frame script classification (multi-script groups)
         self.lid2_heads = nn.ModuleDict()
         for g in range(num_groups):
             n_scripts = len(group_script_vocab_sizes[g])
@@ -328,9 +334,7 @@ class LipiMoEEncoder(nn.Module):
                     nn.Linear(dim // 2, n_scripts),
                 )
 
-        # Script expert blocks (routed by flat script_id, 27 experts).
-        # Same construction pattern as group blocks; only num_experts
-        # (total_scripts) and drop-path rate differ.
+        # ── Script expert blocks (routed by flat script_id) ───────────
         self.script_local_blocks = _make_expert_stream(
             num_script_local_blocks, dim, self.total_scripts,
             local_window_w, script_dp, mlp_ratio, layer_scale_init)
@@ -418,6 +422,49 @@ class LipiMoEEncoder(nn.Module):
             flat[mask] = f
         return flat
 
+    def _run_backbone(self, images: Tensor) -> tuple[Tensor, Tensor, int]:
+        """Run stem → ConvA → BlurPool → ConvB → BlurPool → proj → SWA-C
+        → merge → SWA-D. Returns (x_swad_h2, group_logits_input, T).
+
+        x_swad_h2 has shape (B, 2*T, dim) — pre-merge_d1, feeds both the
+        LID-1 branch and merge_d1 (CTC path).
+        """
+        B = images.shape[0]
+        x = images.float() / 255.0 if images.dtype == torch.uint8 else images
+
+        # Stem: (B, 3, 32, W) → (B, stem_out_ch, 16, W/2)
+        x = self.stem(x)
+
+        # ConvA: 3× ConvNeXt in NCHW at (16, W/2)
+        for blk in self.convA:
+            x = blk(x)
+
+        # BlurPool s(2,1) 96→128: (16, W/2) → (8, W/2)
+        x = self.blur_ab(x)
+
+        # ConvB: 3× ConvNeXt at (8, W/2)
+        for blk in self.convB:
+            x = blk(x)
+
+        # BlurPool s(2,2) 128→192: (8, W/2) → (4, W/4)
+        x = self.blur_bc(x)
+
+        # SWA-C: switch to channel-last for SWA. (B, C, H, W) → (B, H*W, C).
+        _, C, h, w = x.shape  # h=4, w=W/4
+        x = x.permute(0, 2, 3, 1).reshape(B, h * w, C)
+        x = self.swac_in_proj(x)  # C → swac_dim
+        for blk in self.swa_c:
+            x = blk(x, h, w)
+
+        # merge h=4→2, swac_dim*2 → dim
+        x, h = _patch_merge_h(x, h, w, self.merge_cd)  # h=4→2
+
+        # SWA-D at (2, W/4), dim
+        for blk in self.swa_d:
+            x = blk(x, h, w)
+
+        return x, h, w
+
     def forward(
         self,
         images: Tensor,
@@ -434,53 +481,20 @@ class LipiMoEEncoder(nn.Module):
         """
         B = images.shape[0]
 
-        x = images.float() / 255.0 if images.dtype == torch.uint8 else images
-
-        # Stem: (B, 3, 32, W) → (B, stem_out_ch, 8, W/2)
-        x = self.stem(x)
-        _, C, h, w = x.shape  # h=8, w=W/2
-
-        # Shared SWA-A at (h=8, w=W/2)
-        x = x.permute(0, 2, 3, 1).reshape(B, h * w, C)
-        for blk in self.shared_a:
-            x = blk(x, h, w)
-
-        # Patch-merge 8 → 4: concat 2 adjacent rows, project.
-        assert h == self._post_stem_h, \
-            f"expected post-stem height {self._post_stem_h}, got {h}"
-        x, h = _patch_merge_h(x, h, w, self.merge_a)  # h=8→4
-
-        # Shared SWA-B at (h=4, w=W/2)
-        for blk in self.shared_b:
-            x = blk(x, h, w)
-
-        # Patch-merge 4 → 2: concat 2 adjacent rows, project to dim.
-        x, h = _patch_merge_h(x, h, w, self.merge_b)  # h=4→2
-
+        x, h, w = self._run_backbone(images)
+        # x here is post-SWA-D at (h=2, w=W/4). w is the final T.
         d = x.shape[-1]
 
-        # Shared SWA-C at (h=2, w=W/2), dim
-        for blk in self.shared_c:
-            x = blk(x, h, w)
-
-        # LID-1 branches off BEFORE the final 2→1 merge so LID-1 sees h=2
-        # features (top+bottom half of each char) and merge_c only gets
-        # CTC gradient. We pool h=2→1 for LID-1, then run `lid1_attn` to
-        # give LID-1 its own horizontal-context capacity (window w=32).
-        # The post-lid1_attn tensor feeds ONLY the classifier; merge_c /
-        # experts / CTC use the pre-lid1_attn pooled features so they
-        # aren't pulled toward script-family representation.
+        # LID-1 branch: pool h=2→1, run lid1_attn (window w=32), classify.
+        # Uses the pre-merge_d1 tensor so merge_d1 only ever sees CTC
+        # gradient.
         x_for_group = x.reshape(B, h, w, d).permute(0, 3, 1, 2)  # (B, d, 2, w)
         x_for_group = self.group_h_pool(x_for_group).squeeze(2).permute(0, 2, 1)
-        # lid1_attn output starts as identity (zero-init proj+mlp); the
-        # classifier sees the same features it did pre-rollback, plus room
-        # to grow its own context.
         x_for_group = self.lid1_attn(x_for_group, 1, w)
-        group_logits = self.group_head(x_for_group)  # (B, W/2, num_groups+1)
+        group_logits = self.group_head(x_for_group)  # (B, w, num_groups+1)
 
-        # Patch-merge 2 → 1: concat 2 rows, project to dim. Only touches
-        # the CTC path from here on.
-        x, h = _patch_merge_h(x, h, w, self.merge_c)
+        # Patch-merge 2 → 1, dim*2 → dim (CTC path only).
+        x, h = _patch_merge_h(x, h, w, self.merge_d1)
 
         # Determine per-frame group assignments
         if group_ids is not None:

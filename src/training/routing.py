@@ -19,9 +19,10 @@ def build_frame_labels_from_segments(
     """Build per-frame (group_id, script_id) labels from segment metadata.
 
     Uses the same offset→frame arithmetic as compute_ctc_loss_segments
-    (frame = pixel // 2) so model routing and CTC segment ranges agree
-    frame-for-frame. Frames outside any segment are labeled blank_group_id
-    (model skips expert processing) and script_id 0.
+    (frame = pixel // 4, matching the encoder's 4× width downsample) so
+    model routing and CTC segment ranges agree frame-for-frame. Frames
+    outside any segment are labeled blank_group_id (model skips expert
+    processing) and script_id 0.
 
     Returns:
         gl_for_model: (B, T) — group_id per frame, blank_group_id for
@@ -37,8 +38,8 @@ def build_frame_labels_from_segments(
     sl_np = np.zeros((B, T), dtype=np.int64)
     for b in range(B):
         for seg in segments_batch[b]:
-            fs = seg["offset"] // 2
-            fe = min((seg["offset"] + seg["width"] + 1) // 2, T)
+            fs = seg["offset"] // 4
+            fe = min((seg["offset"] + seg["width"] + 3) // 4, T)
             if fe <= fs:
                 continue
             gl_np[b, fs:fe] = seg["group_id"]

@@ -177,8 +177,8 @@ def compute_ctc_loss_segments(
             if not text or width_px == 0:
                 continue
 
-            frame_start = offset_px // 2
-            frame_end = min((offset_px + width_px + 1) // 2, T)
+            frame_start = offset_px // 4
+            frame_end = min((offset_px + width_px + 3) // 4, T)
             seg_len = frame_end - frame_start
             if seg_len < 1:
                 continue

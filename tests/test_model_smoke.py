@@ -16,7 +16,7 @@ def test_model_forward_pass():
 
     B, H, W = 2, 32, 64
     images = torch.randn(B, 3, H, W)
-    T = W // 2
+    T = W // 4
 
     # With ground truth group + script routing
     group_ids = torch.tensor([[0]*T, [1]*T])  # per-frame

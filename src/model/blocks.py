@@ -2,9 +2,10 @@
 Building blocks for the Lipi v5 MoE encoder.
 
 Layer modules (DropPath, LayerScale, WindowedAttention, SWABlock, ExpertBlock,
-CTCHead, GroupCTCModule, ConvStem, MLP) plus the small pure-function helpers
-(_patch_merge_h, _per_sample_key_lens, _collect_segments, _scatter_segments,
-_run_expert_block) that LipiMoEEncoder composes together.
+ConvNeXtBlock, BlurPool2d, CTCHead, GroupCTCModule, ConvStem, MLP) plus the
+small pure-function helpers (_patch_merge_h, _per_sample_key_lens,
+_collect_segments, _scatter_segments, _run_expert_block) that LipiMoEEncoder
+composes together.
 
 The encoder itself lives in encoder.py.
 """
@@ -303,27 +304,26 @@ def _patch_merge_h(x: Tensor, h: int, w: int, proj: nn.Linear) -> tuple[Tensor, 
 
 
 class ConvStem(nn.Module):
-    """Two-conv plain stem ending at dim=128. No ResBlocks.
+    """Two-conv plain stem: (B, 3, 32, W) → (B, 96, 16, W/2).
 
-    Spatial feature extraction in 2 convs (dim 3→64→out):
-        Conv 1: 3  → 64,  stride (2, 1), 3×3 kernel  →  H 32→16
-        Conv 2: 64 → out, stride (2, 2), 3×3 kernel  →  H 16→8, W→W/2
+    Spatial feature extraction in 2 convs (channels 3 → 64 → 96):
+        Conv 1: 3  → 64,  stride (2, 2), 3×3 kernel  →  H 32→16, W→W/2
+        Conv 2: 64 → 96,  stride (1, 1), 3×3 kernel  →  H 16, W/2 (no downsample)
 
-    3×3 kernels keep RF tight for clean routing boundaries:
-    after stem RF ≈ 7 px H × 5 px W.
-
-    Default out_ch=128 keeps SWA-A compute modest; capacity is added via
-    shared_mlp_ratio=4 on the attention blocks instead of widening here.
+    3×3 kernels keep RF tight for clean routing boundaries. The bulk of
+    the vertical / horizontal downsampling happens later via BlurPool
+    inside the ConvNeXt stage — the stem just prepares 96-ch features at
+    the base spatial resolution ConvA operates on.
     """
 
-    def __init__(self, in_ch: int = 3, out_ch: int = 128):
+    def __init__(self, in_ch: int = 3, mid_ch: int = 64, out_ch: int = 96):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Conv2d(in_ch, 64, kernel_size=3, stride=(2, 1),
+            nn.Conv2d(in_ch, mid_ch, kernel_size=3, stride=(2, 2),
                       padding=1, bias=False),
-            nn.GroupNorm(1, 64),
+            nn.GroupNorm(1, mid_ch),
             nn.GELU(),
-            nn.Conv2d(64, out_ch, kernel_size=3, stride=(2, 2),
+            nn.Conv2d(mid_ch, out_ch, kernel_size=3, stride=(1, 1),
                       padding=1, bias=False),
             nn.GroupNorm(1, out_ch),
             nn.GELU(),
@@ -331,6 +331,74 @@ class ConvStem(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         return self.net(x)
+
+
+class ConvNeXtBlock(nn.Module):
+    """ConvNeXt v1 block: dw 7×7 conv + LayerNorm + pw MLP (GELU) + residual.
+
+    Operates in NCHW.  Depthwise 7×7 gives ~7-px spatial context per block
+    at the current spatial resolution; the MLP mixes channels.  LayerScale +
+    DropPath on the residual branch — the block starts near-identity.
+    """
+
+    def __init__(self, dim: int, mlp_ratio: int = 4,
+                 drop_path: float = 0.0, layer_scale_init: float = 1e-4):
+        super().__init__()
+        self.dwconv = nn.Conv2d(dim, dim, kernel_size=7, padding=3, groups=dim)
+        self.norm = nn.LayerNorm(dim, eps=1e-6)
+        hidden = dim * mlp_ratio
+        self.pwconv1 = nn.Linear(dim, hidden)
+        self.act = nn.GELU()
+        self.pwconv2 = nn.Linear(hidden, dim)
+        self.ls = LayerScale(dim, layer_scale_init)
+        self.drop_path = DropPath(drop_path)
+
+    def forward(self, x: Tensor) -> Tensor:
+        # x: (B, C, H, W)
+        residual = x
+        x = self.dwconv(x)
+        # NCHW → NHWC for the LayerNorm + pw MLP (all channel-last ops)
+        x = x.permute(0, 2, 3, 1)
+        x = self.norm(x)
+        x = self.pwconv1(x)
+        x = self.act(x)
+        x = self.pwconv2(x)
+        x = self.ls(x)
+        x = x.permute(0, 3, 1, 2)
+        return residual + self.drop_path(x)
+
+
+class BlurPool2d(nn.Module):
+    """Anti-aliased strided downsampling (Zhang 2019) + optional 1×1 proj.
+
+    Depthwise 3-tap [1,2,1] low-pass filter applied *before* the stride,
+    then an optional 1×1 conv when in_ch != out_ch.  Strides can differ
+    per axis, e.g. stride=(2,1) downsamples H by 2 while keeping W the
+    same; stride=(2,2) downsamples both.
+    """
+
+    def __init__(self, in_ch: int, out_ch: int,
+                 stride: tuple[int, int] = (2, 2)):
+        super().__init__()
+        self.in_ch = in_ch
+        self.stride = stride
+        # 3-tap triangle filter, normalized to sum to 1.
+        a = torch.tensor([1., 2., 1.])
+        kernel = a[:, None] * a[None, :]
+        kernel = kernel / kernel.sum()
+        # Depthwise: (in_ch, 1, 3, 3).
+        filt = kernel.reshape(1, 1, 3, 3).repeat(in_ch, 1, 1, 1)
+        self.register_buffer("filt", filt, persistent=False)
+        if in_ch != out_ch:
+            self.proj = nn.Conv2d(in_ch, out_ch, kernel_size=1, bias=False)
+        else:
+            self.proj = nn.Identity()
+
+    def forward(self, x: Tensor) -> Tensor:
+        # F.conv2d wants the filter in x's dtype for autocast paths.
+        filt = self.filt.to(x.dtype)
+        x = F.conv2d(x, filt, stride=self.stride, padding=1, groups=self.in_ch)
+        return self.proj(x)
 
 
 class SWABlock(nn.Module):
