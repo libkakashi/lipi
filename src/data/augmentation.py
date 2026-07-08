@@ -776,7 +776,8 @@ def textured_background(img: Image.Image) -> Image.Image:
     bg_mask = _soft_bg_mask(arr, blur_radius=1.5)
 
     texture_type = random.choice([
-        "solid_color", "gradient", "perlin_noise", "stripe", "checker"
+        "solid_color", "gradient", "perlin_noise", "stripe", "checker",
+        "wood", "paper",
     ])
 
     if texture_type == "solid_color":
@@ -821,7 +822,7 @@ def textured_background(img: Image.Image) -> Image.Image:
             pattern = pattern[:, np.newaxis, np.newaxis]
         texture = c1 * pattern + c2 * (1 - pattern)
 
-    else:  # checker
+    elif texture_type == "checker":
         c1 = np.array([random.randint(80, 220) for _ in range(3)], dtype=np.float32)
         c2 = np.array([random.randint(80, 220) for _ in range(3)], dtype=np.float32)
         cell = random.randint(4, 12)
@@ -829,9 +830,106 @@ def textured_background(img: Image.Image) -> Image.Image:
         checker = ((yy // cell + xx // cell) % 2).astype(np.float32)
         texture = c1 * checker[:, :, np.newaxis] + c2 * (1 - checker[:, :, np.newaxis])
 
+    elif texture_type == "wood":
+        # Horizontal grain: low-freq noise stretched along x
+        base = np.array(random.choice([
+            (190, 150, 110), (160, 120, 85), (210, 180, 140),
+        ]), dtype=np.float32)
+        streak_h = max(2, h // 4)
+        streaks = np.random.randn(streak_h, max(2, w // 24), 1).astype(np.float32)
+        streak_img = Image.fromarray(
+            ((streaks * 30 + 128).clip(0, 255)).astype(np.uint8).squeeze(-1))
+        grain = np.array(streak_img.resize((w, h), Image.BILINEAR),
+                         dtype=np.float32) - 128
+        texture = base + grain[:, :, np.newaxis] * random.uniform(0.5, 1.2)
+
+    else:  # paper — near-white with fine grain and soft blotches
+        v = random.randint(225, 250)
+        base = np.array([v, v - random.randint(0, 8), v - random.randint(0, 14)],
+                        dtype=np.float32)
+        fine = np.random.normal(0, random.uniform(2, 5), (h, w, 1)).astype(np.float32)
+        blotch_small = np.random.randn(max(2, h // 12), max(2, w // 12), 1)
+        blotch_img = Image.fromarray(
+            ((blotch_small * 127 + 128).clip(0, 255)).astype(np.uint8).squeeze(-1))
+        blotch = (np.array(blotch_img.resize((w, h), Image.BILINEAR),
+                           dtype=np.float32) - 128) / 127.0
+        texture = base + fine + blotch[:, :, np.newaxis] * random.uniform(3, 9)
+
     texture = np.clip(texture, 0, 255)
     # Composite: background pixels get texture, text pixels stay
     result = arr * (1 - bg_mask[:, :, np.newaxis]) + texture * bg_mask[:, :, np.newaxis]
+    return Image.fromarray(np.clip(result, 0, 255).astype(np.uint8))
+
+
+_BACKGROUND_DIR = None  # resolved lazily so tests can monkeypatch
+_background_files: list | None = None
+_background_cache: dict = {}  # path → np.ndarray, capped
+_BACKGROUND_CACHE_MAX = 32
+
+
+def _load_background_files() -> list:
+    """Image files under training_data/backgrounds/ (lazy, per process)."""
+    global _background_files, _BACKGROUND_DIR
+    if _background_files is None:
+        from pathlib import Path
+        if _BACKGROUND_DIR is None:
+            _BACKGROUND_DIR = (Path(__file__).resolve().parent.parent.parent
+                               / "training_data" / "backgrounds")
+        exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+        _background_files = (
+            sorted(p for p in _BACKGROUND_DIR.rglob("*")
+                   if p.suffix.lower() in exts)
+            if _BACKGROUND_DIR.exists() else [])
+    return _background_files
+
+
+def photo_background(img: Image.Image) -> Image.Image:
+    """Real-photo background — SynthText-style compositing.
+
+    Samples a random crop from training_data/backgrounds/ (drop any
+    texture/wall/paper/storefront photos there) and composites the text
+    onto it with the soft background mask. Procedural textures can't
+    match the statistics of real surfaces; this is the classic synthetic
+    scene-text realism jump. Falls back to textured_background while the
+    bank is empty, so the op is always safe to enable.
+    """
+    files = _load_background_files()
+    if not files:
+        return textured_background(img)
+    arr = np.array(img, dtype=np.float32)
+    if _bg_is_dark(arr):
+        return img
+    h, w = arr.shape[:2]
+
+    path = random.choice(files)
+    bg_arr = _background_cache.get(path)
+    if bg_arr is None:
+        try:
+            bg_arr = np.array(Image.open(path).convert("RGB"))
+        except Exception:
+            return textured_background(img)
+        if len(_background_cache) >= _BACKGROUND_CACHE_MAX:
+            _background_cache.pop(next(iter(_background_cache)))
+        _background_cache[path] = bg_arr
+    bh, bw = bg_arr.shape[:2]
+    if bh < 8 or bw < 8:
+        return textured_background(img)
+
+    # Random crop, roughly aspect-matched, then resize to the text image
+    crop_w = random.randint(max(8, bw // 4), bw)
+    crop_h = min(bh, max(4, int(crop_w * h / w)))
+    x0 = random.randint(0, bw - crop_w)
+    y0 = random.randint(0, bh - crop_h)
+    crop = Image.fromarray(bg_arr[y0:y0 + crop_h, x0:x0 + crop_w])
+    texture = np.array(crop.resize((w, h), Image.BILINEAR), dtype=np.float32)
+
+    # Keep dark ink readable on dark textures
+    tex_lum = float(_luminance(texture).mean())
+    if tex_lum < 90:
+        texture = texture + (200.0 - tex_lum) * 0.7
+
+    mask = _soft_bg_mask(arr, blur_radius=1.5)
+    result = arr * (1 - mask[:, :, np.newaxis]) + texture * mask[:, :, np.newaxis]
     return Image.fromarray(np.clip(result, 0, 255).astype(np.uint8))
 
 
@@ -1253,7 +1351,7 @@ def adjacent_line_clutter(img: Image.Image) -> Image.Image:
 
 
 # =========================================================================
-# Op registry — 34 ops
+# Op registry — 35 ops
 # Excluded (handwriting-specific, used via style op lists in generate.py):
 # variable_baseline, slant, ink_fade, variable_stroke, lined_paper,
 # wave_distortion, bleed_through
@@ -1290,9 +1388,10 @@ AUGMENT_OPS: list[Callable] = [
     occlusion,
     # Outdoor (1)
     weather_damage,
-    # Scene text / background (2)
+    # Scene text / background (3)
     textured_background,
     colored_background,
+    photo_background,
     # Crop / boundary (2)
     partial_crop,
     pad_with_border,
@@ -1331,7 +1430,7 @@ SCENARIO_CHAINS: list[tuple[str, list[Callable], float]] = [
         colored_background, perspective_warp, glare, camera_noise,
     ], 2.0),
     ("outdoor_sign", [
-        textured_background, weather_damage, perspective_warp, exposure_jitter,
+        photo_background, weather_damage, perspective_warp, exposure_jitter,
     ], 2.0),
     ("old_scan", [
         aged_document, scanner_edge, low_resolution, photocopy,

@@ -34,7 +34,7 @@ from src.data.augmentation import (
     noise, color_jitter, to_grayscale,
     occlusion, weather_damage,
     polarity_invert, adjacent_line_clutter,
-    text_decoration, highlighter, table_rules,
+    text_decoration, highlighter, table_rules, photo_background,
 )
 from src.encoding.vocab import build_script_vocab
 from src.data.rendering import (
@@ -99,7 +99,7 @@ STYLES = {
         "proportion": 0.20,
         "ops": [perspective_warp, rotation, exposure_jitter, glare,
                 weather_damage, color_jitter, uneven_lighting, occlusion,
-                polarity_invert],
+                polarity_invert, photo_background],
         "chains": ["phone_sign", "outdoor_sign", "worn_label", "occluded",
                    "distant_photo", "flash_photo", "dark_sign"],
         "font_filter": "display",
