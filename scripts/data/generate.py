@@ -44,7 +44,7 @@ from src.data.rendering import (
 )
 from src.data.text_renderer import render_word_baseline, pick_weight
 from src.data.fonts import find_fonts_for_script, build_weighted_font_list
-from src.data.word_lists import load_all_word_lists
+from src.data.word_lists import load_all_word_lists, WordSampler
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -937,6 +937,18 @@ _worker_punct_prob = 0.15     # set from CLI via initializer
 WORD_POOL_SIZE = 400  # pre-rendered words per (font_filter, script)
 POOL_USE_PROB = 0.7   # pool pick vs live render of the planned text
 
+_worker_word_samplers: dict = {}  # script → WordSampler (lazy, per worker)
+
+
+def _sample_word(script: str, words: list) -> str:
+    """Sample a word — 30% frequency-weighted where a corpus table
+    exists, uniform otherwise (see WordSampler)."""
+    sampler = _worker_word_samplers.get(script)
+    if sampler is None or sampler.words is not words:
+        sampler = WordSampler(script, words)
+        _worker_word_samplers[script] = sampler
+    return sampler.sample()
+
 
 def _init_line_worker(style_configs, mixed_ratio, pool_height=32,
                       punct_prob=0.15):
@@ -991,7 +1003,7 @@ def _get_word_pool(font_filter, script, fonts, words, h=32, punct_prob=0.15):
     target = min(WORD_POOL_SIZE, len(words) * 2)
     while len(pool) < target and attempts < target * 3:
         attempts += 1
-        word = random.choice(words)
+        word = _sample_word(script, words)
         # Skip any word that isn't STRICTLY the requested script. The pool
         # labels every entry as `script`, so admitting e.g. a pure-katakana
         # word to the "han" pool would label visual kana as han — exactly
@@ -1313,7 +1325,7 @@ def _build_single_line_plan(script_info):
             plan.append({"text": " ", "script": "whitespace"})
         if script != "latin":
             _maybe_add_latin_segment(plan)
-        word = apply_casing(random.choice(words), script, casing, i)
+        word = apply_casing(_sample_word(script, words), script, casing, i)
         word = mix_punctuation(word, p=_worker_punct_prob, script=script)
         for seg_text, seg_script in split_by_script(word, script):
             plan.append({"text": seg_text, "script": seg_script})
@@ -1378,7 +1390,7 @@ def _build_mixed_line_plan(group_index, primary_info=None):
         if script != "latin":
             _maybe_add_latin_segment(plan)
             _maybe_add_latin_segment(plan)
-        word = apply_casing(random.choice(words), script, casing, i)
+        word = apply_casing(_sample_word(script, words), script, casing, i)
         word = mix_punctuation(word, p=_worker_punct_prob, script=script)
         for seg_text, seg_script in split_by_script(word, script):
             plan.append({"text": seg_text, "script": seg_script})

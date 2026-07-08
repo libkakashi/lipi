@@ -5,10 +5,77 @@ Loads word lists from training_data/word_lists/ for each script,
 merging primary and extra files (e.g., latin.txt + english_common.txt + french.txt).
 """
 
+import bisect
+import itertools
 import random
 from pathlib import Path
 
 WORD_LIST_DIR = Path(__file__).parent.parent.parent / "training_data" / "word_lists"
+CORPORA_DIR = Path(__file__).parent.parent.parent / "training_data" / "corpora"
+
+
+class WordSampler:
+    """Word sampler mixing uniform coverage with frequency realism.
+
+    Uniform sampling maximizes character/shape coverage but gives the
+    model a flat implicit prior — the common-word shapes that dominate
+    real pages are undertrained. With `freq_frac` probability a word is
+    drawn from the script's Wikipedia frequency table
+    (training_data/corpora/{script}_word_freq.tsv, tempered by count^0.5
+    so 'the/of/and'-class words don't swamp everything); otherwise
+    uniform over the merged word list. Frequency entries are restricted
+    to words already in the word list, so font-coverage and encoding
+    behavior are unchanged. Scripts without a table sample uniformly.
+    """
+
+    def __init__(self, script: str, words: list[str], freq_frac: float = 0.3,
+                 temper: float = 0.5, max_freq_words: int = 50_000):
+        self.words = words
+        self.freq_frac = freq_frac
+        self._freq_words: list[str] = []
+        self._cum: list[float] = []
+
+        path = CORPORA_DIR / f"{script}_word_freq.tsv"
+        if not path.exists() or not words:
+            return
+        known = set(words)
+        weights = []
+        try:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    parts = line.rstrip("\n").split("\t")
+                    if len(parts) != 2:
+                        continue
+                    w, count = parts
+                    if w not in known:
+                        continue
+                    try:
+                        weight = float(count) ** temper
+                    except ValueError:
+                        continue
+                    self._freq_words.append(w)
+                    weights.append(weight)
+                    if len(self._freq_words) >= max_freq_words:
+                        break
+        except OSError:
+            self._freq_words = []
+            return
+        if len(self._freq_words) < 100:
+            self._freq_words = []  # too little overlap — stay uniform
+            return
+        self._cum = list(itertools.accumulate(weights))
+
+    @property
+    def has_freq(self) -> bool:
+        return bool(self._freq_words)
+
+    def sample(self) -> str:
+        if self._freq_words and random.random() < self.freq_frac:
+            r = random.uniform(0, self._cum[-1])
+            return self._freq_words[
+                min(bisect.bisect_left(self._cum, r),
+                    len(self._freq_words) - 1)]
+        return random.choice(self.words)
 
 # Extra word list files per script (in addition to {script}.txt)
 _SCRIPT_EXTRA_FILES = {
