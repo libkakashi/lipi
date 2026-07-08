@@ -87,7 +87,7 @@ class LipiMoEEncoder(nn.Module):
         shared_mlp_ratio: int = 4,
         moe_shared_mlp_ratio: int = 2,
         drop_path_rate: float = 0.1,
-        layer_scale_init: float = 1.0,
+        layer_scale_init: float = 1e-4,
         num_groups: int = NUM_GROUPS,
         group_script_vocab_sizes: list[list[int]] | None = None,
         group_script_names: list[list[str]] | None = None,
@@ -242,11 +242,14 @@ class LipiMoEEncoder(nn.Module):
         # run a dedicated lid1_attn block (window w=32) for LID-1's own
         # horizontal-context capacity, then a small MLP head.
         self.group_h_pool = nn.AdaptiveAvgPool2d((1, None))
+        # lid1_attn keeps LayerScale at 1.0: its identity-at-init comes
+        # from the zero-init projections below, and a near-zero
+        # LayerScale on top would suppress its gradients ~1e4x.
         self.lid1_attn = SWABlock(
             dim=dim, num_heads=max(dim // 64, 1),
             window_h=1, window_w=32, shift=False,
             mlp_ratio=mlp_ratio, drop_path=0.0,
-            layer_scale_init=layer_scale_init,
+            layer_scale_init=1.0,
         )
         # Zero the output projections so the residual starts as identity.
         nn.init.zeros_(self.lid1_attn.attn.proj.weight)

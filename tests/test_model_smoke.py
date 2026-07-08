@@ -139,3 +139,26 @@ def test_scheduled_routing_sampling():
         out_eval = model(images, group_ids=group_ids, script_ids=script_ids,
                          route_sample_p=1.0)
     assert torch.equal(out_eval["group_ids"], group_ids)
+
+
+def test_layer_scale_init_near_identity():
+    """MoE layers start near-identity (LayerScale 1e-4) like the backbone;
+    lid1_attn keeps LayerScale 1.0 (its identity comes from zero-init
+    projections instead)."""
+    from src.model.encoder import LipiMoEEncoder
+
+    model = LipiMoEEncoder(
+        dim=128,
+        num_groups=2,
+        group_script_vocab_sizes=[[100], [80, 120]],
+        group_script_names=[["test1"], ["test2a", "test2b"]],
+    )
+
+    for layer in list(model.group_layers) + list(model.script_layers):
+        assert torch.allclose(layer.ls1.gamma,
+                              torch.full_like(layer.ls1.gamma, 1e-4))
+        assert torch.allclose(layer.ls2.gamma,
+                              torch.full_like(layer.ls2.gamma, 1e-4))
+    assert torch.allclose(model.lid1_attn.ls1.gamma,
+                          torch.ones_like(model.lid1_attn.ls1.gamma))
+    assert model.config["layer_scale_init"] == 1e-4
