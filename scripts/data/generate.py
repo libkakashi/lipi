@@ -176,17 +176,59 @@ _TYPO_COMMON_CHARS = [chr(cp) for start, end in TYPOGRAPHIC_COMMON
                       for cp in range(start, end + 1)]
 
 
-def _random_latin_segment():
-    """Generate a random segment from ASCII_COMMON / TYPOGRAPHIC_COMMON chars."""
+_ID_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+_TLDS = ["com", "org", "net", "io", "in", "gov", "edu", "co", "de"]
+_DOMAIN_WORDS = ["mail", "docs", "example", "acme", "corp", "info", "data",
+                 "cloud", "app", "shop", "tech", "web", "portal", "office"]
+
+
+def _random_alnum_id() -> str:
+    """Reference IDs \u2014 invoice/case/serial numbers: INV-2024-0031, AB123."""
     r = random.random()
-    if r < 0.35:
+    if r < 0.4:
+        return ("".join(random.choices(_ID_LETTERS, k=random.randint(2, 4)))
+                + random.choice("-/")
+                + "".join(random.choices("0123456789", k=random.randint(2, 6))))
+    if r < 0.7:
+        return ("".join(random.choices(_ID_LETTERS, k=random.randint(1, 3)))
+                + "".join(random.choices("0123456789", k=random.randint(2, 5))))
+    return ("".join(random.choices(_ID_LETTERS, k=random.randint(2, 3)))
+            + "-" + str(random.randint(1, 9999))
+            + random.choice("-/") + str(random.randint(1, 99)))
+
+
+def _random_email() -> str:
+    user = random.choice(_DOMAIN_WORDS)
+    if random.random() < 0.4:
+        user += str(random.randint(1, 99))
+    return f"{user}@{random.choice(_DOMAIN_WORDS)}.{random.choice(_TLDS)}"
+
+
+def _random_url() -> str:
+    host = f"{random.choice(_DOMAIN_WORDS)}.{random.choice(_TLDS)}"
+    r = random.random()
+    if r < 0.4:
+        return "www." + host
+    if r < 0.7:
+        return "https://" + host
+    return host + "/" + random.choice(_DOMAIN_WORDS)
+
+
+def _random_latin_segment():
+    """Generate a random segment from ASCII_COMMON / TYPOGRAPHIC_COMMON chars.
+
+    Includes the token classes agentic doc processing actually queries
+    for \u2014 IDs, emails, URLs \u2014 alongside numbers/dates/currency.
+    """
+    r = random.random()
+    if r < 0.28:
         # 1-3 random ASCII common chars
         n = random.randint(1, 3)
         return "".join(random.choices(_ASCII_COMMON_CHARS, k=n))
-    elif r < 0.50:
+    elif r < 0.40:
         # Typographic chars
         return random.choice(_TYPO_COMMON_CHARS)
-    elif r < 0.70:
+    elif r < 0.57:
         # Number: 1-6 digits, possibly with . or ,
         digits = "".join(random.choices("0123456789", k=random.randint(1, 6)))
         if len(digits) >= 4 and random.random() < 0.3:
@@ -195,21 +237,27 @@ def _random_latin_segment():
             pos = random.randint(1, len(digits) - 1)
             digits = digits[:pos] + "." + digits[pos:]
         return digits
-    elif r < 0.82:
+    elif r < 0.67:
         # Currency + number
         currency = random.choice(["$", "\u00A3", "\u00A5", "\u20AC"])
         return currency + str(random.randint(1, 9999))
-    elif r < 0.90:
+    elif r < 0.74:
         # Bracketed expression: (123), [45], {6}
         inner = "".join(random.choices("0123456789", k=random.randint(1, 4)))
         left, right = random.choice([("(", ")"), ("[", "]"), ("{", "}")])
         return left + inner + right
-    else:
+    elif r < 0.82:
         # Separated numbers: 12-34, 123.456.789
         sep = random.choice(list("-/."))
         parts = ["".join(random.choices("0123456789", k=random.randint(2, 4)))
                  for _ in range(random.randint(2, 3))]
         return sep.join(parts)
+    elif r < 0.90:
+        return _random_alnum_id()
+    elif r < 0.95:
+        return _random_email()
+    else:
+        return _random_url()
 
 
 def _maybe_add_latin_segment(plan, p=0.15):
@@ -339,6 +387,39 @@ def _random_date() -> str:
         return f"{d:02d}{sep}{m:02d}{sep}{y % 100:02d}"
     else:
         return f"{y}{sep}{m:02d}{sep}{d:02d}"
+
+
+# ---------------------------------------------------------------------------
+# Casing — real documents are full of Title Case and ALL-CAPS headers;
+# signage is mostly caps. Word lists are lowercase-dominant, so without
+# this the model rarely sees uppercase shapes in context.
+# ---------------------------------------------------------------------------
+
+_BICAMERAL = {"latin", "cyrillic", "greek", "armenian"}
+
+
+def sample_line_casing() -> str:
+    """Line-level casing mode, sampled once per line."""
+    return random.choices(
+        ["none", "sentence", "title", "upper"],
+        weights=[0.72, 0.12, 0.08, 0.08], k=1)[0]
+
+
+def apply_casing(word: str, script: str, mode: str, word_idx: int = 0) -> str:
+    """Apply a line casing mode to one word of a bicameral script.
+
+    sentence: first word capitalized; title: every word capitalized
+    (headline); upper: ALL CAPS.
+    """
+    if script not in _BICAMERAL or mode == "none" or not word:
+        return word
+    if mode == "upper":
+        return word.upper()
+    if mode == "title":
+        return word[:1].upper() + word[1:]
+    if mode == "sentence" and word_idx == 0:
+        return word[:1].upper() + word[1:]
+    return word
 
 
 def mix_punctuation(word: str, p: float = 0.15, script: str = "latin") -> str:
@@ -929,6 +1010,11 @@ def _get_word_pool(font_filter, script, fonts, words, h=32, punct_prob=0.15):
         # latin, but the pool renders whole words with a single label.
         if script != "latin" and any(is_ascii_cp(ord(c)) for c in word):
             continue
+        # Per-word casing (pool entries serve the ransom path, where
+        # line-level consistency doesn't apply)
+        word = apply_casing(word, script,
+                            random.choices(["none", "title", "upper"],
+                                           weights=[0.75, 0.15, 0.10], k=1)[0])
         # Mix punctuation for every script (universal patterns keep the
         # native word intact; scripts with native punctuation get danda,
         # Arabic comma, CJK fullwidth, etc.)
@@ -1220,14 +1306,15 @@ def _build_single_line_plan(script_info):
     n_words = random.choices([2, 3, 4, 5, 6, 7, 8],
                              weights=[0.10, 0.20, 0.25, 0.20, 0.15, 0.05, 0.05],
                              k=1)[0]
+    casing = sample_line_casing()
     plan = []
     for i in range(n_words):
         if i > 0:
             plan.append({"text": " ", "script": "whitespace"})
         if script != "latin":
             _maybe_add_latin_segment(plan)
-        word = mix_punctuation(random.choice(words),
-                               p=_worker_punct_prob, script=script)
+        word = apply_casing(random.choice(words), script, casing, i)
+        word = mix_punctuation(word, p=_worker_punct_prob, script=script)
         for seg_text, seg_script in split_by_script(word, script):
             plan.append({"text": seg_text, "script": seg_script})
         if script != "latin":
@@ -1283,6 +1370,7 @@ def _build_mixed_line_plan(group_index, primary_info=None):
             chosen.append(random.choice(group_scripts))
         random.shuffle(chosen)
 
+    casing = sample_line_casing()
     plan = []
     for i, (script, _fonts, words, _gid) in enumerate(chosen):
         if i > 0:
@@ -1290,8 +1378,8 @@ def _build_mixed_line_plan(group_index, primary_info=None):
         if script != "latin":
             _maybe_add_latin_segment(plan)
             _maybe_add_latin_segment(plan)
-        word = mix_punctuation(random.choice(words),
-                               p=_worker_punct_prob, script=script)
+        word = apply_casing(random.choice(words), script, casing, i)
+        word = mix_punctuation(word, p=_worker_punct_prob, script=script)
         for seg_text, seg_script in split_by_script(word, script):
             plan.append({"text": seg_text, "script": seg_script})
         if script != "latin":
