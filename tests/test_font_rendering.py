@@ -19,7 +19,7 @@ from PIL import Image
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.model.lid import SCRIPTS, SCRIPT_TO_GROUP
+from src.taxonomy import SCRIPTS, SCRIPT_TO_GROUP
 from src.data.fonts import find_fonts_for_script, build_weighted_font_list
 from src.data.rendering import render_word, image_has_ink, resize_or_pad, filter_fonts_by_cmap
 from src.data.text_renderer import font_has_codepoint
@@ -697,7 +697,7 @@ class TestFontIsolation:
         desirable — they force the model to learn character shapes.
         But each script also needs unique fonts for visual diversity.
         """
-        from src.model.lid import GROUP_SCRIPTS
+        from src.taxonomy import GROUP_SCRIPTS
         EXEMPT_GROUPS = {"cyrillic_greek"}
 
         failures = []

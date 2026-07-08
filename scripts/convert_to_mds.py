@@ -21,7 +21,7 @@ from streaming import MDSWriter
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.model.lid import SCRIPTS
+from src.taxonomy import SCRIPTS
 
 # MDS column schema
 MDS_COLUMNS = {

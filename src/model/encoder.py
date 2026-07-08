@@ -28,7 +28,7 @@ from src.model.blocks import (
     _patch_merge_h, _per_sample_key_lens,
     _collect_segments, _scatter_segments, _run_expert_block,
 )
-from src.model.lid import NUM_GROUPS
+from src.taxonomy import NUM_GROUPS
 
 
 class LipiMoEEncoder(nn.Module):

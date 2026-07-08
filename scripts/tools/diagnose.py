@@ -26,7 +26,7 @@ def main():
     from src.training.dataloader import (
         load_shards, build_script_tokenizers, encode_labels, remap_ids,
     )
-    from src.model.lid import SCRIPT_TO_GROUP
+    from src.taxonomy import SCRIPT_TO_GROUP
 
     images, labels, sids_global, gids_global, meta, _, _ = load_shards(Path(args.data))
     active_scripts = meta["active_scripts"]

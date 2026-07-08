@@ -5,7 +5,8 @@ Tests for LIDCoarse.
 import pytest
 import torch
 
-from src.model.lid import LIDCoarse, SCRIPTS, GROUPS, NUM_SCRIPTS, NUM_GROUPS
+from src.taxonomy import SCRIPTS, GROUPS, NUM_SCRIPTS, NUM_GROUPS
+from src.model.lid import LIDCoarse
 
 
 class TestLIDCoarse:

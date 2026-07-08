@@ -18,7 +18,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from src.model.encoder import LipiMoEEncoder
-from src.model.lid import GROUPS, GROUP_TO_ID, SCRIPTS, SCRIPT_TO_GROUP, NUM_GROUPS
+from src.taxonomy import GROUPS, GROUP_TO_ID, SCRIPTS, SCRIPT_TO_GROUP, NUM_GROUPS
 from src.data.fonts import find_fonts_for_script
 from src.data.rendering import render_word, resize_or_pad
 from src.encoding.decompose import encode_text, decode_ids, script_vocab_size

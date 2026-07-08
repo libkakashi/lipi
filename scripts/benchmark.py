@@ -21,7 +21,7 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.model.encoder import LipiMoEEncoder
-from src.model.lid import GROUPS, NUM_GROUPS, SCRIPT_TO_GROUP
+from src.taxonomy import GROUPS, NUM_GROUPS, SCRIPT_TO_GROUP
 from src.data.color import rgb_to_input
 from src.encoding.decompose import decode_ids, script_vocab_size
 from src.training.eval import _edit_distance
@@ -39,7 +39,7 @@ BENCHMARKS = {
 
 def build_vocab_tables():
     from src.encoding.decompose import script_vocab_size
-    from src.model.lid import GROUP_SCRIPTS
+    from src.taxonomy import GROUP_SCRIPTS
     group_script_vocab_sizes = []
     group_script_names = []
     for group_name in GROUPS:

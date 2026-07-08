@@ -8,7 +8,7 @@ import pytest
 from pathlib import Path
 
 from src.encoding.decompose import encode_text, decode_ids, script_vocab_size
-from src.model.lid import SCRIPTS
+from src.taxonomy import SCRIPTS
 
 WORD_LIST_DIR = Path(__file__).resolve().parent.parent / "training_data" / "word_lists"
 

@@ -21,7 +21,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.model.lid import SCRIPTS, SCRIPT_TO_GROUP, GROUP_TO_ID, SCRIPT_TO_ID
+from src.taxonomy import SCRIPTS, SCRIPT_TO_GROUP, GROUP_TO_ID, SCRIPT_TO_ID
 from src.data.color import rgb_to_input
 from src.data.augmentation import (
     RandAugmentOCR,
@@ -474,7 +474,7 @@ def render_content_plan(plan, fonts_by_script, h, mw, aug=None,
         segments is a Python list (not JSON) for efficiency.
     """
     from PIL import Image
-    from src.model.lid import NUM_GROUPS as BLANK_ID
+    from src.taxonomy import NUM_GROUPS as BLANK_ID
 
     blocks = []  # (img, text, group_id, script_id, width) per rendered block
     total_w = 0

@@ -8,7 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from PIL import Image
-from src.model.lid import SCRIPTS, SCRIPT_TO_GROUP
+from src.taxonomy import SCRIPTS, SCRIPT_TO_GROUP
 from src.data.word_lists import load_word_list
 from src.data.fonts import find_fonts_for_script, build_weighted_font_list
 from src.data.rendering import render_word, resize_or_pad, font_covers_text

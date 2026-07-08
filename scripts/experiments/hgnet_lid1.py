@@ -24,7 +24,8 @@ from torch.utils.data import DataLoader
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from src.model.lid import LIDCoarse, NUM_GROUPS, GROUPS, SCRIPT_TO_GROUP
+from src.taxonomy import NUM_GROUPS, GROUPS, SCRIPT_TO_GROUP
+from src.model.lid import LIDCoarse
 from src.training.dataloader import (
     build_script_tokenizers, collate_moe, LipiStreamingDataset,
 )

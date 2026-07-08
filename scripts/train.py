@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.model.encoder import LipiMoEEncoder
 from src.model.memory import estimate_pixel_budget
-from src.model.lid import SCRIPT_TO_GROUP, NUM_GROUPS, GROUPS
+from src.taxonomy import SCRIPT_TO_GROUP, NUM_GROUPS, GROUPS
 from src.training.dataloader import (
     build_script_tokenizers, collate_moe, WidthSortedBatchSampler,
     LipiStreamingDataset,

@@ -15,7 +15,7 @@ from torch.utils.data import Dataset, Sampler
 
 from streaming import Stream, StreamingDataset
 
-from src.model.lid import SCRIPT_TO_GROUP, SCRIPT_TO_ID, GROUP_TO_ID, NUM_GROUPS
+from src.taxonomy import SCRIPT_TO_GROUP, SCRIPT_TO_ID, GROUP_TO_ID, NUM_GROUPS
 from src.encoding.decompose import encode_text, script_vocab_size
 
 

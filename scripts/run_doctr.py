@@ -21,10 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.data.color import rgb_to_input
 from src.encoding.decompose import decode_ids, script_vocab_size
 from src.model.encoder import LipiMoEEncoder
-from src.model.lid import (
-    GROUPS, GROUP_SCRIPTS, SCRIPTS, SCRIPT_TO_GROUP, GROUP_TO_ID,
-    SCRIPT_TO_ID,
-)
+from src.taxonomy import GROUPS, GROUP_SCRIPTS, SCRIPTS, SCRIPT_TO_GROUP, GROUP_TO_ID, SCRIPT_TO_ID
 
 # Height the model expects
 IMG_HEIGHT = 32
