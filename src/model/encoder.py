@@ -401,12 +401,19 @@ class LipiMoEEncoder(nn.Module):
         detach_for_experts: bool = False,
         compute_ctc: bool = True,
         inter_ctc: bool = False,
+        route_sample_p: float = 0.0,
     ) -> dict:
         """Run the encoder forward pass.
 
         compute_ctc=False skips the script experts + final norm + CTC
         heads. Useful when the CTC loss weight is 0 and we don't need
         character predictions (e.g. LID-only pretraining).
+
+        route_sample_p (scheduled sampling, training only): probability
+        per frame of routing by the model's own LID-1/LID-2 predictions
+        instead of the provided ground truth. Experts and CTC heads then
+        see realistic misroutes during training instead of meeting them
+        for the first time at inference. Losses keep using GT labels.
 
         inter_ctc=True additionally decodes the features after the group
         MoE stack (before script experts) through the same norm + CTC
@@ -445,6 +452,15 @@ class LipiMoEEncoder(nn.Module):
                 frame_groups, torch.full_like(frame_groups, self.blank_group_id))
         else:
             frame_groups = group_logits.argmax(dim=-1)
+
+        # Scheduled sampling: a random subset of frames routes by LID-1's
+        # prediction instead of GT (script-stage counterpart below).
+        sample_mask = None
+        if group_ids is not None and route_sample_p > 0.0 and self.training:
+            sample_mask = (torch.rand(B, w, device=images.device)
+                           < route_sample_p)
+            frame_groups = torch.where(
+                sample_mask, group_logits.argmax(dim=-1), frame_groups)
 
         if detach_for_experts:
             x = x.detach()
@@ -503,6 +519,20 @@ class LipiMoEEncoder(nn.Module):
                 g_mask = (frame_groups == g)
                 pred = lid2_log.argmax(dim=-1)  # (B, T)
                 frame_scripts[g_mask] = pred[g_mask]
+
+        if sample_mask is not None:
+            # Scheduled sampling, script stage: sampled frames take the
+            # predicted script within their (possibly predicted) group —
+            # 0 for single-script groups, LID-2's argmax for multi-script
+            # ones — mirroring the inference routing path.
+            frame_scripts = torch.where(
+                sample_mask, torch.zeros_like(frame_scripts), frame_scripts)
+            for g, lid2_log in lid2_logits_per_group.items():
+                if not any(group_lens_cpu[b][g] > 0 for b in range(B)):
+                    continue
+                m = (frame_groups == g) & sample_mask
+                frame_scripts = torch.where(
+                    m, lid2_log.argmax(dim=-1), frame_scripts)
 
         # Convert to flat script IDs for script expert routing
         flat_scripts = self._get_flat_script_ids(frame_groups, frame_scripts)

@@ -141,6 +141,12 @@ def parse_args():
     parser.add_argument("--lid2-weight", type=float, default=1.0,
                         help="Set to 0 to disable LID-2 loss "
                              "(useful for CTC warmup with --lid1-weight 0)")
+    parser.add_argument("--route-sample-max", type=float, default=0.25,
+                        help="Scheduled sampling for expert routing: per-"
+                             "frame probability of routing by predicted "
+                             "LID instead of ground truth ramps linearly "
+                             "from 0 (epoch 1) to this value (final epoch). "
+                             "Losses always use GT labels. 0 disables.")
     parser.add_argument("--expert-lr", type=float, default=None,
                         help="Separate learning rate for expert params. Default: same as --lr")
     parser.add_argument("--detach-epochs", type=int, default=0,
@@ -545,7 +551,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                     detach_for_experts=False,
                     save_dir=None, args=None,
                     ema=None, ema_model=None,
-                    inter_ctc_weight=0.0):
+                    inter_ctc_weight=0.0, route_sample_p=0.0):
     model.train()
     steps = len(train_loader)
     n_batches = 0
@@ -598,7 +604,8 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             out = model(imgs_, group_ids=gl_for_model, script_ids=sl_frames,
                         detach_for_experts=detach_for_experts,
                         compute_ctc=(ctc_weight != 0),
-                        inter_ctc=(inter_ctc_weight != 0 and ctc_weight != 0))
+                        inter_ctc=(inter_ctc_weight != 0 and ctc_weight != 0),
+                        route_sample_p=route_sample_p)
 
         # LID-1 loss. Skip when weight is 0.
         T = out["group_logits"].shape[1]
@@ -922,7 +929,8 @@ def main():
     print(f"  Batch: {eff_batch} x {args.grad_accum} (pixel-budgeted)")
     print(f"  Losses: CTC x{args.ctc_weight} + interCTC x{args.inter_ctc_weight} "
           f"+ LID1 x{args.lid1_weight} + LID2 x{args.lid2_weight}")
-    print(f"  Routing: ground truth (CTC on all samples)")
+    print(f"  Routing: ground truth + scheduled sampling "
+          f"(0 → {args.route_sample_max} over training)")
     print(f"  Per-script vocabs: {data['group_script_vocab_sizes']}")
     print(f"{'=' * 60}")
 
@@ -931,6 +939,10 @@ def main():
         detach = epoch <= args.detach_epochs
         if detach:
             print(f"  [detach mode: CTC gradient stops at expert boundary, epoch {epoch}/{args.detach_epochs}]")
+        # Scheduled routing sampling: linear ramp 0 → max over training
+        route_p = args.route_sample_max * (epoch - 1) / max(args.epochs - 1, 1)
+        if route_p > 0:
+            print(f"  [scheduled routing sampling: p={route_p:.3f}]")
         metrics = train_one_epoch(
             model, train_loader, opt["optimizer"], opt["base_optimizer"],
             opt["scheduler"], opt["scaler"], ce_loss_fn, device, device_type,
@@ -943,7 +955,8 @@ def main():
             detach_for_experts=detach,
             save_dir=save_dir, args=args,
             ema=ema, ema_model=base_model,
-            inter_ctc_weight=args.inter_ctc_weight)
+            inter_ctc_weight=args.inter_ctc_weight,
+            route_sample_p=route_p)
 
         elapsed = time.time() - t0
         if metrics:

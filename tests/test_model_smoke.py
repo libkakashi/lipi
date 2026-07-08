@@ -98,3 +98,44 @@ def test_inter_ctc_logits():
     # they must differ (script MoE layers aren't identity even at init
     # due to shared MLP + attention branches).
     assert not torch.allclose(out["inter_logits"], out["logits"])
+
+
+def test_scheduled_routing_sampling():
+    """route_sample_p=1.0 routes every frame by predicted LID; p=0 keeps GT."""
+    from src.model.encoder import LipiMoEEncoder
+
+    torch.manual_seed(0)
+    model = LipiMoEEncoder(
+        dim=128,
+        num_groups=2,
+        group_script_vocab_sizes=[[100], [80, 120]],
+        group_script_names=[["test1"], ["test2a", "test2b"]],
+        drop_path_rate=0.0,  # deterministic in train mode
+    )
+
+    B, H, W = 2, 32, 64
+    images = torch.randn(B, 3, H, W)
+    T = W // 4
+    group_ids = torch.tensor([[0] * T, [1] * T])
+    script_ids = torch.tensor([[0] * T, [1] * T])
+
+    model.train()
+    with torch.no_grad():
+        out_full = model(images, group_ids=group_ids, script_ids=script_ids,
+                         route_sample_p=1.0)
+        out_gt = model(images, group_ids=group_ids, script_ids=script_ids,
+                       route_sample_p=0.0)
+
+    # p=1: every frame routed by LID-1 argmax
+    assert torch.equal(out_full["group_ids"],
+                       out_full["group_logits"].argmax(dim=-1))
+    # p=0: GT routing untouched
+    assert torch.equal(out_gt["group_ids"], group_ids)
+    assert torch.equal(out_gt["frame_scripts"], script_ids)
+
+    # eval mode ignores route_sample_p entirely
+    model.eval()
+    with torch.no_grad():
+        out_eval = model(images, group_ids=group_ids, script_ids=script_ids,
+                         route_sample_p=1.0)
+    assert torch.equal(out_eval["group_ids"], group_ids)
