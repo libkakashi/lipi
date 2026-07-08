@@ -39,7 +39,9 @@ from src.encoding.vocab import build_script_vocab
 from src.data.rendering import (
     render_word, render_emoji, image_has_ink,
     resize_or_pad, filter_fonts_by_cmap, font_covers_text,
+    compose_line_baseline,
 )
+from src.data.text_renderer import render_word_baseline, pick_weight
 from src.data.fonts import find_fonts_for_script, build_weighted_font_list
 from src.data.word_lists import load_all_word_lists
 
@@ -387,9 +389,23 @@ MDS_COLUMNS = {
 _MAX_VAL_PER_SCRIPT = 500  # Set from args before workers spawn
 
 
+# Fraction of lines rendered in the legacy per-word mode (each word its
+# own font + vertically normalized to full height). Real documents never
+# look like that, but store signs / collage layouts occasionally do, and
+# the diversity keeps the model from over-fitting line-consistent style.
+RANSOM_PROB = 0.08
+
+
 def render_content_plan(plan, fonts_by_script, h, mw, aug=None,
                         word_pools=None):
     """Stage 2: Render a content plan into image + metadata.
+
+    Default path renders a typographically consistent line: one font
+    size for the whole line, one font/weight per script, words at
+    natural metrics composed on a shared baseline (constant x-height —
+    'on' next to 'Apply' keeps real proportions instead of each word
+    stretching to fill the crop). A small RANSOM_PROB fraction uses the
+    legacy per-word pool mode for diversity.
 
     Words are always rendered clean (white bg, black ink). Augmentation
     applies color/style to the composed line so all words share one style.
@@ -401,12 +417,145 @@ def render_content_plan(plan, fonts_by_script, h, mw, aug=None,
         mw: max width
         aug: augmentation (applied to final composed image)
         word_pools: {script: [(pil_img, text, width), ...]} — pre-rendered
-            word images. If provided, picks from pool instead of rendering.
+            word images for the ransom path.
 
     Returns:
         (img_tensor, label, group_labels, segments) or None if failed
         segments is a Python list (not JSON) for efficiency.
     """
+    if word_pools and random.random() < RANSOM_PROB:
+        result = _render_plan_ransom(plan, fonts_by_script, h, mw, word_pools)
+    else:
+        result = _render_plan_line(plan, fonts_by_script, h, mw)
+    if result is None:
+        return None
+    combined, full_label, group_labels, segments = result
+
+    # Apply augmentation
+    if aug is not None:
+        combined = aug(combined)
+
+    img_tensor = rgb_to_input(combined)
+    return img_tensor, full_label, group_labels, segments
+
+
+def _render_plan_line(plan, fonts_by_script, h, mw):
+    """Line-consistent rendering: shared baseline, one style per line."""
+    from src.taxonomy import NUM_GROUPS as BLANK_ID
+
+    # Line-level style. Size distribution mirrors the old crisp/soft mix:
+    # mostly render above target height and downsample.
+    if random.random() < 0.7:
+        font_size = random.randint(int(h * 1.1), h * 2)
+    else:
+        font_size = random.randint(max(12, h // 2), h - 6)
+
+    line_fonts: dict[str, str] = {}    # script → font for this line
+    line_weights: dict[str, int] = {}  # script → weight bucket
+
+    blocks = []  # (img, baseline, text, gid, sid, native_width)
+    total_w = 0
+    # Width budget works in native units via an estimated final scale;
+    # the estimate tightens as taller blocks arrive.
+    est_line_h = int(font_size * 1.4)
+
+    def under_budget(extra_w):
+        return (total_w + extra_w) * (h / max(est_line_h, 1)) <= mw
+
+    for item in plan:
+        text = item["text"]
+        script = item["script"]
+
+        if script == "whitespace":
+            # Gap scales with font size, like a real space glyph would
+            ws_w = max(2, int(font_size * random.uniform(0.18, 0.55)))
+            if not under_budget(ws_w):
+                break
+            blocks.append((None, 0, "", BLANK_ID, 0, ws_w))
+            total_w += ws_w
+            continue
+
+        if script == "emoji":
+            e_h = int(font_size * 1.1)
+            img = render_emoji(e_h, e_h * 3)
+            if img is None or not under_budget(img.width):
+                continue
+            emoji_gid = GROUP_TO_ID.get(SCRIPT_TO_GROUP.get(script, ""), 0)
+            emoji_sid = SCRIPT_TO_ID.get(script, 0)
+            # Emoji sit roughly on the baseline
+            blocks.append((img, int(img.height * 0.85), text,
+                           emoji_gid, emoji_sid, img.width))
+            total_w += img.width
+            est_line_h = max(est_line_h, img.height)
+            continue
+
+        # Line font for this script — picked once; per-word fallback only
+        # when that font lacks coverage for this specific text.
+        font = line_fonts.get(script)
+        weight = line_weights.get(script, 0)
+        if font is None or not font_covers_text(font, text):
+            font = None
+            fonts = fonts_by_script.get(script, [])
+            for cand in random.sample(fonts, min(4, len(fonts))):
+                if font_covers_text(cand, text):
+                    font = cand
+                    weight = pick_weight(cand, font_size)
+                    break
+            if font is None:
+                return None  # no coverage — skip sample
+            line_fonts.setdefault(script, font)
+            line_weights.setdefault(script, weight)
+
+        rendered = render_word_baseline(text, font, font_size, weight)
+        if rendered is None or not image_has_ink(rendered[0]):
+            return None
+        img, baseline = rendered
+
+        if not under_budget(img.width):
+            # Don't crop a word mid-glyph and keep its full label
+            if blocks:
+                break
+            return None  # single word wider than max width
+        gid = GROUP_TO_ID[SCRIPT_TO_GROUP[script]]
+        sid = SCRIPT_TO_ID[script]
+        blocks.append((img, baseline, text, gid, sid, img.width))
+        total_w += img.width
+        est_line_h = max(est_line_h, img.height)
+
+    if not blocks or not any(b[2] for b in blocks):
+        return None
+
+    composed = compose_line_baseline(blocks, h)
+    if composed is None:
+        return None
+    line_img, placed, scale = composed
+    final_w = line_img.width
+    if final_w > mw:
+        return None  # budget estimate overshot — rare, skip sample
+
+    group_labels = np.full(final_w, BLANK_ID, dtype=np.int32)
+    segments = []
+    full_label = ""
+    for text, gid, sid, x, wnat, _y in placed:
+        if not text:
+            continue
+        o = round(x * scale)
+        e = min(final_w, round((x + wnat) * scale))
+        if e - o < 1:
+            continue
+        group_labels[o:e] = gid
+        segments.append({"group_id": gid, "script_id": sid,
+                         "text": text, "width": e - o, "offset": o})
+        full_label += text
+    if not segments:
+        return None
+    return line_img, full_label, group_labels, segments
+
+
+def _render_plan_ransom(plan, fonts_by_script, h, mw, word_pools):
+    """Legacy per-word mode: pool images / independent fonts, each word
+    vertically normalized to full height. Kept as a small-probability
+    diversity mode (signs, collages) — see RANSOM_PROB."""
     from PIL import Image
     from src.taxonomy import NUM_GROUPS as BLANK_ID
 
@@ -512,12 +661,7 @@ def render_content_plan(plan, fonts_by_script, h, mw, aug=None,
             seg["width"] = new_end - new_offset
         group_labels = new_gl
 
-    # Apply augmentation
-    if aug is not None:
-        combined = aug(combined)
-
-    img_tensor = rgb_to_input(combined)
-    return img_tensor, full_label, group_labels, segments
+    return combined, full_label, group_labels, segments
 
 
 def save_rendered_samples(samples, primary_script, train_dir, val_dir, chunk_id):
@@ -626,7 +770,10 @@ def parse_args() -> argparse.Namespace:
                              "degradation per sample for all epochs)")
     parser.add_argument("--no-augment", dest="augment", action="store_false")
     parser.add_argument("--height", type=int, default=32)
-    parser.add_argument("--max-width", type=int, default=1280)
+    # 2048 covers full A4 body lines and most table rows at h=32
+    # normalization; the line path truncates at the budget (never
+    # squashes aspect ratio).
+    parser.add_argument("--max-width", type=int, default=2048)
     parser.add_argument("--punct-prob", type=float, default=0.15,
                         help="Probability of mixing punctuation/numbers into a word (default: 0.15)")
     parser.add_argument("--mixed-ratio", type=float, default=0.6,

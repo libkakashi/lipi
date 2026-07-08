@@ -17,6 +17,7 @@ Usage:
     # Returns PIL.Image.Image (RGB) or None on failure
 """
 
+import functools
 import random
 import warnings
 
@@ -114,6 +115,47 @@ def _get_font(font_path: str, size: int, weight: int = 0) -> ImageFont.FreeTypeF
 
 
 _measure_draw = ImageDraw.Draw(Image.new("RGB", (8, 8)))
+
+
+def pick_weight(font_path: str, font_size: int) -> int:
+    """Public weight sampler — lets callers fix one weight for a whole
+    line instead of re-rolling per word."""
+    return _pick_weight(font_path, _get_font(font_path, font_size))
+
+
+@functools.lru_cache(maxsize=2048)
+def render_word_baseline(text: str, font_path: str, font_size: int,
+                         weight: int = 0, pad_x: int = 1,
+                         ) -> tuple[Image.Image, int] | None:
+    """Render text at natural metrics — no vertical rescaling.
+
+    Returns (img, baseline_y) or None. The canvas spans the font's
+    ascent..descent box (so every word at one size shares line geometry;
+    'on' does NOT get stretched to the height of 'Apply'), expanded when
+    shaped glyphs overflow it (stacked Indic/Thai marks). Metric boxes
+    are clamped to 1.25/0.45 × size — some fonts report inflated
+    ascent/descent that would shrink all their text.
+
+    Always renders clean black-on-white (that's what makes the lru_cache
+    valid — color and degradation are applied to the composed line).
+    """
+    try:
+        font = _get_font(font_path, font_size, weight)
+        ascent, descent = font.getmetrics()
+        ascent = min(ascent, int(font_size * 1.25))
+        descent = min(descent, int(font_size * 0.45))
+        x0, y0, x1, y1 = _measure_draw.textbbox((0, 0), text, font=font)
+        if x1 - x0 <= 0:
+            return None
+        top = min(0, y0)
+        bottom = max(ascent + descent, y1)
+        img = Image.new("RGB", ((x1 - x0) + 2 * pad_x, bottom - top),
+                        (255, 255, 255))
+        ImageDraw.Draw(img).text((pad_x - x0, -top), text,
+                                 font=font, fill=(0, 0, 0))
+        return img, ascent - top
+    except Exception:
+        return None
 
 
 def render_text(text: str, font_path: str, font_size: int,

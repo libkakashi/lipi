@@ -137,6 +137,56 @@ def render_word(text: str, font_path: str, height: int = 32,
 
 
 # ---------------------------------------------------------------------------
+# Baseline line composition
+# ---------------------------------------------------------------------------
+
+def compose_line_baseline(blocks: list, target_h: int
+                          ) -> tuple[Image.Image, list, float] | None:
+    """Compose word blocks on a shared baseline, then scale to target_h.
+
+    This is what makes synthetic lines typographically real: every block
+    rendered at the same font size sits on one baseline with a constant
+    x-height, exactly like a printed line — instead of each word being
+    independently stretched to fill the crop height.
+
+    Args:
+        blocks: list of (img, baseline, text, gid, sid, native_width).
+            img None → whitespace gap of native_width px.
+        target_h: final image height (the whole line scales uniformly).
+
+    Returns:
+        (line_img, placed, scale) or None.
+        placed: (text, gid, sid, x, native_width, y) per block in native
+        coordinates; multiply x/width by scale for final-image pixels.
+    """
+    imgs = [(b[0], b[1]) for b in blocks if b[0] is not None]
+    if not imgs:
+        return None
+    line_ascent = max(baseline for _, baseline in imgs)
+    line_descent = max(img.height - baseline for img, baseline in imgs)
+    line_h = max(line_ascent + line_descent, 1)
+    total_w = sum(b[5] for b in blocks)
+    if total_w <= 0:
+        return None
+
+    canvas = Image.new("RGB", (total_w, line_h), (255, 255, 255))
+    placed = []
+    x = 0
+    for img, baseline, text, gid, sid, w in blocks:
+        y = 0
+        if img is not None:
+            y = line_ascent - baseline
+            canvas.paste(img, (x, y))
+        placed.append((text, gid, sid, x, w, y))
+        x += w
+
+    scale = target_h / line_h
+    final_w = max(4, round(total_w * scale))
+    line = canvas.resize((final_w, target_h), Image.BILINEAR)
+    return line, placed, final_w / total_w
+
+
+# ---------------------------------------------------------------------------
 # Emoji rendering
 # ---------------------------------------------------------------------------
 
