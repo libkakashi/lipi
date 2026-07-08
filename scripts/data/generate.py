@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from src.taxonomy import SCRIPTS, SCRIPT_TO_GROUP, GROUP_TO_ID, SCRIPT_TO_ID
 from src.data.color import rgb_to_input
 from src.data.augmentation import (
-    RandAugmentOCR,
+    RandAugmentOCR, CHAINS_BY_NAME,
     jpeg_compress, blur, low_resolution, photocopy,
     exposure_jitter, uneven_lighting, glare, striped_shadow,
     rotation, perspective_warp, wave_distortion,
@@ -33,6 +33,7 @@ from src.data.augmentation import (
     variable_baseline, slant, ink_fade, variable_stroke, lined_paper,
     noise, color_jitter, to_grayscale,
     occlusion, weather_damage,
+    polarity_invert, adjacent_line_clutter,
 )
 from src.encoding.vocab import build_script_vocab
 from src.data.rendering import (
@@ -57,20 +58,28 @@ _HANDWRITING_KEYWORDS = {"caveat", "dancing", "indie", "patrick", "kalam",
 _DISPLAY_KEYWORDS = {"permanent", "amatic", "lobster", "pacifico", "special",
                      "display", "condensed"}
 
+# Each style pairs a font filter with augmentation ops (random-op branch)
+# and a subset of scenario chains (chain branch). Chains are restricted per
+# style — previously RandAugmentOCR applied the global chain list regardless
+# of style, so "handwritten" got outdoor-sign textures and "signage" only
+# got its colored backgrounds by accident.
 STYLES = {
     "clean": {
         "proportion": 0.10,
         "ops": [],
+        "chains": [],
         "font_filter": "regular",
-        "clean_render": True,
     },
     "printed": {
         "proportion": 0.35,
         "ops": [jpeg_compress, blur, photocopy, uneven_lighting,
                 fold_crease, bleed_through, aged_document, scanner_edge,
-                water_stain, exposure_jitter, noise, to_grayscale],
+                water_stain, exposure_jitter, noise, to_grayscale,
+                adjacent_line_clutter],
+        "chains": ["phone_document", "old_scan", "photocopy_fax",
+                   "book_page", "quick_snap", "screenshot",
+                   "dense_document", "dark_screen"],
         "font_filter": "regular",
-        "clean_render": False,
     },
     "handwritten": {
         "proportion": 0.25,
@@ -78,25 +87,33 @@ STYLES = {
                 variable_baseline, slant, ink_fade, lined_paper,
                 noise, exposure_jitter, rotation, wave_distortion,
                 bleed_through],
+        "chains": ["book_page", "quick_snap", "phone_document",
+                   "dense_document", "notebook"],
         "font_filter": "handwriting",
-        "clean_render": False,
     },
     "signage": {
         "proportion": 0.20,
         "ops": [perspective_warp, rotation, exposure_jitter, glare,
-                weather_damage, color_jitter, uneven_lighting, occlusion],
+                weather_damage, color_jitter, uneven_lighting, occlusion,
+                polarity_invert],
+        "chains": ["phone_sign", "outdoor_sign", "worn_label", "occluded",
+                   "distant_photo", "flash_photo", "dark_sign"],
         "font_filter": "display",
-        "clean_render": False,
     },
     "degraded": {
         "proportion": 0.10,
         "ops": [blur, jpeg_compress, noise, exposure_jitter,
                 low_resolution, rotation, color_jitter,
-                wave_distortion, striped_shadow],
+                wave_distortion, striped_shadow, polarity_invert],
+        "chains": list(CHAINS_BY_NAME),
         "font_filter": "all",
-        "clean_render": False,
     },
 }
+
+
+def style_chains(style: str) -> list:
+    """Resolve a style's chain names to (name, ops, weight) tuples."""
+    return [(n, *CHAINS_BY_NAME[n]) for n in STYLES[style]["chains"]]
 
 
 def filter_fonts_by_style(fonts: list[str], style: str) -> list[str]:
@@ -137,7 +154,7 @@ def filter_fonts_by_style(fonts: list[str], style: str) -> list[str]:
 # get_renderable_chars, split_by_script, and the CJK/ASCII cp predicates
 # used to live here — moved to src.encoding.renderable and
 # src.data.script_detect where the corresponding data lives.
-from src.data.script_detect import split_by_script
+from src.data.script_detect import split_by_script, is_ascii_cp
 from src.encoding.renderable import get_renderable_chars
 
 
@@ -192,10 +209,15 @@ def _random_latin_segment():
 
 
 def _maybe_add_latin_segment(plan, p=0.15):
-    """With probability p, append a latin punctuation/number segment to the plan."""
+    """With probability p, append a latin punctuation/number segment to the plan.
+
+    Marked "live" so render_content_plan renders the actual text instead of
+    substituting a pool word — otherwise dates/currency/numbers never make
+    it into the data.
+    """
     if random.random() > p:
         return
-    plan.append({"text": _random_latin_segment(), "script": "latin"})
+    plan.append({"text": _random_latin_segment(), "script": "latin", "live": True})
 
 
 # ---------------------------------------------------------------------------
@@ -230,14 +252,14 @@ _MIX_PATTERNS_UNIVERSAL = [
     (5,  lambda w: random.choice('"\'(') + w + random.choice('"\')')),
     # Typographic quotes: "word" 'word' «word» „word"
     (5,  lambda w: _typo_quote(w)),
-    # Number prefix: 1. word, 2) word, (3) word
-    (10, lambda w: random.choice(_DIGITS) + random.choice(".)") + " " + w),
+    # Number prefix: 1.word, 2)word — no space: inter-word gaps are
+    # deliberately unlabeled (CTC blank), so a labeled space inside a pool
+    # entry would contradict the visually identical unlabeled gaps.
+    (10, lambda w: random.choice(_DIGITS) + random.choice(".)") + w),
     # Number suffix: word-1, word/2
     (5,  lambda w: w + random.choice("-/") + random.choice(_DIGITS)),
     # Mixed: word-word, word/word (keeps both halves from word list)
     (3,  lambda w: w + random.choice("-/&") + w[:max(2, len(w) // 2)]),
-    # Short number (1-3 digits) — common in all scripts (page nos, counts, refs)
-    (5,  lambda w: str(random.randint(1, 999))),
 ]
 
 # Patterns that produce PURE numbers/ASCII — only safe for Latin,
@@ -254,7 +276,30 @@ _MIX_PATTERNS_LATIN_ONLY = [
                             for _ in range(random.randint(2, 3)))),
     # Section/reference: #34, *note
     (3,  lambda w: random.choice("#*") + "".join(random.choices(_DIGITS, k=random.randint(1, 3)))),
+    # Short number (1-3 digits) — page nos, counts, refs. Latin-only:
+    # a pure-digit pool entry labeled as a non-Latin script would put
+    # wrong per-pixel group labels on the digits.
+    (5,  lambda w: str(random.randint(1, 999))),
 ]
+
+# Script-native punctuation — real Hindi text has danda (U+0964) everywhere,
+# Arabic uses its own comma/question/full stop, CJK uses fullwidth forms.
+# All entries verified encodable by encode_text for their script. Kana is
+# excluded: CJK punctuation only encodes under the han codec.
+_SCRIPT_PUNCT = {
+    "devanagari": ["।", "॥"],
+    "bengali": ["।"],
+    "gurmukhi": ["।"],
+    "odia": ["।"],
+    "arabic": ["،", "؛", "؟", "۔"],
+    "han": ["。", "、", "，", "！", "？"],
+    "armenian": ["։", "՞"],
+    "ethiopic": ["።", "፣"],
+    "tibetan": ["།"],
+    "khmer": ["។"],
+    "burmese": ["။", "၊"],
+    "thai": ["ๆ", "ฯ"],
+}
 
 _UNIVERSAL_WEIGHTS = [p[0] for p in _MIX_PATTERNS_UNIVERSAL]
 _UNIVERSAL_BUILDERS = [p[1] for p in _MIX_PATTERNS_UNIVERSAL]
@@ -297,12 +342,16 @@ def mix_punctuation(word: str, p: float = 0.15, script: str = "latin") -> str:
 
     Pure-number patterns (dates, currency, phone numbers) are only used for
     Latin, since they contain no script-specific characters and would confuse
-    LID-1 routing if assigned to other scripts.
+    LID-1 routing if assigned to other scripts. Scripts with native
+    punctuation (danda, Arabic comma, CJK fullwidth) use it ~1/3 of the time.
 
     Returns the original word unchanged (1-p) of the time.
     """
     if random.random() > p:
         return word
+    native = _SCRIPT_PUNCT.get(script)
+    if native and random.random() < 0.35:
+        return word + random.choice(native)
     if script == "latin":
         weights, builders = _ALL_WEIGHTS, _ALL_BUILDERS
     else:
@@ -386,15 +435,19 @@ def render_content_plan(plan, fonts_by_script, h, mw, aug=None,
             total_w += img.width
             continue
 
-        # Try word pool first (pre-rendered), fall back to live render
+        # Mix pool picks (fast) with live renders of the planned text.
+        # Pool-only rendering collapsed diversity to WORD_POOL_SIZE unique
+        # (word, font) pairs per script and silently discarded planned
+        # segments (numbers, dates, punctuation). Items marked "live"
+        # (e.g. _maybe_add_latin_segment output) always render their text.
         pool = word_pools.get(script) if word_pools else None
-        if pool:
+        use_pool = (pool and not item.get("live")
+                    and random.random() < POOL_USE_PROB)
+        img = None
+        if use_pool:
             img, text, _pw = random.choice(pool)
         else:
             fonts = fonts_by_script.get(script, [])
-            if not fonts:
-                return None
-            img = None
             for _ in range(min(3, len(fonts))):
                 font = random.choice(fonts)
                 if not font_covers_text(font, text):
@@ -403,13 +456,18 @@ def render_content_plan(plan, fonts_by_script, h, mw, aug=None,
                 if img is not None and image_has_ink(img):
                     break
                 img = None
-            if img is None:
-                return None
+            if img is None and pool:
+                img, text, _pw = random.choice(pool)
+        if img is None:
+            return None
 
         if total_w + img.width > mw:
-            img = img.crop((0, 0, min(img.width, mw - total_w), h))
-            if img.width < 4:
+            # Don't crop a word mid-glyph and keep its full label — that
+            # trains the model to hallucinate the cut-off characters.
+            # (partial_crop is the intentional, bounded version of this.)
+            if blocks:
                 break
+            return None  # single word wider than max width — skip sample
 
         gid = GROUP_TO_ID[SCRIPT_TO_GROUP[script]]
         sid = SCRIPT_TO_ID[script]
@@ -546,7 +604,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--style", type=str, default="all",
                         choices=list(STYLES.keys()) + ["all"],
                         help="Data style: clean, printed, handwritten, signage, degraded, or all")
-    parser.add_argument("--augment", dest="augment", action="store_true", default=True)
+    parser.add_argument("--augment", dest="augment", action="store_true",
+                        default=False,
+                        help="Bake augmentation into shards (default: off — "
+                             "augmentation runs at train time in the "
+                             "dataloader; baking it in freezes one "
+                             "degradation per sample for all epochs)")
     parser.add_argument("--no-augment", dest="augment", action="store_false")
     parser.add_argument("--height", type=int, default=32)
     parser.add_argument("--max-width", type=int, default=1280)
@@ -622,20 +685,24 @@ def discover_fonts(active_scripts, word_lists):
 # ---------------------------------------------------------------------------
 
 _worker_style_configs = None  # {style: (script_info, fonts_by_script)}
-_worker_word_pools = None     # {(style, script): [(pil_img, text, width), ...]}
+_worker_word_pools = None     # {(font_filter, script): [(pil_img, text, width), ...]}
 _worker_group_index = None    # {style: {group_id: [script_info, ...]}}
 _worker_mixed_ratio = 0.6     # set from CLI via initializer
+_worker_punct_prob = 0.15     # set from CLI via initializer
 
-WORD_POOL_SIZE = 200  # pre-rendered words per script
+WORD_POOL_SIZE = 400  # pre-rendered words per (font_filter, script)
+POOL_USE_PROB = 0.7   # pool pick vs live render of the planned text
 
 
-def _init_line_worker(style_configs, mixed_ratio, pool_height=32):
+def _init_line_worker(style_configs, mixed_ratio, pool_height=32,
+                      punct_prob=0.15):
     """Pool initializer: load shared data and pre-build word pools."""
     global _worker_style_configs, _worker_word_pools
-    global _worker_group_index, _worker_mixed_ratio
+    global _worker_group_index, _worker_mixed_ratio, _worker_punct_prob
     _worker_style_configs = style_configs
     _worker_word_pools = {}
     _worker_mixed_ratio = mixed_ratio
+    _worker_punct_prob = punct_prob
     import os
     pid = os.getpid()
     # Pre-build group index for fast mixed-line script selection
@@ -645,27 +712,33 @@ def _init_line_worker(style_configs, mixed_ratio, pool_height=32):
         for info in script_info:
             by_group.setdefault(info[3], []).append(info)
         _worker_group_index[style] = by_group
-    # Pre-build word pools for all scripts (one pool per script, shared
-    # across styles since all words render clean white bg + black ink)
+    # Pre-build word pools for the most common font filter ("regular",
+    # used by clean + printed). Other filters build lazily on first use —
+    # pools are keyed by (font_filter, script) so handwritten/signage
+    # styles actually render with their own fonts.
     t0 = time.time()
-    first_style = next(iter(style_configs))
-    script_info, _ = style_configs[first_style]
-    for script, fonts, words, _gid in script_info:
-        _get_word_pool(first_style, script, fonts, words, h=pool_height)
+    for style, (script_info, _fonts) in style_configs.items():
+        if STYLES[style]["font_filter"] != "regular":
+            continue
+        for script, fonts, words, _gid in script_info:
+            _get_word_pool("regular", script, fonts, words,
+                           h=pool_height, punct_prob=punct_prob)
+        break
     elapsed = time.time() - t0
     total_words = sum(len(p) for p in _worker_word_pools.values())
     print(f"    [worker {pid}] pools ready: {len(_worker_word_pools)} scripts, "
           f"{total_words} words, {elapsed:.1f}s", flush=True)
 
 
-def _get_word_pool(style, script, fonts, words, h=32, punct_prob=0.15):
-    """Get or build a pre-rendered word pool for a script.
+def _get_word_pool(font_filter, script, fonts, words, h=32, punct_prob=0.15):
+    """Get or build a pre-rendered word pool for a (font_filter, script).
 
-    Each pool entry is (pil_image, text, width). Built once per worker,
-    shared across all styles (words render clean — augmentation applies
-    color/style to the composed line).
+    Each pool entry is (pil_image, text, width). Keyed by font filter so
+    each style renders with its own font category — a single script-keyed
+    pool built from "regular" fonts silently made the handwritten and
+    signage font filters dead config.
     """
-    key = script  # style-independent since all words render clean
+    key = (font_filter, script)
     if key in _worker_word_pools:
         return _worker_word_pools[key]
 
@@ -691,11 +764,12 @@ def _get_word_pool(style, script, fonts, words, h=32, punct_prob=0.15):
         # For non-latin pools: skip words with ASCII chars.
         # split_by_script in plan builders will route those chars to
         # latin, but the pool renders whole words with a single label.
-        if script != "latin" and any(_is_ascii_cp(ord(c)) for c in word):
+        if script != "latin" and any(is_ascii_cp(ord(c)) for c in word):
             continue
-        # Only mix punctuation into latin pool entries.
-        if script == "latin":
-            word = mix_punctuation(word, p=punct_prob, script=script)
+        # Mix punctuation for every script (universal patterns keep the
+        # native word intact; scripts with native punctuation get danda,
+        # Arabic comma, CJK fullwidth, etc.)
+        word = mix_punctuation(word, p=punct_prob, script=script)
         font = random.choice(fonts)
         if not font_covers_text(font, word):
             continue
@@ -877,13 +951,17 @@ def _generate_line_batch(args_tuple):
     if not do_augment or not style_cfg["ops"]:
         aug = None
     else:
-        aug = RandAugmentOCR(n_ops=2, p=0.5, ops=style_cfg["ops"])
+        aug = RandAugmentOCR(n_ops=2, p=0.5, ops=style_cfg["ops"],
+                             chains=style_chains(style))
     t0 = time.time()
 
-    # Collect pre-built word pools (built at worker init, shared across styles)
+    # Collect word pools for this style's font filter (prebuilt at worker
+    # init for "regular"; built lazily on first chunk for other filters)
+    font_filter = style_cfg["font_filter"]
     word_pools = {}
     for script, fonts, words, _gid in all_script_info:
-        pool = _get_word_pool(style, script, fonts, words, h=h, punct_prob=punct_prob)
+        pool = _get_word_pool(font_filter, script, fonts, words, h=h,
+                              punct_prob=punct_prob)
         if pool:
             word_pools[script] = pool
 
@@ -909,7 +987,7 @@ def _generate_line_batch(args_tuple):
         do_mixed = can_mix and random.random() < _worker_mixed_ratio
 
         if do_mixed:
-            plan = _build_mixed_line_plan(group_index)
+            plan = _build_mixed_line_plan(group_index, primary_info)
         else:
             plan = _build_single_line_plan(primary_info)
 
@@ -947,8 +1025,8 @@ def _generate_line_batch(args_tuple):
 def _build_single_line_plan(script_info):
     """Build a content plan for a single-script line (2-8 words).
 
-    Text values are placeholders — render_content_plan replaces them
-    with pre-rendered pool images (which already include punctuation).
+    render_content_plan renders the planned text live (1 - POOL_USE_PROB)
+    of the time and substitutes a pool image otherwise.
     """
     if script_info is None:
         return None
@@ -963,7 +1041,8 @@ def _build_single_line_plan(script_info):
             plan.append({"text": " ", "script": "whitespace"})
         if script != "latin":
             _maybe_add_latin_segment(plan)
-        word = random.choice(words)
+        word = mix_punctuation(random.choice(words),
+                               p=_worker_punct_prob, script=script)
         for seg_text, seg_script in split_by_script(word, script):
             plan.append({"text": seg_text, "script": seg_script})
         if script != "latin":
@@ -971,34 +1050,53 @@ def _build_single_line_plan(script_info):
     return plan
 
 
-def _build_mixed_line_plan(group_index):
-    """Build a content plan for a mixed-script line (2-8 words, 1-4 groups).
+def _build_mixed_line_plan(group_index, primary_info=None):
+    """Build a content plan for a mixed-script line (2-8 words).
+
+    70% of mixed lines pair the primary script with Latin — the dominant
+    real-world mix (local script + English/digits). The rest use 2-4
+    random groups, which real text rarely does but the per-pixel router
+    still needs to see.
 
     Args:
         group_index: {group_id: [script_info, ...]} — pre-built index.
+        primary_info: script_info of the chunk's primary script.
     """
-    n_groups = random.choices([1, 2, 3, 4],
-                              weights=[0.10, 0.45, 0.30, 0.15],
-                              k=1)[0]
-    n_groups = min(n_groups, len(group_index))
-
     n_words = random.choices([2, 3, 4, 5, 6, 7, 8],
                              weights=[0.10, 0.20, 0.25, 0.20, 0.15, 0.05, 0.05],
                              k=1)[0]
-    n_words = max(n_words, n_groups)
 
-    # Pick n_groups distinct groups
-    group_ids = random.sample(list(group_index.keys()),
-                              min(n_groups, len(group_index)))
+    latin_info = None
+    for infos in group_index.values():
+        for info in infos:
+            if info[0] == "latin":
+                latin_info = info
+                break
 
-    # Pick one script per selected group
-    group_scripts = [random.choice(group_index[gid]) for gid in group_ids]
+    realistic = (primary_info is not None and latin_info is not None
+                 and primary_info[0] != "latin" and random.random() < 0.7)
+    if realistic:
+        # Primary script with Latin words sprinkled in
+        chosen = [primary_info if random.random() < 0.7 else latin_info
+                  for _ in range(n_words)]
+        chosen[0] = primary_info
+        if latin_info not in chosen:
+            chosen[random.randrange(1, max(2, n_words))] = latin_info
+    else:
+        n_groups = random.choices([1, 2, 3, 4],
+                                  weights=[0.10, 0.45, 0.30, 0.15],
+                                  k=1)[0]
+        n_groups = min(n_groups, len(group_index))
+        n_words = max(n_words, n_groups)
 
-    # Fill n_words: first ensure one word per group, then random fill
-    chosen = list(group_scripts)
-    for _ in range(n_words - len(chosen)):
-        chosen.append(random.choice(group_scripts))
-    random.shuffle(chosen)
+        group_ids = random.sample(list(group_index.keys()),
+                                  min(n_groups, len(group_index)))
+        group_scripts = [random.choice(group_index[gid]) for gid in group_ids]
+
+        chosen = list(group_scripts)
+        for _ in range(n_words - len(chosen)):
+            chosen.append(random.choice(group_scripts))
+        random.shuffle(chosen)
 
     plan = []
     for i, (script, _fonts, words, _gid) in enumerate(chosen):
@@ -1007,7 +1105,8 @@ def _build_mixed_line_plan(group_index):
         if script != "latin":
             _maybe_add_latin_segment(plan)
             _maybe_add_latin_segment(plan)
-        word = random.choice(words)
+        word = mix_punctuation(random.choice(words),
+                               p=_worker_punct_prob, script=script)
         for seg_text, seg_script in split_by_script(word, script):
             plan.append({"text": seg_text, "script": seg_script})
         if script != "latin":
@@ -1075,19 +1174,21 @@ def main():
     script_fonts, valid_scripts = discover_fonts(active_scripts, word_lists)
 
     # Build per-script targets
+    # Emoji is excluded from line tasks: plan builders never emit emoji
+    # segments, so an emoji chunk just produced ordinary mixed lines whose
+    # sample-level script_id mislabeled them as emoji.
+    line_scripts = [s for s in valid_scripts if s != "emoji"]
+
     if args.vocab_proportional:
         import math
         script_vocabs = {}
-        for script in valid_scripts:
-            if script == "emoji":
-                script_vocabs[script] = 10  # minimal vocab, fixed budget
-            else:
-                vocab = build_script_vocab(script)
-                script_vocabs[script] = len(vocab)
+        for script in line_scripts:
+            vocab = build_script_vocab(script)
+            script_vocabs[script] = len(vocab)
         min_vocab = min(script_vocabs.values())
         print(f"\nVocab-proportional scaling (base={args.samples_per_script}):")
         tasks = []
-        for script in valid_scripts:
+        for script in line_scripts:
             scale = math.sqrt(script_vocabs[script] / min_vocab)
             target = int(args.samples_per_script * scale)
             tasks.append((script, target))
@@ -1095,10 +1196,10 @@ def main():
                   f"scale={scale:.2f}x  samples={target}")
     else:
         tasks = []
-        for script in valid_scripts:
+        for script in line_scripts:
             group = SCRIPT_TO_GROUP[script]
             if args.balance_groups:
-                scripts_in_group = [s for s in valid_scripts if SCRIPT_TO_GROUP[s] == group]
+                scripts_in_group = [s for s in line_scripts if SCRIPT_TO_GROUP[s] == group]
                 target = args.samples_per_script // len(scripts_in_group)
             else:
                 target = args.samples_per_script
@@ -1137,7 +1238,8 @@ def main():
         _, tw, vw = run_generation_pool(
             chunks, _generate_line_batch, args.workers, "line",
             initializer=_init_line_worker,
-            initargs=(style_configs, mixed_ratio, args.height))
+            initargs=(style_configs, mixed_ratio, args.height,
+                      args.punct_prob))
         all_train_widths.extend(tw)
         all_val_widths.extend(vw)
     else:

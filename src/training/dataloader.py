@@ -11,11 +11,13 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from PIL import Image
 from torch.utils.data import Dataset, Sampler
 
 from streaming import Stream, StreamingDataset
 
 from src.taxonomy import SCRIPT_TO_GROUP, SCRIPT_TO_ID, GROUP_TO_ID, NUM_GROUPS
+from src.data.augmentation import RandAugmentOCR
 from src.encoding.decompose import encode_text, script_vocab_size
 
 
@@ -75,7 +77,16 @@ class LipiStreamingDataset(Dataset):
         local: str,
         active_scripts: list[str],
         active_groups: list[str],
+        augment: bool = False,
+        augment_p: float = 0.75,
     ):
+        # Train-time augmentation: shards store clean renders and each
+        # epoch sees a fresh degradation. (Previously augmentation was
+        # baked into the shards at generation time — one fixed appearance
+        # per sample forever, and ~65% of samples fully clean.)
+        # All ops are size-preserving, so stored widths stay valid.
+        self._aug = RandAugmentOCR(n_ops=2, p=augment_p) if augment else None
+
         local_path = Path(local)
         # Support both flat MDS dirs and dirs with chunk_* sub-directories
         chunk_dirs = sorted(local_path.glob("chunk_*"))
@@ -103,7 +114,12 @@ class LipiStreamingDataset(Dataset):
     def __getitem__(self, idx):
         sample = self._ds[idx]
 
-        img = torch.from_numpy(sample["image"].copy())     # (3, 32, W) uint8
+        img_np = sample["image"]                            # (3, 32, W) uint8
+        if self._aug is not None:
+            pil = Image.fromarray(img_np.transpose(1, 2, 0))
+            pil = self._aug(pil)
+            img_np = np.asarray(pil, dtype=np.uint8).transpose(2, 0, 1)
+        img = torch.from_numpy(img_np.copy())              # (3, 32, W) uint8
         label = sample["label"]                             # str
         global_sid = sample["script_id"]                    # int
         global_gid = sample["group_id"]                     # int

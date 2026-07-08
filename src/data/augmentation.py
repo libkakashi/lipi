@@ -44,6 +44,32 @@ def _soft_bg_mask(arr: np.ndarray, blur_radius: float) -> np.ndarray:
     return np.array(mask_img, dtype=np.float32) / 255.0
 
 
+def _bg_is_dark(arr: np.ndarray) -> bool:
+    """True if the background (median of corner pixels) is dark.
+
+    Ops that assume dark-text-on-light-bg (background replacement, text
+    shadow, ink-darkening blends) should skip or flip when this is True.
+    """
+    h, w = arr.shape[:2]
+    corners = np.stack([arr[0, 0], arr[0, w - 1], arr[h - 1, 0], arr[h - 1, w - 1]])
+    lum = 0.299 * corners[:, 0] + 0.587 * corners[:, 1] + 0.114 * corners[:, 2]
+    return float(np.median(lum)) < 110.0
+
+
+def _border_color(img: Image.Image) -> tuple[int, int, int]:
+    """Median color of the image border — used as fill for geometric ops.
+
+    A random light fill on a dark/colored background paints bright wedges
+    that never occur in real photos (and gives the model a synthetic cue).
+    """
+    arr = np.array(img)
+    edges = np.concatenate([
+        arr[0, :].reshape(-1, 3), arr[-1, :].reshape(-1, 3),
+        arr[:, 0].reshape(-1, 3), arr[:, -1].reshape(-1, 3),
+    ])
+    return tuple(int(v) for v in np.median(edges, axis=0))
+
+
 # =========================================================================
 # Image quality
 # =========================================================================
@@ -58,39 +84,38 @@ def jpeg_compress(img: Image.Image) -> Image.Image:
 
 
 def blur(img: Image.Image) -> Image.Image:
-    """Gaussian or motion blur — out of focus, camera shake."""
-    if random.random() < 0.5:
-        # Gaussian — wider range for real phone cameras
-        sigma = random.uniform(0.3, 3.5)
+    """Gaussian, motion, or defocus blur — out of focus, camera shake.
+
+    Severity clamped so text at h=32 stays readable (the old sigma range
+    went to 3.5, which destroyed small text; and the old motion-blur path
+    used ImageFilter.Kernel with size 7, which PIL rejects — it silently
+    no-opped).
+    """
+    r = random.random()
+    if r < 0.5:
+        # Gaussian — out of focus
+        sigma = random.uniform(0.3, 2.0)
         return img.filter(ImageFilter.GaussianBlur(radius=sigma))
-    elif random.random() < 0.7:
-        # Motion blur (horizontal or vertical)
-        w, h = img.size
-        max_k = min(w, h) - 1 if min(w, h) > 3 else 3
-        size = random.choice([k for k in [3, 5, 7] if k <= max_k]) if max_k >= 3 else 3
-        kernel = [0] * (size * size)
-        mid = size // 2
-        horizontal = random.random() < 0.7
-        for i in range(size):
-            if horizontal:
-                kernel[mid * size + i] = 1
-            else:
-                kernel[i * size + mid] = 1
+    elif r < 0.85:
+        # Motion blur — camera shake, mostly horizontal
         try:
-            return img.filter(ImageFilter.Kernel(size=(size, size), kernel=kernel, scale=size, offset=0))
-        except ValueError:
-            return img  # image too small for kernel
+            from scipy.ndimage import uniform_filter1d
+        except ImportError:
+            return img.filter(ImageFilter.GaussianBlur(radius=random.uniform(0.5, 1.5)))
+        arr = np.array(img, dtype=np.float32)
+        length = random.randint(3, 9)
+        axis = 1 if random.random() < 0.7 else 0
+        arr = uniform_filter1d(arr, size=length, axis=axis)
+        return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
     else:
-        # Defocus blur — circular bokeh, common on phone cameras
-        sigma = random.uniform(1.0, 2.5)
-        # Single-pass Gaussian approximates disk/defocus blur
-        return img.filter(ImageFilter.GaussianBlur(radius=sigma))
+        # Defocus — box blur approximates a disk kernel
+        return img.filter(ImageFilter.BoxBlur(random.randint(1, 2)))
 
 
 def low_resolution(img: Image.Image) -> Image.Image:
     """Low res — distant photo, thumbnail, cheap camera."""
     w, h = img.size
-    scale = random.uniform(0.2, 0.75)
+    scale = random.uniform(0.25, 0.75)
     small = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.BILINEAR)
     # Use nearest for very aggressive downscale to simulate pixelation
     upsample = Image.NEAREST if scale < 0.35 else Image.BILINEAR
@@ -168,19 +193,30 @@ def glare(img: Image.Image) -> Image.Image:
 
 
 def striped_shadow(img: Image.Image) -> Image.Image:
-    """Shadows from blinds or fingers — parallel dark bands."""
+    """Shadows from blinds or fingers — parallel soft dark bands.
+
+    Bands run across the width for wide line crops (a blind/finger shadow
+    falls across the line, not along it). The old version stacked 2-5
+    bands along the 32px height, wiping out most of the text.
+    """
     arr = np.array(img, dtype=np.float32)
     h, w = arr.shape[:2]
-    num_stripes = random.randint(2, 5)
-    stripe_width = random.uniform(0.04, 0.1) * h
-    darkness = random.uniform(0.5, 0.75)
+    across_width = w > 2 * h or (w >= h and random.random() < 0.8)
+    dim = w if across_width else h
+    num_stripes = random.randint(1, 3)
+    stripe_width = random.uniform(0.02, 0.08) * dim
+    darkness = random.uniform(0.6, 0.85)
 
-    dim = h
+    mask = np.ones(dim, dtype=np.float32)
+    coords = np.arange(dim)
     for _ in range(num_stripes):
         pos = random.uniform(0, dim)
-        coords = np.arange(dim)
-        stripe = np.exp(-0.5 * ((coords - pos) / stripe_width) ** 2)
-        mask = 1.0 - (1.0 - darkness) * stripe
+        stripe = np.exp(-0.5 * ((coords - pos) / max(stripe_width, 1.0)) ** 2)
+        mask *= 1.0 - (1.0 - darkness) * stripe
+
+    if across_width:
+        arr = arr * mask[np.newaxis, :, np.newaxis]
+    else:
         arr = arr * mask[:, np.newaxis, np.newaxis]
 
     return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
@@ -193,7 +229,7 @@ def striped_shadow(img: Image.Image) -> Image.Image:
 def rotation(img: Image.Image) -> Image.Image:
     """Slight tilt — not-quite-straight scan or photo."""
     angle = random.uniform(-4, 4)
-    bg = tuple(random.randint(220, 255) for _ in range(3))
+    bg = _border_color(img)
     return img.rotate(angle, resample=Image.BILINEAR, expand=False, fillcolor=bg)
 
 
@@ -214,7 +250,7 @@ def perspective_warp(img: Image.Image) -> Image.Image:
     br = (w - random.uniform(0, s * w), h - random.uniform(0, s * h))
     bl = (random.uniform(0, s * w), h - random.uniform(0, s * h))
     coeffs = _find_perspective_coeffs([(0, 0), (w, 0), (w, h), (0, h)], [tl, tr, br, bl])
-    bg = tuple(random.randint(200, 255) for _ in range(3))
+    bg = _border_color(img)
     result = img.transform((w, h), Image.PERSPECTIVE, coeffs, Image.BILINEAR, fillcolor=bg)
     return result
 
@@ -238,19 +274,14 @@ def wave_distortion(img: Image.Image) -> Image.Image:
     phase = random.uniform(0, 2 * math.pi)
     vertical = random.random() < 0.5
 
-    result = np.zeros_like(arr)
     if vertical:
-        for x in range(w):
-            shift = int(amplitude * math.sin(2 * math.pi * frequency * x / w + phase))
-            for y in range(h):
-                src_y = min(max(y + shift, 0), h - 1)
-                result[y, x] = arr[src_y, x]
+        shifts = (amplitude * np.sin(2 * np.pi * frequency * np.arange(w) / w + phase)).astype(np.intp)
+        rows = np.clip(np.arange(h)[:, None] + shifts[None, :], 0, h - 1)
+        result = arr[rows, np.arange(w)[None, :]]
     else:
-        for y in range(h):
-            shift = int(amplitude * math.sin(2 * math.pi * frequency * y / h + phase))
-            for x in range(w):
-                src_x = min(max(x + shift, 0), w - 1)
-                result[y, x] = arr[y, src_x]
+        shifts = (amplitude * np.sin(2 * np.pi * frequency * np.arange(h) / h + phase)).astype(np.intp)
+        cols = np.clip(np.arange(w)[None, :] + shifts[:, None], 0, w - 1)
+        result = arr[np.arange(h)[:, None], cols]
 
     return Image.fromarray(result)
 
@@ -555,12 +586,9 @@ def variable_baseline(img: Image.Image) -> Image.Image:
     x_positions = np.linspace(0, w - 1, n_control)
     displacements = np.interp(np.arange(w), x_positions, control_points)
 
-    result = np.full_like(arr, arr[0, 0])  # fill with top-left pixel (background)
-    for x in range(w):
-        shift = int(round(displacements[x]))
-        for y in range(h):
-            src_y = min(max(y + shift, 0), h - 1)
-            result[y, x] = arr[src_y, x]
+    shifts = np.round(displacements).astype(np.intp)
+    rows = np.clip(np.arange(h)[:, None] + shifts[None, :], 0, h - 1)
+    result = arr[rows, np.arange(w)[None, :]]
 
     return Image.fromarray(result)
 
@@ -575,13 +603,12 @@ def slant(img: Image.Image) -> Image.Image:
     h, w = arr.shape[:2]
     shear = random.uniform(-0.3, 0.3)  # negative = left lean, positive = right
 
-    result = np.full_like(arr, arr[0, 0])
-    for y in range(h):
-        offset = int(shear * (y - h / 2))
-        for x in range(w):
-            src_x = x - offset
-            if 0 <= src_x < w:
-                result[y, x] = arr[y, src_x]
+    offsets = (shear * (np.arange(h) - h / 2)).astype(np.intp)
+    src_x = np.arange(w)[None, :] - offsets[:, None]
+    valid = (src_x >= 0) & (src_x < w)
+    src_x = np.clip(src_x, 0, w - 1)
+    result = arr[np.arange(h)[:, None], src_x]
+    result[~valid] = arr[0, 0]
 
     return Image.fromarray(result)
 
@@ -656,22 +683,26 @@ def variable_stroke(img: Image.Image) -> Image.Image:
 
 
 def lined_paper(img: Image.Image) -> Image.Image:
-    """Lined paper background — horizontal ruled lines behind text.
+    """Lined paper background — ruled lines behind text.
 
-    Common in handwritten notes, forms, and notebooks.
+    Real ruled lines appear roughly once per text height (the text sits
+    between them), so a line crop shows a baseline rule and sometimes the
+    rule of the line above. The old 6-10px spacing drew 3-5 lines straight
+    through the text.
     """
     arr = np.array(img, dtype=np.float32)
     h, w = arr.shape[:2]
 
-    line_spacing = random.randint(6, 10)
-    line_color = random.uniform(0.7, 0.9)  # light gray
-    line_thickness = 1
+    line_color = random.uniform(0.6, 0.85)
+    rule = np.array([200, 200, 230], dtype=np.float32)
 
-    for y in range(0, h, line_spacing):
-        for dy in range(line_thickness):
-            if y + dy < h:
-                arr[y + dy, :] = arr[y + dy, :] * line_color + \
-                    np.array([200, 200, 230], dtype=np.float32) * (1 - line_color)
+    ys = [int(h * random.uniform(0.78, 0.97))]  # baseline rule
+    if random.random() < 0.4:
+        ys.append(int(h * random.uniform(0.02, 0.18)))  # rule of line above
+
+    for y in ys:
+        y = min(max(y, 0), h - 1)
+        arr[y, :] = arr[y, :] * line_color + rule * (1 - line_color)
 
     return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
 
@@ -689,6 +720,8 @@ def textured_background(img: Image.Image) -> Image.Image:
     """
     arr = np.array(img, dtype=np.float32)
     h, w = arr.shape[:2]
+    if _bg_is_dark(arr):
+        return img  # mask assumes dark text on light bg
 
     # Background = bright pixels (top 60% luma), soft-edged to blend naturally
     bg_mask = _soft_bg_mask(arr, blur_radius=1.5)
@@ -761,6 +794,8 @@ def colored_background(img: Image.Image) -> Image.Image:
     """
     arr = np.array(img, dtype=np.float32)
     h, w = arr.shape[:2]
+    if _bg_is_dark(arr):
+        return img  # mask assumes dark text on light bg
 
     bg_mask = _soft_bg_mask(arr, blur_radius=1.0)
 
@@ -905,16 +940,17 @@ def camera_noise(img: Image.Image) -> Image.Image:
     style = random.choice(["shot", "read", "combined"])
 
     if style in ("shot", "combined"):
-        # Shot noise (Poisson) — brighter pixels get more noise
-        # Scale down, apply Poisson, scale back up
-        gain = random.uniform(0.02, 0.08)
+        # Shot noise (Poisson) — brighter pixels get more noise.
+        # Gain floor matters: at 0.02 a white pixel is ~5 photons and the
+        # image becomes unreadable rainbow noise (label noise for CTC).
+        gain = random.uniform(0.08, 0.18)
         scaled = arr * gain
         noisy = np.random.poisson(np.clip(scaled, 0, 255).astype(np.float64))
         arr = noisy.astype(np.float32) / gain
 
     if style in ("read", "combined"):
         # Read noise (Gaussian, signal-independent)
-        sigma = random.uniform(3, 15)
+        sigma = random.uniform(3, 10)
         arr = arr + np.random.normal(0, sigma, arr.shape)
 
     return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
@@ -932,6 +968,8 @@ def text_shadow(img: Image.Image) -> Image.Image:
     """
     arr = np.array(img, dtype=np.float32)
     h, w = arr.shape[:2]
+    if _bg_is_dark(arr):
+        return img  # text-mask heuristic assumes dark text on light bg
 
     # Detect text regions (dark areas)
     gray = _luminance(arr)
@@ -970,10 +1008,68 @@ def text_shadow(img: Image.Image) -> Image.Image:
 
 
 # =========================================================================
-# Op registry — 28 ops
-# Removed: wave_distortion (slow, redundant with elastic_distortion),
-# bleed_through (niche), variable_baseline, slant, ink_fade,
-# variable_stroke, lined_paper (all handwriting-specific)
+# Polarity & layout context
+# =========================================================================
+
+def polarity_invert(img: Image.Image) -> Image.Image:
+    """Light-on-dark text — dark signage, screens in dark mode, LED boards,
+    engraved/embossed metal. Without this the model never sees inverted
+    polarity, which is a large share of real scene text.
+    """
+    arr = 255.0 - np.array(img, dtype=np.float32)
+    # Slight brightness pull so it isn't always a perfect negative
+    if random.random() < 0.5:
+        arr *= random.uniform(0.8, 1.0)
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+
+
+def adjacent_line_clutter(img: Image.Image) -> Image.Image:
+    """Slivers of neighboring text lines at the top/bottom edge.
+
+    Real crops from dense documents include the descenders of the line
+    above and/or the ascenders of the line below. Approximated by pasting
+    scaled, shifted slivers of the image's own text at the edges.
+    """
+    arr = np.array(img, dtype=np.float32)
+    h, w = arr.shape[:2]
+    if h < 12 or w < 16:
+        return img
+    dark_bg = _bg_is_dark(arr)
+    out = arr.copy()
+
+    edges = random.choices([["top"], ["bottom"], ["top", "bottom"]],
+                           weights=[0.4, 0.4, 0.2], k=1)[0]
+    for edge in edges:
+        sliver_h = max(2, int(h * random.uniform(0.08, 0.22)))
+        scale = random.uniform(0.7, 1.1)
+        src = img.resize((max(8, int(w * scale)), max(8, int(h * scale))),
+                         Image.BILINEAR)
+        src_arr = np.array(src, dtype=np.float32)
+        sh, sw = src_arr.shape[:2]
+        sliver_h = min(sliver_h, sh)
+        if edge == "top":
+            band = src_arr[sh - sliver_h:]      # descenders of line above
+        else:
+            band = src_arr[:sliver_h]           # ascenders of line below
+        band = np.roll(band, random.randint(0, sw), axis=1)
+        reps = int(np.ceil(w / band.shape[1]))
+        band = np.tile(band, (1, reps, 1))[:, :w]
+
+        rows = slice(0, sliver_h) if edge == "top" else slice(h - sliver_h, h)
+        # Ink wins: min-blend on light bg, max-blend on dark bg
+        if dark_bg:
+            out[rows] = np.maximum(out[rows], band)
+        else:
+            out[rows] = np.minimum(out[rows], band)
+
+    return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8))
+
+
+# =========================================================================
+# Op registry — 30 ops
+# Excluded (handwriting-specific, used via style op lists in generate.py):
+# variable_baseline, slant, ink_fade, variable_stroke, lined_paper,
+# wave_distortion, bleed_through
 # =========================================================================
 
 AUGMENT_OPS: list[Callable] = [
@@ -1017,6 +1113,9 @@ AUGMENT_OPS: list[Callable] = [
     # Camera (2)
     camera_noise,
     text_shadow,
+    # Polarity & layout context (2)
+    polarity_invert,
+    adjacent_line_clutter,
 ]
 
 # elastic_distortion needs scipy
@@ -1069,43 +1168,62 @@ SCENARIO_CHAINS: list[tuple[str, list[Callable], float]] = [
     ("distant_photo", [
         low_resolution, blur, camera_noise, perspective_warp,
     ], 1.5),
+    ("dense_document", [
+        adjacent_line_clutter, uneven_lighting, jpeg_compress, blur,
+    ], 2.0),
+    ("dark_sign", [
+        polarity_invert, perspective_warp, glare, camera_noise,
+    ], 1.5),
+    ("dark_screen", [
+        polarity_invert, screen_artifacts, jpeg_compress,
+    ], 1.5),
+    ("notebook", [
+        lined_paper, variable_baseline, rotation, camera_noise,
+    ], 0.75),
 ]
 
-# Precompute scenario weights for weighted random selection
-_SCENARIO_WEIGHTS = [w for _, _, w in SCENARIO_CHAINS]
-_SCENARIO_TOTAL = sum(_SCENARIO_WEIGHTS)
+# Name → (ops, weight): lets callers assemble style-specific chain subsets
+CHAINS_BY_NAME: dict[str, tuple[list[Callable], float]] = {
+    name: (ops, weight) for name, ops, weight in SCENARIO_CHAINS
+}
 
 
-def _pick_scenario() -> list[Callable]:
+def _pick_scenario(chains: list[tuple[str, list[Callable], float]]) -> list[Callable]:
     """Weighted random selection of a scenario chain."""
-    r = random.random() * _SCENARIO_TOTAL
-    cumulative = 0
-    for _, ops, weight in SCENARIO_CHAINS:
+    total = sum(w for _, _, w in chains)
+    r = random.random() * total
+    cumulative = 0.0
+    for _, ops, weight in chains:
         cumulative += weight
         if r <= cumulative:
             return ops
-    return SCENARIO_CHAINS[-1][1]
+    return chains[-1][1]
 
 
 class RandAugmentOCR:
     """Augmentation for OCR: mix of random ops and realistic scenario chains.
 
-    50% of the time applies a scenario chain (realistic multi-degradation).
-    50% of the time applies N random independent ops (diversity).
+    50% of augmented samples get a scenario chain (realistic
+    multi-degradation), 50% get N random independent ops (diversity).
+    `chains` restricts which scenario chains apply (e.g. per data style);
+    None means all chains, [] disables the chain branch entirely.
     """
 
-    def __init__(self, n_ops: int = 2, p: float = 0.5, ops: list[Callable] | None = None):
+    def __init__(self, n_ops: int = 2, p: float = 0.5,
+                 ops: list[Callable] | None = None,
+                 chains: list[tuple[str, list[Callable], float]] | None = None):
         self.n_ops = n_ops
         self.p = p
         self.ops = ops if ops is not None else AUGMENT_OPS
+        self.chains = chains if chains is not None else SCENARIO_CHAINS
 
     def __call__(self, img: Image.Image) -> Image.Image:
         if random.random() > self.p:
             return img
 
-        if random.random() < 0.5:
+        if self.chains and random.random() < 0.5:
             # Scenario chain: apply all ops in a realistic combination
-            chain = _pick_scenario()
+            chain = _pick_scenario(self.chains)
             for op in chain:
                 img = op(img)
         else:

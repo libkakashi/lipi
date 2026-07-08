@@ -92,6 +92,16 @@ def parse_args():
                              "weights. Loads only experts + CTC heads.")
     parser.add_argument("--val-split", type=float, default=0.1)
     parser.add_argument("--log-interval", type=int, default=20)
+    parser.add_argument("--train-aug", dest="train_aug", action="store_true",
+                        default=True,
+                        help="Apply augmentation on the fly in the train "
+                             "dataloader (default: on). Expects shards "
+                             "generated WITHOUT baked-in augmentation.")
+    parser.add_argument("--no-train-aug", dest="train_aug",
+                        action="store_false")
+    parser.add_argument("--train-aug-p", type=float, default=0.75,
+                        help="Probability a train sample is augmented "
+                             "(default: 0.75)")
     parser.add_argument("--num-workers", type=int, default=12,
                         help="DataLoader worker processes. Set 0 to disable "
                              "multiprocessing (useful for debugging). Lower "
@@ -202,11 +212,13 @@ def load_and_prepare_data(args, device):
 
     train_dataset = LipiStreamingDataset(
         local=train_dir, active_scripts=all_scripts,
-        active_groups=active_groups)
+        active_groups=active_groups,
+        augment=args.train_aug, augment_p=args.train_aug_p)
     val_dataset = LipiStreamingDataset(
         local=val_dir, active_scripts=all_scripts,
-        active_groups=active_groups)
-    print(f"  Train: {len(train_dataset)}, Val (full): {len(val_dataset)}")
+        active_groups=active_groups)  # val stays clean
+    print(f"  Train: {len(train_dataset)}, Val (full): {len(val_dataset)}"
+          f"{'  [train-time aug p=%.2f]' % args.train_aug_p if args.train_aug else ''}")
 
     # Subsample val to 500 per script for fast, balanced eval
     from collections import Counter

@@ -94,12 +94,11 @@ def font_covers_text(font_path: str, text: str) -> bool:
     """Check that a font has cmap entries for ALL characters in text.
 
     Prevents partial renders where some chars display and others show tofu.
-    Skips shared chars (digits, punctuation, space) since all fonts have those.
+    ASCII is checked too — display/script fonts sometimes lack digits or
+    punctuation, which would silently render tofu.
     """
     for ch in text:
-        cp = ord(ch)
-        # Skip ASCII shared chars — every font has these
-        if 0x0020 <= cp <= 0x007E:
+        if ch.isspace():
             continue
         if not font_has_codepoint(font_path, ch):
             return False
@@ -121,10 +120,19 @@ def render_word(text: str, font_path: str, height: int = 32,
             if abs(bg_lum - ink_lum) > 60:
                 break
 
-    font_size = random.randint(18, 26)
+    # Mostly render above target height and downsample (crisp, like real
+    # crops from high-res photos); sometimes render small and upsample
+    # (soft, like distant/low-res text). The old 18-26px-only range meant
+    # every training image was an upscaled soft render.
+    if random.random() < 0.7:
+        font_size = random.randint(int(height * 1.1), height * 2)
+    else:
+        font_size = random.randint(max(12, height // 2), height - 6)
+    pad_scale = font_size / 22.0
     return render_text(
         text, font_path, font_size, ink=ink, bg=bg, height=height,
-        pad_x=random.randint(2, 8), pad_y=random.randint(2, 6),
+        pad_x=max(1, int(random.randint(2, 8) * pad_scale)),
+        pad_y=max(1, int(random.randint(2, 6) * pad_scale)),
     )
 
 
