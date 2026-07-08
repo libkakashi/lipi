@@ -559,7 +559,11 @@ def save_checkpoint(model, optimizer, scheduler, scaler, epoch, args, save_dir,
     }
     if ema is not None:
         payload["ema"] = ema.state_dict()
-    torch.save(payload, ckpt_path)
+    # Atomic write: a kill mid-save (preemption, wall-clock deadline) must
+    # never leave a truncated moe_epochN.pt for the next resume to load.
+    tmp_path = ckpt_path.with_suffix(".pt.tmp")
+    torch.save(payload, tmp_path)
+    tmp_path.replace(ckpt_path)
     print(f"  Saved: {ckpt_path}")
 
 
