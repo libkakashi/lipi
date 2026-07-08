@@ -1,8 +1,17 @@
 """
-Unicode-based script detection.
+Unicode-based script detection and segmentation.
 
-Maps a text string to its script by examining Unicode code points
-(majority vote across characters). Used for labeling and diagnostics.
+Two related concerns share this file:
+
+  detect_script(text)                — majority-vote a whole string to one
+                                       script name (labeling / diagnostics).
+  split_by_script(text, parent)      — carve a string into runs by script,
+                                       peeling off ASCII to "latin" and
+                                       kana/kanji within han/kana parents.
+
+Both operate on Unicode code-point ranges. The tight predicates
+(is_kana / is_kanji / is_cjk_punct / is_ascii) are also exported for
+callers that need to test one code point at a time.
 """
 
 # Unicode block ranges for each script
@@ -83,6 +92,72 @@ def _char_to_script(ch: str) -> str | None:
             if start <= cp <= end:
                 return script
     return None
+
+
+def is_kana_cp(cp: int) -> bool:
+    """Hiragana + Katakana + Katakana Phonetic Extensions."""
+    return 0x3040 <= cp <= 0x30FF or 0x31F0 <= cp <= 0x31FF
+
+
+def is_kanji_cp(cp: int) -> bool:
+    """CJK Unified Ideographs + CJK Extension A."""
+    return 0x4E00 <= cp <= 0x9FFF or 0x3400 <= cp <= 0x4DBF
+
+
+def is_cjk_punct_cp(cp: int) -> bool:
+    """CJK Symbols and Punctuation."""
+    return 0x3000 <= cp <= 0x303F
+
+
+def is_ascii_cp(cp: int) -> bool:
+    """Printable ASCII (excluding space)."""
+    return 0x21 <= cp <= 0x7E
+
+
+def split_by_script(text: str, parent_script: str) -> list[tuple[str, str]]:
+    """Split text into runs of same-script characters, peeling off ASCII.
+
+    ASCII characters (0x21-0x7E) become "latin" segments regardless of
+    parent. For han/kana parents, kana and kanji/CJK-punct also split
+    into separate runs so the training pipeline can label each segment
+    with the correct script for CTC targets. Everything else stays in
+    parent_script.
+
+    Returns [(chunk_text, script_name), ...].
+    """
+    if not text:
+        return []
+
+    segments = []
+    current: list[str] = []
+    current_script: str | None = None
+
+    for ch in text:
+        cp = ord(ch)
+
+        if is_ascii_cp(cp):
+            script: str | None = "latin"
+        elif parent_script in ("han", "kana"):
+            if is_kana_cp(cp):
+                script = "kana"
+            elif is_kanji_cp(cp) or is_cjk_punct_cp(cp):
+                script = "han"
+            else:
+                script = current_script  # non-ASCII, non-CJK → attach
+        else:
+            script = parent_script
+
+        if script != current_script and current_script is not None and script is not None:
+            segments.append(("".join(current), current_script))
+            current = []
+        if script is not None:
+            current_script = script
+        current.append(ch)
+
+    if current and current_script is not None:
+        segments.append(("".join(current), current_script))
+
+    return segments
 
 
 def detect_script(text: str) -> str:
