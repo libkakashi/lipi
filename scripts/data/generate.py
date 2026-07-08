@@ -34,6 +34,7 @@ from src.data.augmentation import (
     noise, color_jitter, to_grayscale,
     occlusion, weather_damage,
     polarity_invert, adjacent_line_clutter,
+    text_decoration, highlighter, table_rules,
 )
 from src.encoding.vocab import build_script_vocab
 from src.data.rendering import (
@@ -77,7 +78,8 @@ STYLES = {
         "ops": [jpeg_compress, blur, photocopy, uneven_lighting,
                 fold_crease, bleed_through, aged_document, scanner_edge,
                 water_stain, exposure_jitter, noise, to_grayscale,
-                adjacent_line_clutter],
+                adjacent_line_clutter,
+                text_decoration, highlighter, table_rules],
         "chains": ["phone_document", "old_scan", "photocopy_fax",
                    "book_page", "quick_snap", "screenshot",
                    "dense_document", "dark_screen"],

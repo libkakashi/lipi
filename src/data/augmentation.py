@@ -1031,6 +1031,121 @@ def text_shadow(img: Image.Image) -> Image.Image:
 
 
 # =========================================================================
+# Document decorations — underline, highlighter, table ruling
+# =========================================================================
+
+def text_decoration(img: Image.Image) -> Image.Image:
+    """Underline or strikethrough — links, form fields, edits, emphasis.
+
+    Text is height-normalized, so the baseline sits around 72-80% of the
+    crop; underlines go just below it, strikethrough through the
+    x-height band. Spans the full line or a word-sized sub-span.
+    """
+    arr = np.array(img, dtype=np.float32)
+    h, w = arr.shape[:2]
+    if _bg_is_dark(arr):
+        color = np.array([random.randint(170, 255)] * 3, dtype=np.float32)
+    else:
+        color = np.array(random.choice([
+            (random.randint(0, 60),) * 3,                    # ink
+            (30, 60, random.randint(150, 220)),              # link blue
+            (random.randint(150, 220), 30, 30),              # red edit
+        ]), dtype=np.float32)
+
+    if random.random() < 0.7:
+        y = int(h * random.uniform(0.76, 0.90))   # underline
+    else:
+        y = int(h * random.uniform(0.42, 0.58))   # strikethrough
+    thickness = random.choice([1, 1, 2])
+
+    if random.random() < 0.5:
+        x0, x1 = 0, w                              # whole line
+    else:
+        span = random.uniform(0.2, 0.7)            # one word / phrase
+        x0 = int(random.uniform(0, 1 - span) * w)
+        x1 = min(w, x0 + max(8, int(span * w)))
+
+    alpha = random.uniform(0.7, 1.0)
+    ys = slice(max(0, y), min(h, y + thickness))
+    arr[ys, x0:x1] = arr[ys, x0:x1] * (1 - alpha) + color * alpha
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+
+
+def highlighter(img: Image.Image) -> Image.Image:
+    """Highlighter marker band — multiply blend so ink stays dark."""
+    arr = np.array(img, dtype=np.float32)
+    h, w = arr.shape[:2]
+    if _bg_is_dark(arr):
+        return img  # markers don't read on dark backgrounds
+
+    color = np.array(random.choice([
+        (255, 235, 60),    # yellow
+        (170, 255, 120),   # green
+        (255, 160, 200),   # pink
+        (120, 230, 255),   # cyan
+        (255, 200, 90),    # orange
+    ]), dtype=np.float32) / 255.0
+
+    if random.random() < 0.5:
+        x0, x1 = 0, w
+    else:
+        span = random.uniform(0.25, 0.8)
+        x0 = int(random.uniform(0, 1 - span) * w)
+        x1 = min(w, x0 + max(8, int(span * w)))
+    y0 = int(h * random.uniform(0.0, 0.12))
+    y1 = int(h * random.uniform(0.85, 1.0))
+
+    strength = random.uniform(0.55, 0.95)
+    band = arr[y0:y1, x0:x1]
+    arr[y0:y1, x0:x1] = band * (1 - strength) + band * color[None, None, :] * strength
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+
+
+def table_rules(img: Image.Image) -> Image.Image:
+    """Table/form ruling — cell borders at crop edges, occasionally a
+    column rule through the text. Ubiquitous in enterprise documents;
+    adjacent_line_clutter covers neighboring text but not ruling lines.
+    """
+    arr = np.array(img, dtype=np.float32)
+    h, w = arr.shape[:2]
+    if h < 8 or w < 16:
+        return img
+    dark_bg = _bg_is_dark(arr)
+    color = np.array([random.randint(160, 230) if dark_bg
+                      else random.randint(20, 110)] * 3, dtype=np.float32)
+    alpha = random.uniform(0.6, 1.0)
+
+    def vline(x, t):
+        x = max(0, min(w - t, x))
+        arr[:, x:x + t] = arr[:, x:x + t] * (1 - alpha) + color * alpha
+
+    def hline(y, t):
+        y = max(0, min(h - t, y))
+        arr[y:y + t, :] = arr[y:y + t, :] * (1 - alpha) + color * alpha
+
+    drew = False
+    if random.random() < 0.65:   # left cell border
+        vline(int(w * random.uniform(0, 0.03)), random.choice([1, 2]))
+        drew = True
+    if random.random() < 0.65:   # right cell border
+        vline(int(w * random.uniform(0.97, 1.0)), random.choice([1, 2]))
+        drew = True
+    if random.random() < 0.25:   # column rule through the crop
+        vline(int(w * random.uniform(0.25, 0.75)), 1)
+        drew = True
+    if random.random() < 0.5:    # row separator above
+        hline(int(h * random.uniform(0, 0.06)), random.choice([1, 2]))
+        drew = True
+    if random.random() < 0.5:    # row separator below
+        hline(int(h * random.uniform(0.92, 0.99)), random.choice([1, 2]))
+        drew = True
+    if not drew:
+        vline(0, 1)
+
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+
+
+# =========================================================================
 # Polarity & layout context
 # =========================================================================
 
@@ -1089,7 +1204,7 @@ def adjacent_line_clutter(img: Image.Image) -> Image.Image:
 
 
 # =========================================================================
-# Op registry — 30 ops
+# Op registry — 33 ops
 # Excluded (handwriting-specific, used via style op lists in generate.py):
 # variable_baseline, slant, ink_fade, variable_stroke, lined_paper,
 # wave_distortion, bleed_through
@@ -1136,6 +1251,10 @@ AUGMENT_OPS: list[Callable] = [
     # Camera (2)
     camera_noise,
     text_shadow,
+    # Document decorations (3)
+    text_decoration,
+    highlighter,
+    table_rules,
     # Polarity & layout context (2)
     polarity_invert,
     adjacent_line_clutter,
@@ -1192,7 +1311,8 @@ SCENARIO_CHAINS: list[tuple[str, list[Callable], float]] = [
         low_resolution, blur, camera_noise, perspective_warp,
     ], 1.5),
     ("dense_document", [
-        adjacent_line_clutter, uneven_lighting, jpeg_compress, blur,
+        table_rules, adjacent_line_clutter, uneven_lighting, jpeg_compress,
+        blur,
     ], 2.0),
     ("dark_sign", [
         polarity_invert, perspective_warp, glare, camera_noise,
