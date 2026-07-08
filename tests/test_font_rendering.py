@@ -731,12 +731,12 @@ class TestFontIsolation:
 
     def test_fonts_match_explicit_mapping(self):
         """Every font returned by find_fonts_for_script must be in the
-        explicit _FONT_TO_SCRIPTS mapping for that script.
+        explicit FONT_TO_SCRIPTS mapping for that script.
 
         With explicit mapping, cross-contamination is impossible by
         construction. This test verifies the mapping is consistent.
         """
-        from src.data.fonts import _FONT_TO_SCRIPTS
+        from src.data.font_registry import FONT_TO_SCRIPTS
 
         failures = []
         for script in SCRIPTS:
@@ -745,11 +745,11 @@ class TestFontIsolation:
             fonts = find_fonts_for_script(script)
             for f in fonts:
                 name = Path(f).name
-                if name not in _FONT_TO_SCRIPTS:
+                if name not in FONT_TO_SCRIPTS:
                     failures.append(f"{script}: {name} not in mapping")
-                elif script not in _FONT_TO_SCRIPTS[name]:
+                elif script not in FONT_TO_SCRIPTS[name]:
                     failures.append(f"{script}: {name} mapped to "
-                                    f"{_FONT_TO_SCRIPTS[name]}, not {script}")
+                                    f"{FONT_TO_SCRIPTS[name]}, not {script}")
 
         assert not failures, (
             "Font mapping violations:\n  " + "\n  ".join(failures))
