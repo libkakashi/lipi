@@ -19,7 +19,7 @@ import numpy as np
 import torch
 from streaming import MDSWriter
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.taxonomy import SCRIPTS
 

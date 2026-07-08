@@ -14,7 +14,7 @@ import sys
 import subprocess
 from pathlib import Path
 
-DATA_DIR = Path(__file__).parent.parent / "training_data" / "real_datasets"
+DATA_DIR = Path(__file__).parent.parent.parent / "training_data" / "real_datasets"
 
 
 def run(cmd, cwd=None):

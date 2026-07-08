@@ -23,13 +23,13 @@ import torch
 import numpy as np
 from PIL import Image
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.taxonomy import SCRIPTS, SCRIPT_TO_GROUP, GROUP_TO_ID, SCRIPT_TO_ID
 from src.data.color import rgb_to_input
 from src.data.rendering import resize_or_pad, image_has_ink
 
-DATA_DIR = Path(__file__).parent.parent / "training_data" / "real_datasets"
+DATA_DIR = Path(__file__).parent.parent.parent / "training_data" / "real_datasets"
 SHARD_SIZE = 5000  # images per shard
 
 

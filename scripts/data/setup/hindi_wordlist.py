@@ -15,7 +15,7 @@ Output: training_data/word_lists/hindi_legal.txt
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 
 # Common Hindi words (high frequency in legal documents)

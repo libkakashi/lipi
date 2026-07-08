@@ -14,7 +14,7 @@ from pathlib import Path
 from urllib.request import urlopen, Request
 from urllib.error import URLError
 
-WORD_LIST_DIR = Path(__file__).parent.parent / "training_data" / "word_lists"
+WORD_LIST_DIR = Path(__file__).parent.parent.parent / "training_data" / "word_lists"
 
 
 def is_in_script(text: str, ranges: list[tuple[int, int]]) -> bool:

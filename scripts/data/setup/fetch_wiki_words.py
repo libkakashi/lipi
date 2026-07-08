@@ -22,7 +22,7 @@ import urllib.parse
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-WORD_LIST_DIR = Path(__file__).parent.parent / "training_data" / "word_lists"
+WORD_LIST_DIR = Path(__file__).parent.parent.parent / "training_data" / "word_lists"
 
 # Wikipedia language code -> word list file(s)
 WIKI_LANGS = {

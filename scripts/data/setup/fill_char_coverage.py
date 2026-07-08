@@ -20,7 +20,7 @@ import argparse
 import random
 from pathlib import Path
 
-WORD_LIST_DIR = Path(__file__).parent.parent / "training_data" / "word_lists"
+WORD_LIST_DIR = Path(__file__).parent.parent.parent / "training_data" / "word_lists"
 
 
 def get_existing_chars(filepath: Path, ranges: list[tuple[int, int]]) -> set[int]:

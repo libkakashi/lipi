@@ -19,7 +19,7 @@ from multiprocessing import Pool
 
 import torch
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.taxonomy import SCRIPTS, SCRIPT_TO_GROUP, GROUP_TO_ID, SCRIPT_TO_ID
 from src.data.color import rgb_to_input

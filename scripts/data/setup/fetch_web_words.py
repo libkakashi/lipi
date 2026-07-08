@@ -15,7 +15,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-WORD_LIST_DIR = Path(__file__).parent.parent / "training_data" / "word_lists"
+WORD_LIST_DIR = Path(__file__).parent.parent.parent / "training_data" / "word_lists"
 
 # Leipzig Corpora Collection: pre-built word lists
 # Format: http://pcai056.informatik.uni-leipzig.de/downloads/corpora/{lang}_wikipedia_2021_10K-words.txt

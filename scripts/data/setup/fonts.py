@@ -7,7 +7,7 @@ import urllib.request
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-FONT_DIR = Path(__file__).parent.parent.parent / "training_data" / "fonts"
+FONT_DIR = Path(__file__).parent.parent.parent.parent / "training_data" / "fonts"
 
 NOTO = "https://github.com/notofonts/notofonts.github.io/raw/main/fonts"
 GFONTS = "https://github.com/google/fonts/raw/main/ofl"

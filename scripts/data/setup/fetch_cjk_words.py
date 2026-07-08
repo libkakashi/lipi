@@ -28,7 +28,7 @@ import urllib.request
 from collections import Counter
 from pathlib import Path
 
-WORD_LIST_DIR = Path(__file__).resolve().parent.parent / "training_data" / "word_lists"
+WORD_LIST_DIR = Path(__file__).resolve().parent.parent.parent / "training_data" / "word_lists"
 CACHE_DIR = WORD_LIST_DIR / "raw_chinese"
 CHINESE_FILE = WORD_LIST_DIR / "chinese.txt"
 JAPANESE_FILE = WORD_LIST_DIR / "japanese.txt"

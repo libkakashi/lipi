@@ -12,7 +12,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-WORD_LIST_DIR = Path(__file__).parent.parent / "training_data" / "word_lists"
+WORD_LIST_DIR = Path(__file__).parent.parent.parent / "training_data" / "word_lists"
 
 # bible-api.com supports these languages with simple API
 BIBLE_API_LANGS = {
