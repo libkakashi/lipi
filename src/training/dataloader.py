@@ -216,15 +216,28 @@ class WidthSortedBatchSampler(Sampler):
     Each batch gets up to `max_batch_size` images, but is also capped
     by a pixel budget (max_batch_size * max_width) so wide images
     get smaller batches and narrow images get larger batches.
+
+    With `sample_weights`, each epoch draws len(widths) indices with
+    replacement (p ∝ weights) instead of visiting every index once —
+    used for script-balanced sampling. Oversampled indices repeat within
+    the epoch (each occurrence gets a fresh train-time augmentation);
+    undersampled ones rotate across epochs via the per-epoch redraw.
     """
 
     def __init__(self, widths: list[int] | np.ndarray, max_batch_size: int,
-                 max_width: int = 0, pixel_budget: int = 0):
+                 max_width: int = 0, pixel_budget: int = 0,
+                 sample_weights: np.ndarray | None = None):
         self.max_batch_size = max_batch_size
         if isinstance(widths, np.ndarray):
             widths = widths.tolist()
-        self.sorted_indices = sorted(range(len(widths)), key=lambda i: widths[i])
         self.widths = widths
+
+        self.sample_weights = None
+        if sample_weights is not None:
+            w = np.asarray(sample_weights, dtype=np.float64)
+            assert len(w) == len(widths), \
+                f"sample_weights length {len(w)} != widths length {len(widths)}"
+            self.sample_weights = w / w.sum()
 
         # Pixel budget: either provided directly or derived from max batch size
         if pixel_budget > 0:
@@ -235,28 +248,37 @@ class WidthSortedBatchSampler(Sampler):
             self.pixel_budget = max_batch_size * max_width
 
         # Pre-build batches so __len__ is accurate
-        self._batches = self._build_batches()
+        self._batches = self._build_batches(self._draw_indices())
 
-    def _build_batches(self):
+    def _draw_indices(self):
+        n = len(self.widths)
+        if self.sample_weights is None:
+            return range(n)
+        return np.random.choice(n, size=n, replace=True, p=self.sample_weights)
+
+    def _build_batches(self, indices):
+        sorted_indices = sorted(indices, key=lambda i: self.widths[i])
         batches = []
         i = 0
-        while i < len(self.sorted_indices):
+        while i < len(sorted_indices):
             # Width of the widest image in this batch (last one, since sorted)
             # Peek ahead to find how many fit under the budget
-            batch = [self.sorted_indices[i]]
-            batch_width = self.widths[self.sorted_indices[i]]
+            batch = [sorted_indices[i]]
             i += 1
-            while i < len(self.sorted_indices) and len(batch) < self.max_batch_size:
-                w = self.widths[self.sorted_indices[i]]
+            while i < len(sorted_indices) and len(batch) < self.max_batch_size:
+                w = self.widths[sorted_indices[i]]
                 # All images padded to max width in batch, so cost = (len+1) * w
                 if (len(batch) + 1) * w > self.pixel_budget:
                     break
-                batch.append(self.sorted_indices[i])
+                batch.append(sorted_indices[i])
                 i += 1
             batches.append(batch)
         return batches
 
     def __iter__(self):
+        if self.sample_weights is not None:
+            # Fresh weighted draw each epoch
+            self._batches = self._build_batches(self._draw_indices())
         batches = list(self._batches)
         random.shuffle(batches)
         yield from batches

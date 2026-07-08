@@ -106,6 +106,15 @@ def parse_args():
                         help="DataLoader worker processes. Set 0 to disable "
                              "multiprocessing (useful for debugging). Lower "
                              "this if you have <16 CPU cores.")
+    parser.add_argument("--script-sample-beta", type=float, default=0.5,
+                        help="Resample the train set each epoch so script s "
+                             "gets sampling mass ∝ vocab_size(s)^beta. "
+                             "beta=0 gives every script equal mass; larger "
+                             "beta shifts visits toward large-vocab scripts "
+                             "(han, korean) that collapsed under flat "
+                             "sampling. Negative disables resampling "
+                             "(natural shard distribution). Needs the "
+                             "script_ids.npy sidecar (regenerated shards).")
     # Model
     parser.add_argument("--dim", type=int, default=384)
     parser.add_argument("--no-compile", action="store_true")
@@ -162,6 +171,50 @@ def resolve_device(args):
 # ---------------------------------------------------------------------------
 # Data loading and preparation
 # ---------------------------------------------------------------------------
+
+def build_script_sample_weights(train_dir: str, beta: float) -> np.ndarray | None:
+    """Per-sample weights giving script s total sampling mass ∝ vocab^beta.
+
+    Motivation: flat per-script sampling collapsed CJK (han has 3811
+    classes vs emoji's 107 but got the same number of visits). Weighting
+    mass by vocab_size^beta gives complex scripts proportionally more
+    visits; beta=0.5 ≈ 6x more han than armenian rather than 25x (beta=1)
+    or 1x (beta=0).
+
+    Returns None (resampling disabled) when the script_ids.npy sidecar is
+    missing — shards generated before the sidecar existed.
+    """
+    from src.encoding.decompose import script_vocab_size
+    from src.taxonomy import SCRIPTS
+
+    sids_path = Path(train_dir) / "script_ids.npy"
+    if not sids_path.exists():
+        print("  [script-resample] script_ids.npy not found — disabled. "
+              "Regenerate shards to enable script-balanced sampling.")
+        return None
+
+    sids = np.load(str(sids_path))
+    uniq, counts = np.unique(sids, return_counts=True)
+
+    # mass_s ∝ vocab^beta; per-sample weight = script mass / script count
+    masses = {}
+    for sid, n_s in zip(uniq.tolist(), counts.tolist()):
+        name = SCRIPTS[sid] if sid < len(SCRIPTS) else None
+        vs = script_vocab_size(name) if name else 1
+        masses[sid] = max(vs, 1) ** beta
+
+    total_mass = sum(masses.values())
+    weights = np.zeros(len(sids), dtype=np.float64)
+    print(f"  [script-resample] beta={beta} — per-epoch visit factor "
+          f"(share of epoch / natural share):")
+    for sid, n_s in zip(uniq.tolist(), counts.tolist()):
+        share = masses[sid] / total_mass
+        weights[sids == sid] = share / n_s
+        factor = share * len(sids) / n_s
+        name = SCRIPTS[sid] if sid < len(SCRIPTS) else f"id={sid}"
+        print(f"    {name:<12s} {n_s:>8d} samples  x{factor:.2f}")
+    return weights
+
 
 def load_and_prepare_data(args, device):
     device_type = device.type
@@ -238,6 +291,12 @@ def load_and_prepare_data(args, device):
 
     train_widths = np.load(str(Path(train_dir) / "widths.npy"))
 
+    # Script-balanced sampling weights (None → natural distribution)
+    train_sample_weights = None
+    if args.script_sample_beta >= 0:
+        train_sample_weights = build_script_sample_weights(
+            train_dir, args.script_sample_beta)
+
     eval_batch_size = min(args.batch_size, 128)
     val_loader = DataLoader(val_subset, batch_size=eval_batch_size, shuffle=True,
                             collate_fn=collate_moe,
@@ -246,6 +305,7 @@ def load_and_prepare_data(args, device):
     return {
         "train_dataset": train_dataset,
         "train_widths": train_widths,
+        "train_sample_weights": train_sample_weights,
         "val_loader": val_loader,
         "n_groups": n_groups,
         "active_groups": active_groups,
@@ -767,7 +827,8 @@ def main():
 
     train_batch_sampler = WidthSortedBatchSampler(
         train_widths, max_batch_size, max_width=0,
-        pixel_budget=pixel_budget)
+        pixel_budget=pixel_budget,
+        sample_weights=data["train_sample_weights"])
     batch_sizes = [len(b) for b in train_batch_sampler._batches]
     print(f"  Batching: {len(train_batch_sampler)} batches, "
           f"size {min(batch_sizes)}-{max(batch_sizes)} "

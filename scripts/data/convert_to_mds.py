@@ -80,6 +80,8 @@ def convert(input_dir: Path, output_dir: Path, val_ratio: float = 0.1,
 
     train_widths = []
     val_widths = []
+    train_sids = []
+    val_sids = []
     total = 0
     n_train = 0
     n_val = 0
@@ -126,10 +128,12 @@ def convert(input_dir: Path, output_dir: Path, val_ratio: float = 0.1,
             if split == "val":
                 val_writer.write(sample)
                 val_widths.append(width)
+                val_sids.append(sid)
                 n_val += 1
             else:
                 train_writer.write(sample)
                 train_widths.append(width)
+                train_sids.append(sid)
                 n_train += 1
 
             total += 1
@@ -143,9 +147,12 @@ def convert(input_dir: Path, output_dir: Path, val_ratio: float = 0.1,
     train_writer.finish()
     val_writer.finish()
 
-    # Save widths sidecar for fast batch sampling
+    # Save sidecars: widths for fast batch sampling, script ids for
+    # script-balanced sampling weights.
     np.save(str(train_dir / "widths.npy"), np.array(train_widths, dtype=np.int32))
     np.save(str(val_dir / "widths.npy"), np.array(val_widths, dtype=np.int32))
+    np.save(str(train_dir / "script_ids.npy"), np.array(train_sids, dtype=np.int32))
+    np.save(str(val_dir / "script_ids.npy"), np.array(val_sids, dtype=np.int32))
 
     # Copy metadata
     if meta:

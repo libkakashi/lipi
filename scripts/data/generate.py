@@ -584,14 +584,19 @@ def save_rendered_samples(samples, primary_script, train_dir, val_dir, chunk_id)
                 tw.write(sample)
                 train_widths.append(img_np.shape[2])
 
-    # Per-chunk widths sidecars. The top-level widths.npy is assembled
-    # from these in sorted chunk order after generation, which matches
+    # Per-chunk sidecars (widths for batch sizing, script ids for
+    # sampling weights). The top-level files are assembled from these in
+    # sorted chunk order after generation, which matches
     # LipiStreamingDataset's stream order (pool completion order does
-    # not) and survives resumed runs (existing chunks keep their file).
+    # not) and survives resumed runs (existing chunks keep their files).
     np.save(str(Path(t_dir) / "widths.npy"),
             np.array(train_widths, dtype=np.int32))
     np.save(str(Path(v_dir) / "widths.npy"),
             np.array(val_widths, dtype=np.int32))
+    np.save(str(Path(t_dir) / "script_ids.npy"),
+            np.full(len(train_widths), script_id, dtype=np.int32))
+    np.save(str(Path(v_dir) / "script_ids.npy"),
+            np.full(len(val_widths), script_id, dtype=np.int32))
 
     return len(samples), train_widths, val_widths
 
@@ -906,7 +911,7 @@ def run_generation_pool(chunks, worker_fn, n_workers, label,
     completion order (imap_unordered), which does not match the sorted
     chunk order LipiStreamingDataset reads in. Per-chunk sidecar files
     written by save_rendered_samples are assembled after generation
-    instead (see assemble_width_sidecars).
+    instead (see assemble_sidecars).
     """
     # Estimate total: line chunks have count at c[1], char chunks at len(c[1])*c[2]
     def _est(c):
@@ -940,8 +945,8 @@ def run_generation_pool(chunks, worker_fn, n_workers, label,
     return done
 
 
-def assemble_width_sidecars(split_dir: Path) -> np.ndarray:
-    """Concatenate per-chunk widths.npy files in sorted chunk order.
+def assemble_sidecars(split_dir: Path, name: str = "widths.npy") -> np.ndarray:
+    """Concatenate per-chunk sidecar files in sorted chunk order.
 
     Sorted chunk order is exactly the order LipiStreamingDataset streams
     samples in, so index i here corresponds to dataset[i]. (Widths were
@@ -951,10 +956,10 @@ def assemble_width_sidecars(split_dir: Path) -> np.ndarray:
     """
     parts = []
     for chunk in sorted(split_dir.glob("chunk_*")):
-        f = chunk / "widths.npy"
+        f = chunk / name
         if not f.exists():
             raise FileNotFoundError(
-                f"{f} missing — chunk predates per-chunk width sidecars. "
+                f"{f} missing — chunk predates per-chunk sidecars. "
                 f"Regenerate this shard directory from scratch.")
         parts.append(np.load(str(f)))
     if not parts:
@@ -1283,13 +1288,17 @@ def main():
         else:
             print("  All char chunks exist.")
 
-    # Assemble top-level widths from per-chunk sidecars, in sorted chunk
+    # Assemble top-level sidecars from per-chunk files, in sorted chunk
     # order (= dataset stream order). Covers resumed chunks too.
     print("\nSaving widths and metadata...", flush=True)
-    all_train_widths = assemble_width_sidecars(shard_dir / "train")
-    all_val_widths = assemble_width_sidecars(shard_dir / "val")
+    all_train_widths = assemble_sidecars(shard_dir / "train")
+    all_val_widths = assemble_sidecars(shard_dir / "val")
     np.save(str(shard_dir / "train" / "widths.npy"), all_train_widths)
     np.save(str(shard_dir / "val" / "widths.npy"), all_val_widths)
+    np.save(str(shard_dir / "train" / "script_ids.npy"),
+            assemble_sidecars(shard_dir / "train", "script_ids.npy"))
+    np.save(str(shard_dir / "val" / "script_ids.npy"),
+            assemble_sidecars(shard_dir / "val", "script_ids.npy"))
 
     # Save metadata
     active_groups = []
