@@ -58,6 +58,8 @@ def estimate_pixel_budget(
                 parts.append(lid2.sum())
             if compute_ctc:
                 parts.append(out["logits"].sum())
+                if "inter_logits" in out:  # self-conditioned CTC pass
+                    parts.append(out["inter_logits"].sum())
             dummy_loss = torch.stack(parts).sum()
         if dummy_loss.requires_grad:
             dummy_loss.backward()

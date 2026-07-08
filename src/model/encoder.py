@@ -17,6 +17,7 @@ Backbone (2× width downsample overall, so T = W/4):
     -> merge h=2→1, Linear(768→384)                            ( 1, W/4, 384)
     -> Group MoE stack: N × (shared attn + 15 routed MLPs + shared MLP)
     -> LID-2 heads (multi-script groups)
+    -> intermediate CTC + self-conditioning feedback (tied head weights)
     -> Script MoE stack: N × (shared attn + 27 routed MLPs + shared MLP)
     -> Per-script CTC heads (T = W/4)
 
@@ -33,8 +34,8 @@ import torch.nn as nn
 from torch import Tensor
 
 from src.model.blocks import (
-    ConvStem, ConvNeXtBlock, BlurPool2d, SWABlock, MoELayer, GroupCTCModule,
-    _patch_merge_h, _per_sample_key_lens,
+    ConvStem, ConvNeXtBlock, BlurPool2d, LayerScale, SWABlock, MoELayer,
+    GroupCTCModule, _patch_merge_h, _per_sample_key_lens,
 )
 from src.taxonomy import NUM_GROUPS
 
@@ -311,6 +312,11 @@ class LipiMoEEncoder(nn.Module):
         self.enc_out_dim = dim
         self.norm = nn.LayerNorm(dim)
 
+        # Self-conditioned CTC feedback gate (zero-init: feedback starts
+        # as a no-op and grows only if useful; also makes warm-starting
+        # from pre-self-cond checkpoints exact).
+        self.self_cond_ls = LayerScale(dim, init_value=0.0)
+
         # Per-script CTC heads
         self.ctc_modules = nn.ModuleList([
             GroupCTCModule(
@@ -343,6 +349,28 @@ class LipiMoEEncoder(nn.Module):
             head_out = head(x[mask]).to(logits.dtype)  # (K, vs)
             logits[mask, :vs] = head_out
         return logits
+
+    def _ctc_feedback(self, inter_logits: Tensor, flat_scripts: Tensor,
+                      script_lens_cpu: list) -> Tensor:
+        """Project the intermediate CTC posterior back to feature space.
+
+        Tied weights: each script's CTC head is Linear(dim → vocab) with
+        weight (vocab, dim), so posterior @ weight maps the per-frame
+        token distribution back to dim — per-script, zero new parameters.
+        Blank/unrouted frames get zero feedback.
+        """
+        B, T, _ = inter_logits.shape
+        fb = torch.zeros(B, T, self.enc_out_dim,
+                         device=inter_logits.device, dtype=inter_logits.dtype)
+        for (g, s), flat_id in self._flat_script_id.items():
+            if not any(script_lens_cpu[b][flat_id] > 0 for b in range(B)):
+                continue
+            mask = (flat_scripts == flat_id)  # (B, T)
+            head = self.ctc_modules[g].heads[s]
+            vs = head.vocab_size
+            post = inter_logits[mask][:, :vs].softmax(dim=-1)  # (K, vs)
+            fb[mask] = (post @ head.proj.weight.to(post.dtype)).to(fb.dtype)
+        return fb
 
     def _get_flat_script_ids(self, group_ids, script_ids):
         """Convert (group_id, local_script_id) pairs to flat script indices.
@@ -403,7 +431,6 @@ class LipiMoEEncoder(nn.Module):
         script_ids: Tensor | None = None,
         detach_for_experts: bool = False,
         compute_ctc: bool = True,
-        inter_ctc: bool = False,
         route_sample_p: float = 0.0,
     ) -> dict:
         """Run the encoder forward pass.
@@ -418,12 +445,16 @@ class LipiMoEEncoder(nn.Module):
         see realistic misroutes during training instead of meeting them
         for the first time at inference. Losses keep using GT labels.
 
-        inter_ctc=True additionally decodes the features after the group
-        MoE stack (before script experts) through the same norm + CTC
-        heads and returns them as "inter_logits" — an intermediate-CTC
-        auxiliary target that regularizes the trunk and forces character
-        information to exist before script specialization. Training-only;
-        no extra parameters (heads are shared with the final CTC).
+        Self-conditioned CTC (always on, Nozaki & Komatsu 2021): the
+        features after the group MoE stack are decoded through the same
+        norm + CTC heads, and the resulting posterior is fed back into
+        the feature stream through the transposed head weights (tied —
+        no extra parameters) behind a zero-init LayerScale. The script
+        stack then refines features that already carry the first pass's
+        per-frame consensus. The intermediate logits also serve as the
+        intermediate-CTC auxiliary target, returned as "inter_logits" in
+        training mode only (the tensor is max_vocab-wide; eval skips it
+        to keep memory flat).
         """
         B = images.shape[0]
 
@@ -484,9 +515,6 @@ class LipiMoEEncoder(nn.Module):
 
         for layer in self.group_layers:
             x = layer(x, frame_groups, group_lens_cpu, w)
-
-        # Features entering the script stack — kept for intermediate CTC.
-        x_inter = x if (inter_ctc and compute_ctc) else None
 
         # =====================================================================
         # LID-2: per-frame script classification
@@ -568,6 +596,16 @@ class LipiMoEEncoder(nn.Module):
         script_lens_cpu = _per_sample_key_lens(
             flat_scripts, self.total_scripts).tolist()
 
+        # ── Self-conditioned CTC ──────────────────────────────────────
+        # First CTC pass on the pre-script-stack features (shared norm +
+        # heads), posterior fed back through the tied head weights. The
+        # script stack refines features carrying this first-pass
+        # consensus; the final CTC below is the second, refined pass.
+        inter_logits = self._ctc_logits(
+            self.norm(x), flat_scripts, script_lens_cpu)
+        x = x + self.self_cond_ls(
+            self._ctc_feedback(inter_logits, flat_scripts, script_lens_cpu))
+
         for layer in self.script_layers:
             x = layer(x, flat_scripts, script_lens_cpu, w)
 
@@ -592,10 +630,10 @@ class LipiMoEEncoder(nn.Module):
             "flat_scripts": flat_scripts,
         }
 
-        # Intermediate CTC: same norm + heads applied to the pre-script-
-        # stack features, routed identically.
-        if x_inter is not None:
-            out["inter_logits"] = self._ctc_logits(
-                self.norm(x_inter), flat_scripts, script_lens_cpu)
+        # Intermediate logits are only needed for the auxiliary loss;
+        # skip returning the max_vocab-wide tensor at eval to keep
+        # inference memory flat.
+        if self.training:
+            out["inter_logits"] = inter_logits
 
         return out

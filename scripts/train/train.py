@@ -141,12 +141,12 @@ def parse_args():
                              "halved automatically); requires train-aug. "
                              "0 disables; 0.5 is a sensible starting value.")
     parser.add_argument("--inter-ctc-weight", type=float, default=0.3,
-                        help="Auxiliary CTC loss on the features after the "
-                             "group MoE stack (before script experts), "
-                             "through the same norm + CTC heads (no new "
-                             "params, training-only). Regularizes the trunk "
-                             "and forces character info to exist before "
-                             "script specialization. 0 disables.")
+                        help="Auxiliary CTC loss on the intermediate "
+                             "(pre-script-stack) logits that also drive the "
+                             "self-conditioning feedback. Shared norm + CTC "
+                             "heads, no new params. 0 disables the aux loss "
+                             "only — the feedback path is architectural and "
+                             "always on (but starts as a zero-init no-op).")
     parser.add_argument("--lid1-weight", type=float, default=1.0)
     parser.add_argument("--lid2-weight", type=float, default=1.0,
                         help="Set to 0 to disable LID-2 loss "
@@ -621,7 +621,6 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             out = model(imgs_, group_ids=gl_for_model, script_ids=sl_frames,
                         detach_for_experts=detach_for_experts,
                         compute_ctc=(ctc_weight != 0),
-                        inter_ctc=(inter_ctc_weight != 0 and ctc_weight != 0),
                         route_sample_p=route_sample_p)
 
             # Second view for consistency: GT routing, no scheduled
@@ -653,8 +652,11 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         else:
             ctc_loss = torch.zeros(1, device=device)
 
-        # Intermediate CTC on the pre-script-stack features (same segments)
-        if "inter_logits" in out:
+        # Intermediate CTC on the pre-script-stack features (same
+        # segments). The logits exist whenever CTC ran — self-conditioned
+        # feedback computes them unconditionally — but the aux loss is
+        # only paid for when weighted.
+        if inter_ctc_weight != 0 and "inter_logits" in out:
             inter_ctc_loss = compute_ctc_loss_segments(
                 out["inter_logits"], segments_, out["lengths"],
                 group_script_names, group_script_vocabs)
