@@ -13,10 +13,11 @@ Backbone (2× width downsample overall, so T = W/4):
     -> SWA-C:     3× SWA block, dim 256, window 4×32           ( 4, W/4, 256)
     -> merge h=4→2, Linear(512→384)                            ( 2, W/4, 384)
     -> SWA-D:     3× SWA block, dim 384, window 2×64           ( 2, W/4, 384)
-    -> LID-1 branch: pool h=2→1, lid1_attn (w=32), group_head
+    -> LID-1 branch: lid1_merge(2 rows + ConvB texture tap), lid1_attn
+       (w=32), group_head
     -> merge h=2→1, Linear(768→384)                            ( 1, W/4, 384)
     -> Group MoE stack: N × (shared attn + 15 routed MLPs + shared MLP)
-    -> LID-2 heads (multi-script groups)
+       (LID-2 heads tap the stack one block before the end)
     -> intermediate CTC + self-conditioning feedback (tied head weights)
     -> Script MoE stack: N × (shared attn + 27 routed MLPs + shared MLP)
     -> Per-script CTC heads (T = W/4)
@@ -46,15 +47,23 @@ class LipiMoEEncoder(nn.Module):
 
     Two-level expert routing:
       1. LID-1 classifies each frame into a script group (15 + blank).
-         A dedicated `lid1_attn` SWA block sits between SWA-D (pooled to
-         h=1) and the classifier so LID-1 has its own capacity for
-         script-family discrimination without forcing the CTC feature
-         path into a family/character compromise.
+         Its input is a private learned merge (`lid1_merge`) of the two
+         SWA-D rows plus a stroke-texture tap from ConvB, and a
+         dedicated `lid1_attn` SWA block sits before the classifier so
+         LID-1 has its own capacity for script-family discrimination
+         without forcing the CTC feature path into a family/character
+         compromise.
       2. Group MoE stack: N stacked MoELayers with 15 routed MLPs each.
          Every frame passes through the same attention; its MLP is
          picked by group_id, and a shared MLP always runs alongside.
       3. LID-2 classifies each frame into a script within its group
          (multi-script groups only; single-script groups skip it).
+         Its heads tap the group stack one block before the end — two
+         expert blocks of family-specialized processing feed the
+         fine-grained call, and the last group block plus the script
+         stack run after the decision. The heads also read the same
+         ConvB texture tap as LID-1 (stroke-level cues for the
+         within-group confusable pairs).
       4. Script MoE stack: N stacked MoELayers with 27 routed MLPs each,
          routed by flat script id.
       5. Per-script CTC heads decode characters.
@@ -240,13 +249,28 @@ class LipiMoEEncoder(nn.Module):
         script_dps = [next(dp_iter) for _ in range(num_script_layers)]
 
         # ── LID-1: per-frame group classification ─────────────────────
-        # Branches off SWA-D output (at h=2) before merge_d1. Pool h=2→1
-        # (a plain mean over the row axis; see forward), run a dedicated
-        # lid1_attn block (window w=32) for LID-1's own horizontal-context
-        # capacity, then a small MLP head.
+        # Branches off SWA-D output (at h=2) before merge_d1, plus a
+        # texture tap from ConvB. Script ID is texture-like (vertical ink
+        # profile, stroke curvature/loop statistics) — cues that are
+        # strongest in early conv features and that the CTC-shaped deep
+        # trunk is under no pressure to preserve. lid1_merge fuses
+        # [row0, row1, ConvB texture] → dim: a learned h-merge private to
+        # the LID branch (merge_d1 stays CTC-gradient-only) that keeps
+        # the vertical profile a plain h-mean would average away.
+        # Init: the two row blocks average the rows — exactly the old
+        # h-mean, so step-0 behavior is unchanged — and the ConvB block
+        # is zero, so the texture tap is a no-op that grows only if
+        # useful. Then a dedicated lid1_attn block (window w=32) for
+        # LID-1's own horizontal-context capacity, and a small MLP head.
         # lid1_attn keeps LayerScale at 1.0: its identity-at-init comes
         # from the zero-init projections below, and a near-zero
         # LayerScale on top would suppress its gradients ~1e4x.
+        self.lid1_merge = nn.Linear(dim * 2 + convb_ch, dim)
+        with torch.no_grad():
+            self.lid1_merge.weight.zero_()
+            self.lid1_merge.weight[:, :dim] = 0.5 * torch.eye(dim)
+            self.lid1_merge.weight[:, dim:2 * dim] = 0.5 * torch.eye(dim)
+            self.lid1_merge.bias.zero_()
         self.lid1_attn = SWABlock(
             dim=dim, num_heads=max(dim // 64, 1),
             window_h=1, window_w=32, shift=False,
@@ -282,15 +306,24 @@ class LipiMoEEncoder(nn.Module):
         ])
 
         # ── LID-2: per-frame script classification (multi-script groups)
+        # Heads read [group-stack tap ‖ ConvB texture] — the within-group
+        # calls (telugu/kannada, malayalam/tamil, NE-Indic) ride on
+        # stroke-level cues that the CTC-shaped deep features are under
+        # no pressure to keep, so the same texture tap that feeds LID-1
+        # feeds these heads. Texture columns zero-init: the tap starts
+        # silent and grows only if useful.
         self.lid2_heads = nn.ModuleDict()
         for g in range(num_groups):
             n_scripts = len(group_script_vocab_sizes[g])
             if n_scripts > 1:
-                self.lid2_heads[str(g)] = nn.Sequential(
-                    nn.Linear(dim, dim // 2),
+                head = nn.Sequential(
+                    nn.Linear(dim + convb_ch, dim // 2),
                     nn.GELU(),
                     nn.Linear(dim // 2, n_scripts),
                 )
+                with torch.no_grad():
+                    head[0].weight[:, dim:].zero_()
+                self.lid2_heads[str(g)] = head
 
         # ── Script MoE stack (routed by flat script_id) ───────────────
         # Same shape as group_layers but with total_scripts routed MLPs
@@ -342,27 +375,43 @@ class LipiMoEEncoder(nn.Module):
         keeping them eager lets the trunk + MoE compile once and stay
         compiled. Autograd still flows through this region.
 
-        CTC heads are position-wise Linear(dim → vocab), so we can
-        dispatch them by boolean mask on the full sequence — no need
-        to pack frames into contiguous segments. Iterate by (group,
-        local_script); use script_lens_cpu to skip empty (g, s) without
-        a GPU→CPU sync.
+        CTC heads are position-wise Linear(dim → vocab), so frame order
+        within a script is irrelevant: gather all routed frames once
+        (grouped by flat script id), run each head on its contiguous
+        slice, and scatter back with a single index_copy. The old
+        per-script boolean-mask scatter (``logits[mask] = ...``) ran a
+        full-size (B*T, max_vocab) masked_fill in backward once per
+        script — 27 giant-tensor ops per call dominated the training
+        step. index_copy's backward is one index_select.
         """
-        B, T, _ = x.shape
+        B, T, D = x.shape
         max_vocab = max(m.max_vocab for m in self.ctc_modules)
-        logits = torch.zeros(B, T, max_vocab, device=x.device, dtype=x.dtype)
-        for (g, s), flat_id in self._flat_script_id.items():
-            if not any(script_lens_cpu[b][flat_id] > 0 for b in range(B)):
-                continue
-            mask = (flat_scripts == flat_id)  # (B, T)
-            head = self.ctc_modules[g].heads[s]
-            vs = head.vocab_size
-            head_out = head(x[mask]).to(logits.dtype)  # (K, vs)
-            # NOTE: logits[mask, :vs] = head_out silently ignores the
-            # trailing slice with a 2-D boolean mask (indexes the full
-            # (K, max_vocab) region) — pad to full width instead.
-            logits[mask] = F.pad(head_out, (0, max_vocab - vs))
-        return logits
+        N = B * T
+        logits = torch.zeros(N, max_vocab, device=x.device, dtype=x.dtype)
+
+        # Per-flat-script frame counts (precomputed on CPU — no sync).
+        counts = [sum(script_lens_cpu[b][f] for b in range(B))
+                  for f in range(self.total_scripts)]
+        if sum(counts) > 0:
+            ff = flat_scripts.reshape(N)
+            pos = ((ff >= 0) & (ff < self.total_scripts)).nonzero(
+                as_tuple=True)[0]  # routed frames; must mirror counts' range
+            pos = pos.index_select(0, torch.argsort(ff.index_select(0, pos)))
+            xg = x.reshape(N, D).index_select(0, pos)  # grouped by script
+
+            outs = []
+            start = 0
+            for (g, s), flat_id in self._flat_script_id.items():
+                k = counts[flat_id]
+                if k == 0:
+                    continue
+                head = self.ctc_modules[g].heads[s]
+                y = head(xg[start:start + k]).to(logits.dtype)  # (k, vs)
+                outs.append(F.pad(y, (0, max_vocab - head.vocab_size)))
+                start += k
+            logits = logits.index_copy(
+                0, pos, torch.cat(outs) if len(outs) > 1 else outs[0])
+        return logits.reshape(B, T, max_vocab)
 
     @_dynamo_disable
     def _ctc_feedback(self, inter_logits: Tensor, flat_scripts: Tensor,
@@ -377,19 +426,41 @@ class LipiMoEEncoder(nn.Module):
         weight (vocab, dim), so posterior @ weight maps the per-frame
         token distribution back to dim — per-script, zero new parameters.
         Blank/unrouted frames get zero feedback.
+
+        Same grouped gather/scatter as _ctc_logits: one index_select of
+        the routed rows, per-script compact softmax + matmul on contiguous
+        slices, one index_copy back — instead of 27 full-size masked
+        gathers/scatters whose backward dominated the step.
         """
-        B, T, _ = inter_logits.shape
-        fb = torch.zeros(B, T, self.enc_out_dim,
+        B, T, V = inter_logits.shape
+        N = B * T
+        fb = torch.zeros(N, self.enc_out_dim,
                          device=inter_logits.device, dtype=inter_logits.dtype)
-        for (g, s), flat_id in self._flat_script_id.items():
-            if not any(script_lens_cpu[b][flat_id] > 0 for b in range(B)):
-                continue
-            mask = (flat_scripts == flat_id)  # (B, T)
-            head = self.ctc_modules[g].heads[s]
-            vs = head.vocab_size
-            post = inter_logits[mask][:, :vs].softmax(dim=-1)  # (K, vs)
-            fb[mask] = (post @ head.proj.weight.to(post.dtype)).to(fb.dtype)
-        return fb
+
+        counts = [sum(script_lens_cpu[b][f] for b in range(B))
+                  for f in range(self.total_scripts)]
+        if sum(counts) > 0:
+            ff = flat_scripts.reshape(N)
+            pos = ((ff >= 0) & (ff < self.total_scripts)).nonzero(
+                as_tuple=True)[0]
+            pos = pos.index_select(0, torch.argsort(ff.index_select(0, pos)))
+            lg = inter_logits.reshape(N, V).index_select(0, pos)  # (M, V)
+
+            outs = []
+            start = 0
+            for (g, s), flat_id in self._flat_script_id.items():
+                k = counts[flat_id]
+                if k == 0:
+                    continue
+                head = self.ctc_modules[g].heads[s]
+                vs = head.vocab_size
+                post = lg[start:start + k, :vs].softmax(dim=-1)  # (k, vs)
+                outs.append(
+                    (post @ head.proj.weight.to(post.dtype)).to(fb.dtype))
+                start += k
+            fb = fb.index_copy(
+                0, pos, torch.cat(outs) if len(outs) > 1 else outs[0])
+        return fb.reshape(B, T, self.enc_out_dim)
 
     def _get_flat_script_ids(self, group_ids, script_ids):
         """Convert (group_id, local_script_id) pairs to flat script indices.
@@ -401,11 +472,13 @@ class LipiMoEEncoder(nn.Module):
             flat[mask] = f
         return flat
 
-    def _run_backbone(self, images: Tensor) -> tuple[Tensor, int, int]:
+    def _run_backbone(self, images: Tensor) -> tuple[Tensor, Tensor, int, int]:
         """Run stem → ConvA → BlurPool → ConvB → BlurPool → proj → SWA-C
-        → merge → SWA-D. Returns (x, h, w) with x of shape (B, h*w, dim),
-        h=2, w=T = W/4. The h=2 tensor feeds both the LID-1 branch and
-        the final merge_d1 → CTC path.
+        → merge → SWA-D. Returns (x, tex, h, w) with x of shape
+        (B, h*w, dim), h=2, w=T = W/4. The h=2 tensor feeds both the
+        LID-1 branch and the final merge_d1 → CTC path. tex is
+        (B, w, convb_ch): ConvB stroke-texture features pooled to the
+        final frame grid for the LID-1 texture tap.
         """
         B = images.shape[0]
         x = images.float() / 255.0 if images.dtype == torch.uint8 else images
@@ -424,6 +497,14 @@ class LipiMoEEncoder(nn.Module):
         for blk in self.convB:
             x = blk(x)
 
+        # LID-1 texture tap: ConvB features pooled to the final frame
+        # grid — h-mean over the 8 rows, width avg-pooled 2×. ceil_mode
+        # matches blur_bc's stride-2 conv (k3, p1) width arithmetic
+        # (both give ceil(w/2)), so tex width == T for any input width.
+        tex = x.mean(dim=2)  # (B, convb_ch, W/2)
+        tex = F.avg_pool1d(tex, kernel_size=2, stride=2, ceil_mode=True)
+        tex = tex.transpose(1, 2)  # (B, W/4, convb_ch)
+
         # BlurPool s(2,2) 128→192: (8, W/2) → (4, W/4)
         x = self.blur_bc(x)
 
@@ -441,7 +522,7 @@ class LipiMoEEncoder(nn.Module):
         for blk in self.swa_d:
             x = blk(x, h, w)
 
-        return x, h, w
+        return x, tex, h, w
 
     def forward(
         self,
@@ -477,18 +558,18 @@ class LipiMoEEncoder(nn.Module):
         """
         B = images.shape[0]
 
-        x, h, w = self._run_backbone(images)
+        x, tex, h, w = self._run_backbone(images)
         # x here is post-SWA-D at (h=2, w=W/4). w is the final T.
         d = x.shape[-1]
 
-        # LID-1 branch: pool h=2→1, run lid1_attn (window w=32), classify.
-        # Uses the pre-merge_d1 tensor so merge_d1 only ever sees CTC
-        # gradient.
-        # Pool h→1 by averaging the row axis. A plain mean (not
-        # AdaptiveAvgPool2d((1, None)), which is identical here since it
-        # preserves width) keeps this compile-clean: adaptive pooling's
-        # output-size relational can't be resolved over a symbolic width.
-        x_for_group = x.reshape(B, h, w, d).mean(dim=1)  # (B, w, d)
+        # LID-1 branch: lid1_merge fuses the two SWA-D rows (learned
+        # h-merge, avg-init — see __init__) with the ConvB texture tap,
+        # then lid1_attn (window w=32) and the classifier. Uses the
+        # pre-merge_d1 tensor so merge_d1 only ever sees CTC gradient.
+        # Row layout matches _patch_merge_h: [row0 chans, row1 chans].
+        x_rows = x.reshape(B, h, w, d).permute(0, 2, 1, 3).reshape(B, w, h * d)
+        x_for_group = self.lid1_merge(
+            torch.cat([x_rows, tex.to(x_rows.dtype)], dim=-1))
         x_for_group = self.lid1_attn(x_for_group, 1, w)
         group_logits = self.group_head(x_for_group)  # (B, w, num_groups+1)
 
@@ -535,18 +616,29 @@ class LipiMoEEncoder(nn.Module):
         group_lens_cpu = _per_sample_key_lens(
             frame_groups, self.num_groups).tolist()
 
-        for layer in self.group_layers:
+        # LID-2 taps the group stack one block before the end: two expert
+        # blocks of family-specialized processing feed the fine-grained
+        # script call, and the last block keeps refining CTC features
+        # after the decision is made. Stacks with <3 layers degenerate to
+        # tapping the stack output.
+        lid2_tap = max(len(self.group_layers) - 2, 0)
+        x_lid2 = x
+        for i, layer in enumerate(self.group_layers):
             x = layer(x, frame_groups, group_lens_cpu, w)
+            if i == lid2_tap:
+                x_lid2 = x
 
         # =====================================================================
         # LID-2: per-frame script classification
         # =====================================================================
 
-        # Collect LID-2 logits for multi-script groups
+        # Collect LID-2 logits for multi-script groups. Heads read the
+        # group-stack tap concat the ConvB texture tap (see __init__).
+        x_lid2_in = torch.cat([x_lid2, tex.to(x_lid2.dtype)], dim=-1)
         lid2_logits_per_group = {}  # g → (B, T, n_scripts)
         for g_str, head in self.lid2_heads.items():
             g = int(g_str)
-            lid2_logits_per_group[g] = head(x)  # (B, T, n_scripts)
+            lid2_logits_per_group[g] = head(x_lid2_in)  # (B, T, n_scripts)
 
         # Determine per-frame script assignments
         # frame_scripts: (B, T) — local script_id within each frame's group
