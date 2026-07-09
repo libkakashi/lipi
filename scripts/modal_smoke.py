@@ -175,10 +175,11 @@ def train():
         "--save-dir", str(save_dir),
         "--epochs", "1",
         "--consistency-weight", "0.5",
-        # Eager: the SDPA fallback's boolean mask algebra trips Inductor's
-        # dynamic-shape value-range analysis on H100 ("A Boolean argument can
-        # only be used in Eq and Ne"). The smoke validates the data → train →
-        # checkpoint → resume pipeline; compile is a separate perf decision.
+        # Eager, matching the real-run default (modal_app.py). torch.compile
+        # is now non-crashing but not worth it on this architecture: the
+        # data-dependent MoE routing, per-script CTC dispatch and per-layer
+        # DropPath fragment the graph and thrash recompiles (measured ~3
+        # img/s in warmup vs ~41 eager). Pass --compile to exercise it.
         "--no-compile",
     ]
     latest = _latest_checkpoint(save_dir)
