@@ -40,7 +40,14 @@ app = modal.App("lipi-smoke")
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
-    .apt_install("build-essential")
+    .apt_install(
+        "build-essential",
+        # libraqm stack — Modal's mirror Pillow lacks raqm; complex scripts
+        # need it. Source-build Pillow against these (see modal_app.py).
+        "libraqm-dev", "libharfbuzz-dev", "libfribidi-dev",
+        "libfreetype6-dev", "libjpeg-dev", "zlib1g-dev",
+        "libfontconfig1-dev", "pkg-config",
+    )
     .pip_install(
         "torch==2.11.0",
         "torchvision",
@@ -48,11 +55,12 @@ image = (
         "timm>=1.0.0",
         "mosaicml-streaming>=0.10.0",
         "freetype-py>=2.4.0",
-        "pillow>=10.0.0",
         "numpy>=1.24.0",
         "pyyaml>=6.0",
         "tqdm>=4.65.0",
     )
+    .run_commands(
+        "pip install --no-binary :all: --force-reinstall pillow==11.3.0")
     .add_local_dir(
         _LOCAL_REPO,
         _REPO,

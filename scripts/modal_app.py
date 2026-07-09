@@ -69,7 +69,15 @@ app = modal.App("lipi-ocr")
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
-    .apt_install("build-essential")  # torch.compile host-side codegen
+    .apt_install(
+        "build-essential",   # torch.compile host-side codegen + pillow build
+        # libraqm stack: Modal's mirror ships a Pillow wheel without raqm,
+        # so complex scripts (Arabic, Indic, Thai...) would render unshaped.
+        # Install the system libs and source-build Pillow against them.
+        "libraqm-dev", "libharfbuzz-dev", "libfribidi-dev",
+        "libfreetype6-dev", "libjpeg-dev", "zlib1g-dev",
+        "libfontconfig1-dev", "pkg-config",
+    )
     .pip_install(
         "torch==2.11.0",
         "torchvision",
@@ -77,11 +85,15 @@ image = (
         "timm>=1.0.0",
         "mosaicml-streaming>=0.10.0",
         "freetype-py>=2.4.0",
-        "pillow>=10.0.0",
         "numpy>=1.24.0",
         "pyyaml>=6.0",
         "tqdm>=4.65.0",
     )
+    # Source-build Pillow so it links libraqm (features.check("raqm") is
+    # True). Must come after the wheel Pillow that torchvision pulls in, so
+    # this one wins. Verified on Modal: raqm=True, RAQM layout selectable.
+    .run_commands(
+        "pip install --no-binary :all: --force-reinstall pillow==11.3.0")
     # copy=True bakes the code into the image (a few MB, cheap layer): the
     # container filesystem stays writable for the training_data/.cache
     # symlinks below.

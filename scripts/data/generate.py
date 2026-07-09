@@ -9,6 +9,7 @@ Usage:
 
 import argparse
 import json
+import os
 import random
 import sys
 import time
@@ -1483,6 +1484,19 @@ def main():
     global _MAX_VAL_PER_SCRIPT
     args = parse_args()
     _MAX_VAL_PER_SCRIPT = args.val_samples_per_script
+
+    # Hard gate: without libraqm, complex scripts (Arabic, Indic, Thai...)
+    # render unjoined/reordered and the whole dataset is silently corrupt
+    # for those scripts. text_renderer only warns; generation must refuse.
+    # Escape hatch for a deliberate Latin/CJK-only render: LIPI_ALLOW_NO_RAQM=1.
+    from PIL import features as _pil_features
+    if not _pil_features.check("raqm") and \
+            os.environ.get("LIPI_ALLOW_NO_RAQM") != "1":
+        raise SystemExit(
+            "Pillow has no libraqm — complex scripts would render wrong. "
+            "Install a Pillow build with libraqm (source-build against "
+            "libraqm-dev), or set LIPI_ALLOW_NO_RAQM=1 to generate anyway "
+            "(only safe for Latin/CJK-only runs).")
 
     active_scripts = (list(SCRIPTS) if args.scripts == "all"
                       else [s.strip() for s in args.scripts.split(",")])
