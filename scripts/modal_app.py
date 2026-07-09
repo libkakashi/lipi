@@ -269,8 +269,12 @@ def generate(out: str = "shards-v5", args: str = ""):
     retries=modal.Retries(max_retries=3, initial_delay=60.0),
 )
 def train(data: str = "shards-v5", run_name: str = "v5", args: str = "",
-          copy_local: bool = True):
-    """One ≤24 h training segment; spawns its own continuation if needed."""
+          copy_local: bool = True, profile: bool = False):
+    """One ≤24 h training segment; spawns its own continuation if needed.
+
+    profile=True sets LIPI_PROFILE_STEP so train.py prints a per-section ms
+    breakdown for the first steps (diagnosing step-time bottlenecks).
+    """
     _prepare_repo()
     argv = shlex.split(args)
     _forbid(argv, "--data", "--save-dir")
@@ -303,8 +307,11 @@ def train(data: str = "shards-v5", run_name: str = "v5", args: str = "",
                                  daemon=True)
     committer.start()
 
+    env = _child_env()
+    if profile:
+        env["LIPI_PROFILE_STEP"] = "1"
     print("Running:", shlex.join(cmd))
-    proc = subprocess.Popen(cmd, cwd=_REPO, env=_child_env())
+    proc = subprocess.Popen(cmd, cwd=_REPO, env=env)
     try:
         code = proc.wait(timeout=_SOFT_DEADLINE_S)
     except subprocess.TimeoutExpired:

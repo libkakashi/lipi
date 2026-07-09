@@ -457,7 +457,7 @@ def resume_from_checkpoint(args, model, optimizer, base_optimizer, scaler, sched
             "stem.", "convA.", "convB.", "blur_ab.", "blur_bc.",
             "swac_in_proj.", "swa_c.", "swa_d.",
             "merge_cd.", "merge_d1.",
-            "group_head.", "group_h_pool.", "lid1_attn.",
+            "group_head.", "group_h_pool.", "lid1_attn.", "lid1_merge.",
             "lid2_heads.", "norm.",
         )
         dropped = [k for k in model_state if any(k.startswith(p) for p in backbone_prefixes)]
@@ -616,10 +616,30 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
     shared_norm = 0.0
     expert_norm = 0.0
 
+    # Optional per-section step profiling (LIPI_PROFILE_STEP=1). Zero cost
+    # when off. Accumulates ms per section into prof_sec (reset each step)
+    # and prints a breakdown for the first _PROF_STEPS steps, so we can see
+    # whether ~9s/step is the forward, the per-segment CTC loss, the LID
+    # losses, backward, the optimizer/EMA step, or dataloader wait.
+    prof_on = os.environ.get("LIPI_PROFILE_STEP") == "1"
+    _PROF_STEPS = 20
+    prof_sec = {}
+
+    def _pmark(name, since):
+        """Sync CUDA, attribute elapsed time to `name`, return a new mark."""
+        if not prof_on:
+            return since
+        if device_type == "cuda":
+            torch.cuda.synchronize()
+        now = time.perf_counter()
+        prof_sec[name] = prof_sec.get(name, 0.0) + (now - since)
+        return now
+
     def _forward_backward(imgs_, targets_, tgt_lens_, gids_, sids_, scale,
                           group_labels_=None, segments_=None,
                           imgs2_=None, aligned_=None):
         """Run forward + backward on a (sub-)batch. scale adjusts loss."""
+        _t = time.perf_counter()
         with torch.amp.autocast(device_type, enabled=use_amp, dtype=amp_dtype):
             # Per-frame group labels: -100 = padding (loss ignores),
             # NUM_GROUPS = whitespace (learnable). For model routing,
@@ -631,11 +651,13 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             # both see identical frame boundaries.
             gl_for_model, sl_frames = build_frame_labels_from_segments(
                 segments_, T_est, NUM_GROUPS, device)
+            _t = _pmark("route_labels", _t)
 
             out = model(imgs_, group_ids=gl_for_model, script_ids=sl_frames,
                         detach_for_experts=detach_for_experts,
                         compute_ctc=(ctc_weight != 0),
                         route_sample_p=route_sample_p)
+            _t = _pmark("forward", _t)
 
             # Second view for consistency: GT routing, no scheduled
             # sampling — the reference posterior view 1 is pulled toward.
@@ -645,6 +667,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                              script_ids=sl_frames,
                              detach_for_experts=detach_for_experts,
                              compute_ctc=(ctc_weight != 0))
+                _t = _pmark("forward2", _t)
 
         # LID-1 loss. Skip when weight is 0.
         T = out["group_logits"].shape[1]
@@ -654,6 +677,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                 out["group_logits"], gl_frames, ce_loss_fn)
         else:
             lid1_loss = torch.zeros(1, device=device)
+        _t = _pmark("lid1", _t)
 
         # CTC loss: per-segment for all lines (handles both single and mixed script)
         # Skip CTC loss computation entirely when its weight is 0
@@ -665,6 +689,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                 group_script_names, group_script_vocabs)
         else:
             ctc_loss = torch.zeros(1, device=device)
+        _t = _pmark("ctc_loss", _t)
 
         # Intermediate CTC on the pre-script-stack features (same
         # segments). The logits exist whenever CTC ran — self-conditioned
@@ -676,6 +701,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                 group_script_names, group_script_vocabs)
         else:
             inter_ctc_loss = torch.zeros(1, device=device)
+        _t = _pmark("inter_ctc_loss", _t)
 
         # LID-2 loss: per-frame CE within multi-script groups. Skip when
         # weight is 0 or when lid2_logits_per_group is empty.
@@ -685,6 +711,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                 gl_for_model[:, :T], sl_frames[:, :T])
         else:
             lid2_loss = torch.zeros(1, device=device)
+        _t = _pmark("lid2", _t)
 
         # Two-view consistency: symmetric KL between the views' posteriors
         if out2 is not None:
@@ -708,6 +735,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             loss = loss / grad_accum
 
         scaler.scale(loss).backward()
+        _t = _pmark("backward", _t)
         # Detach logits for logging — prevents autograd graph from leaking
         # Detach LID-2 logits for logging
         detached_lid2 = {
@@ -717,7 +745,12 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                 loss, out["group_logits"].detach(), detached_lid2,
                 gl_for_model.detach(), sl_frames.detach())
 
+    _prev_step_end = time.perf_counter()
     for batch_idx, batch in enumerate(train_loader):
+        if prof_on:
+            prof_sec.clear()
+            # Time spent waiting on the dataloader (0 if workers keep up).
+            prof_sec["data_wait"] = time.perf_counter() - _prev_step_end
         if len(batch) == 10:  # two-view consistency batches
             (imgs, targets, tgt_lens, gids, sids, _labels, group_labels,
              segments, imgs2, aligned) = batch
@@ -759,6 +792,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                 f"W={imgs.shape[3]} — something changed since the capacity "
                 f"measurement. Delete .cache/capacities/ to re-measure.") from e
 
+        _t_opt = time.perf_counter()
         if (batch_idx + 1) % grad_accum == 0 or (batch_idx + 1) == len(train_loader):
             scaler.unscale_(base_optimizer)
             shared_norm = torch.nn.utils.clip_grad_norm_(shared_params, max_norm=25.0)
@@ -773,6 +807,13 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                 # compiled wrapper, but stable parameter names).
                 if ema is not None:
                     ema.update(ema_model)
+        _pmark("optstep+ema", _t_opt)
+        if prof_on and batch_idx < _PROF_STEPS:
+            total_ms = sum(prof_sec.values()) * 1000
+            parts = " ".join(f"{k}={v * 1000:.0f}" for k, v in prof_sec.items())
+            print(f"    [prof] step {batch_idx} total={total_ms:.0f}ms  {parts}",
+                  flush=True)
+        _prev_step_end = time.perf_counter()
 
         # Accumulate on GPU — no sync
         mult = float(grad_accum)
@@ -895,7 +936,8 @@ def main():
         # dedicated to LID-1 script-family extraction.
         unfreeze_prefixes = []
         if "lid" in components or "lid1" in components:
-            unfreeze_prefixes.extend(["lid1_attn.", "group_head."])
+            unfreeze_prefixes.extend(
+                ["lid1_merge.", "lid1_attn.", "group_head."])
         if "lid" in components or "lid2" in components:
             unfreeze_prefixes.append("lid2_heads.")
         if "ctc" in components:
