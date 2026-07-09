@@ -37,6 +37,15 @@ except ImportError:
     flex_attention = None
     _HAS_FLEX_ATTENTION = False
 
+# Escape hatch for GPUs where the flex_attention Triton kernel exceeds the
+# device's shared-memory limit (H100 hits this at our head-dim × window
+# combinations — the generated kernel wants ~278 KB, hardware caps at 232 KB).
+# The SDPA fallback below produces the same numerics via an explicit mask;
+# training is slower per step but correct.
+import os as _os
+if _os.environ.get("LIPI_DISABLE_FLEX_ATTENTION", "0") == "1":
+    _HAS_FLEX_ATTENTION = False
+
 
 class DropPath(nn.Module):
     """Stochastic depth per sample (drop whole residual branches).
