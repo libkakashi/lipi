@@ -478,9 +478,15 @@ def mix_punctuation(word: str, p: float = 0.15, script: str = "latin") -> str:
 # ---------------------------------------------------------------------------
 
 def chunk_dir_exists(path: str) -> bool:
-    """Check if an MDS chunk directory exists with data."""
-    p = Path(path)
-    return p.exists() and any(p.glob("shard.*.mds"))
+    """True only for a COMPLETE (finalized) MDS chunk.
+
+    MDSWriter writes shard.*.mds files and only writes index.json on a clean
+    close. A chunk that crashed mid-write (or was killed by a Modal retry /
+    wall-clock cutoff) has shard files but no index.json — it must be
+    rewritten, not skipped, or StreamingDataset later can't open it. Keying
+    the skip on index.json makes generation safely resumable.
+    """
+    return (Path(path) / "index.json").exists()
 
 
 # MDS column schema (shared with convert_to_mds.py)
@@ -802,8 +808,15 @@ def save_rendered_samples(samples, primary_script, train_dir, val_dir, chunk_id)
 
     t_dir = str(Path(train_dir) / f"chunk_{chunk_id:04d}")
     v_dir = str(Path(val_dir) / f"chunk_{chunk_id:04d}")
-    Path(t_dir).mkdir(parents=True, exist_ok=True)
-    Path(v_dir).mkdir(parents=True, exist_ok=True)
+    # Reaching here means this chunk was NOT skipped as complete, so any dir
+    # present is a partial write from a crashed/retried attempt. MDSWriter
+    # refuses a non-empty dir (FileExistsError), so wipe first — makes the
+    # write idempotent under Modal retries and resumes.
+    import shutil
+    for d in (t_dir, v_dir):
+        if Path(d).exists():
+            shutil.rmtree(d)
+        Path(d).mkdir(parents=True, exist_ok=True)
 
     train_widths, val_widths = [], []
     val_count = 0
