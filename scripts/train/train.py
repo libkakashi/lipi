@@ -761,12 +761,18 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         if prof_torch and batch_idx == 3:
             _tp.__enter__()
         if prof_torch and batch_idx == 7:
+            if device_type == "cuda":
+                torch.cuda.synchronize()  # flush kernels so events register
             _tp.__exit__(None, None, None)
-            print("\n=== torch.profiler: top ops by CUDA self-time ===",
-                  flush=True)
-            print(_tp.key_averages().table(
-                sort_by="self_cuda_time_total", row_limit=30), flush=True)
-            raise SystemExit("torch profile captured")
+            table = _tp.key_averages().table(
+                sort_by="self_cuda_time_total", row_limit=30)
+            header = "\n=== torch.profiler: top ops by CUDA self-time ===\n"
+            print(header + table, flush=True)
+            # Also persist to the run dir: log flushing races container
+            # teardown, but a committed volume file is reliable.
+            if save_dir:
+                (Path(save_dir) / "prof_table.txt").write_text(header + table)
+            sys.exit(0)  # clean exit → flushes stdout, no eval, no retry
         if prof_on:
             prof_sec.clear()
             # Time spent waiting on the dataloader (0 if workers keep up).
