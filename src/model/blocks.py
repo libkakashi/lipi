@@ -402,32 +402,56 @@ class MoELayer(nn.Module):
 
     def _routed_mlp(self, x: Tensor, expert_ids: Tensor,
                     expert_lens_cpu: list | None) -> Tensor:
-        """Apply per-frame routed MLPs.
+        """Apply per-frame routed MLPs via a single gather/scatter.
 
-        Iterates expert 0..num_experts, selects that expert's frames via
-        boolean mask, runs the MLP on the (K, dim) selection, scatters
-        back. Frames with expert_id outside [0, num_experts) get zero
-        contribution — the shared MLP still runs on them upstream, so
-        blank frames end up as attn + shared_mlp only.
+        Frames are grouped by expert (one permutation), each expert runs on
+        its contiguous slice, and the results are scattered back once. This
+        replaces the old per-expert boolean-mask loop
+        (``out[mask] = expert(x[mask])``): that touched the full (N, dim)
+        tensor once per expert and, worse, its boolean-mask-assignment
+        backward ran a full-size masked_fill per expert — ~27 of them per
+        layer dominated the whole training step (profiled: backward was 90%
+        of step-time, almost all add_/fill_/copy_). The expert MLP is
+        pointwise across frames, so grouping is exact regardless of order.
+
+        Frames with expert_id outside [0, num_experts) (blank / unrouted)
+        get zero contribution — the shared MLP still runs on them upstream.
         """
-        B = x.shape[0]
-        out = torch.zeros_like(x)
+        B, T, D = x.shape
+        N = B * T
+        xf = x.reshape(N, D)
+        ef = expert_ids.reshape(N)
+        out = torch.zeros(N, D, dtype=x.dtype, device=x.device)
+
+        # Positions of routed frames, grouped into contiguous per-expert runs.
+        valid = (ef >= 0) & (ef < self.num_experts)
+        pos = valid.nonzero(as_tuple=True)[0]  # (M,) flat positions
+        if pos.numel() == 0:
+            return out.reshape(B, T, D)
+        order = torch.argsort(ef.index_select(0, pos))  # group by expert id
+        pos = pos.index_select(0, order)
+        xg = xf.index_select(0, pos)  # (M, D) gathered, grouped by expert
+
+        # Per-expert slice sizes. Prefer the caller's precomputed counts
+        # (no GPU→CPU sync); fall back to bincount otherwise.
+        if expert_lens_cpu is not None:
+            counts = [sum(expert_lens_cpu[b][e] for b in range(B))
+                      for e in range(self.num_experts)]
+        else:
+            counts = torch.bincount(
+                ef[valid], minlength=self.num_experts).tolist()
+
+        chunks = []
+        s = 0
         for e in range(self.num_experts):
-            # Skip empty experts without a GPU→CPU sync when counts are
-            # provided by the caller (one upfront .tolist() at the encoder
-            # level covers every layer that shares these routing ids).
-            if expert_lens_cpu is not None:
-                if not any(expert_lens_cpu[b][e] > 0 for b in range(B)):
-                    continue
-            mask = (expert_ids == e)
-            if expert_lens_cpu is None and not mask.any():
+            k = counts[e]
+            if k == 0:
                 continue
-            # `out` inherits x's dtype (fp32, from the fp32 LayerNorm that
-            # produced x under autocast), but the expert Linear runs in the
-            # autocast dtype (bf16) — cast on write so the scatter's src and
-            # dst dtypes match, as every other masked-scatter site does.
-            out[mask] = self.routed_mlps[e](x[mask]).to(out.dtype)
-        return out
+            chunks.append(self.routed_mlps[e](xg[s:s + k]).to(out.dtype))
+            s += k
+        yg = torch.cat(chunks, dim=0) if len(chunks) > 1 else chunks[0]
+        out = out.index_copy(0, pos, yg)  # one scatter; light backward
+        return out.reshape(B, T, D)
 
 
 def _patch_merge_h(x: Tensor, h: int, w: int, proj: nn.Linear) -> tuple[Tensor, int]:
