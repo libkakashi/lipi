@@ -110,6 +110,18 @@ def shift_segments_x(segments: list[dict], a: float, b: float,
 # Streaming dataset
 # ---------------------------------------------------------------------------
 
+def _stream_has_samples(chunk_dir: Path) -> bool:
+    """True if an MDS chunk's index.json advertises at least one sample."""
+    idx = chunk_dir / "index.json"
+    if not idx.exists():
+        return False
+    try:
+        return sum(s.get("samples", 0)
+                   for s in json.loads(idx.read_text()).get("shards", [])) > 0
+    except (json.JSONDecodeError, OSError):
+        return False
+
+
 class LipiStreamingDataset(Dataset):
     """MDS-backed map-style dataset with global→local ID remapping.
 
@@ -154,10 +166,14 @@ class LipiStreamingDataset(Dataset):
                                         ops=safe_ops, chains=safe_chains)
 
         local_path = Path(local)
-        # Support both flat MDS dirs and dirs with chunk_* sub-directories
+        # Support both flat MDS dirs and dirs with chunk_* sub-directories.
+        # Empty chunks (index.json with samples=0) come from generate.py's
+        # train/val split when a chunk happens to land entirely on one side;
+        # StreamingDataset refuses to open them, so drop them here.
         chunk_dirs = sorted(local_path.glob("chunk_*"))
         if chunk_dirs:
-            streams = [Stream(local=str(d)) for d in chunk_dirs]
+            nonempty = [d for d in chunk_dirs if _stream_has_samples(d)]
+            streams = [Stream(local=str(d)) for d in nonempty]
             self._ds = StreamingDataset(streams=streams, shuffle=False)
         else:
             self._ds = StreamingDataset(local=local, shuffle=False)
