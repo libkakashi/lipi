@@ -269,11 +269,12 @@ def generate(out: str = "shards-v5", args: str = ""):
     retries=modal.Retries(max_retries=3, initial_delay=60.0),
 )
 def train(data: str = "shards-v5", run_name: str = "v5", args: str = "",
-          copy_local: bool = True, profile: bool = False):
+          copy_local: bool = True, profile: str = ""):
     """One ≤24 h training segment; spawns its own continuation if needed.
 
-    profile=True sets LIPI_PROFILE_STEP so train.py prints a per-section ms
-    breakdown for the first steps (diagnosing step-time bottlenecks).
+    profile sets LIPI_PROFILE_STEP: "1" = per-section ms breakdown for the
+    first steps; "2" = torch.profiler top-ops dump for a few steps, then
+    exit. Empty = normal run.
     """
     _prepare_repo()
     argv = shlex.split(args)
@@ -309,7 +310,7 @@ def train(data: str = "shards-v5", run_name: str = "v5", args: str = "",
 
     env = _child_env()
     if profile:
-        env["LIPI_PROFILE_STEP"] = "1"
+        env["LIPI_PROFILE_STEP"] = profile
     print("Running:", shlex.join(cmd))
     proc = subprocess.Popen(cmd, cwd=_REPO, env=env)
     try:

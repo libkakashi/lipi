@@ -625,6 +625,17 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
     _PROF_STEPS = 20
     prof_sec = {}
 
+    # Autograd-level profiler (LIPI_PROFILE_STEP=2): capture steps 3-6 with
+    # torch.profiler and dump the top ops by CUDA self-time, then exit. Pins
+    # the exact slow kernel behind a heavy backward (e.g. masked-scatter /
+    # index_put backward from the per-expert dispatch) instead of guessing.
+    prof_torch = os.environ.get("LIPI_PROFILE_STEP") == "2"
+    _tp = None
+    if prof_torch:
+        from torch.profiler import profile as _tprofile, ProfilerActivity
+        _tp = _tprofile(activities=[ProfilerActivity.CPU,
+                                    ProfilerActivity.CUDA])
+
     def _pmark(name, since):
         """Sync CUDA, attribute elapsed time to `name`, return a new mark."""
         if not prof_on:
@@ -747,6 +758,15 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
 
     _prev_step_end = time.perf_counter()
     for batch_idx, batch in enumerate(train_loader):
+        if prof_torch and batch_idx == 3:
+            _tp.__enter__()
+        if prof_torch and batch_idx == 7:
+            _tp.__exit__(None, None, None)
+            print("\n=== torch.profiler: top ops by CUDA self-time ===",
+                  flush=True)
+            print(_tp.key_averages().table(
+                sort_by="self_cuda_time_total", row_limit=30), flush=True)
+            raise SystemExit("torch profile captured")
         if prof_on:
             prof_sec.clear()
             # Time spent waiting on the dataloader (0 if workers keep up).
