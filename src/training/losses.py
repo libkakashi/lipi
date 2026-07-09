@@ -288,18 +288,28 @@ def compute_ctc_loss_segments(
     def _run_chunk(chunk_segs, max_T, vs):
         """Run batched CTC on one chunk, return (loss, n_chars)."""
         N = len(chunk_segs)
-        batched_logits = torch.zeros(max_T, N, vs, device=device, dtype=logits.dtype)
-        input_lens = torch.zeros(N, dtype=torch.long, device=device)
-        target_lens = torch.zeros(N, dtype=torch.long, device=device)
-        concat_targets = []
-        for i, sg in enumerate(chunk_segs):
-            b, fs, fe = sg["b"], sg["frame_start"], sg["frame_end"]
-            batched_logits[:sg["seg_len"], i, :] = logits[b, fs:fe, :vs]
-            input_lens[i] = sg["seg_len"]
-            target_lens[i] = len(sg["ids"])
-            concat_targets.extend(sg["ids"])
+        # One advanced-index gather for the whole chunk. The old per-segment
+        # slice-copy loop (`batched[:len, i] = logits[b, fs:fe, :vs]`) made
+        # autograd allocate + accumulate a full-size (B, T, max_vocab)
+        # gradient buffer per segment in backward — hundreds per step, which
+        # dominated the entire training step. One indexing op has one
+        # scatter-add backward. Steps past a segment's end re-read its own
+        # last frame: always in-bounds, ignored by CTC (t >= input_len),
+        # and their grad is exactly zero, so the result is identical.
+        b_idx = torch.tensor([sg["b"] for sg in chunk_segs], device=device)
+        f_start = torch.tensor([sg["frame_start"] for sg in chunk_segs],
+                               device=device)
+        input_lens = torch.tensor([sg["seg_len"] for sg in chunk_segs],
+                                  dtype=torch.long, device=device)
+        steps = torch.arange(max_T, device=device)
+        t_idx = torch.minimum(f_start[:, None] + steps[None, :],
+                              (f_start + input_lens - 1)[:, None])
+        gathered = logits[b_idx[:, None], t_idx, :vs]  # (N, max_T, vs)
 
-        log_probs = batched_logits.float().log_softmax(dim=-1)
+        log_probs = gathered.permute(1, 0, 2).float().log_softmax(dim=-1)
+        target_lens = torch.tensor([len(sg["ids"]) for sg in chunk_segs],
+                                   dtype=torch.long, device=device)
+        concat_targets = [i for sg in chunk_segs for i in sg["ids"]]
         targets = torch.tensor(concat_targets, dtype=torch.long, device=device)
 
         if device.type == "mps":
