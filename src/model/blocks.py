@@ -392,7 +392,11 @@ class MoELayer(nn.Module):
             mask = (expert_ids == e)
             if expert_lens_cpu is None and not mask.any():
                 continue
-            out[mask] = self.routed_mlps[e](x[mask])
+            # `out` inherits x's dtype (fp32, from the fp32 LayerNorm that
+            # produced x under autocast), but the expert Linear runs in the
+            # autocast dtype (bf16) — cast on write so the scatter's src and
+            # dst dtypes match, as every other masked-scatter site does.
+            out[mask] = self.routed_mlps[e](x[mask]).to(out.dtype)
         return out
 
 

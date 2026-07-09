@@ -156,6 +156,33 @@ def test_scheduled_routing_sampling():
     assert torch.equal(out_eval["group_ids"], group_ids)
 
 
+def test_routed_mlp_scatter_dtype_under_autocast():
+    """Routed-MLP scatter must not crash when its buffer dtype differs from
+    the expert output dtype.
+
+    Under CUDA autocast, LayerNorm is forced to fp32, so norm2's output (fed
+    to _routed_mlp) is fp32 while the expert Linear runs in bf16 — the
+    masked-scatter's dst (fp32) and src (bf16) then mismatch and index_put
+    raises. This killed the capacity probe's first forward on H100. We
+    reproduce the exact fp32-in / bf16-expert split by calling _routed_mlp
+    with an fp32 input inside CPU autocast (CPU autocast happens to preserve
+    LayerNorm's input dtype, so the full-model forward can't surface it —
+    the direct call mirrors the CUDA path faithfully)."""
+    from src.model.blocks import MoELayer
+
+    torch.manual_seed(0)
+    layer = MoELayer(dim=64, num_heads=4, num_experts=3, window_w=16)
+
+    B, T = 2, 16
+    x = torch.randn(B, T, 64)  # fp32, like CUDA-autocast norm2 output
+    expert_ids = torch.randint(0, 3, (B, T))
+
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        out = layer._routed_mlp(x, expert_ids, None)
+    assert out.shape == x.shape
+    assert torch.isfinite(out.float()).all()
+
+
 def test_layer_scale_init_near_identity():
     """MoE layers start near-identity (LayerScale 1e-4) like the backbone;
     lid1_attn keeps LayerScale 1.0 (its identity comes from zero-init
