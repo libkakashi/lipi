@@ -175,11 +175,16 @@ def _latest_checkpoint(save_dir: Path):
 
 
 def _stage_data(name: str, copy_local: bool) -> Path:
-    """Copy shards from the volume to container-local disk.
+    """Copy shards from the volume to container-local disk, in parallel.
 
     StreamingDataset does per-sample random reads; local NVMe serves those
-    far better than the FUSE-backed volume. copy_local=False reads the
-    volume in place (use if shards outgrow the container disk).
+    far better than the FUSE-backed volume, so a GPU run is compute-bound
+    only when the shards are staged locally (reading the volume in place
+    starves the GPU — measured ~30-70 img/s vs the ~300-1000 img/s compute
+    ceiling). A serial shutil.copytree of ~85 GB over FUSE took 20+ min;
+    the volume is object-storage-backed, so parallel file copies get far
+    higher aggregate bandwidth. copy_local=False reads in place (use only
+    if the shards outgrow the container disk).
     """
     src = Path(_DATA, name)
     if not (src / "train").is_dir():
@@ -188,13 +193,31 @@ def _stage_data(name: str, copy_local: bool) -> Path:
             f"first (modal run scripts/modal_app.py::generate --out {name})")
     if not copy_local:
         return src
+
     dst = Path("/tmp/lipi-shards", name)
-    if not dst.exists():
-        t0 = time.time()
-        size = sum(f.stat().st_size for f in src.rglob("*") if f.is_file())
-        print(f"Staging {size / 1e9:.1f} GB of shards to local disk...")
-        shutil.copytree(src, dst)
-        print(f"  staged in {time.time() - t0:.0f}s")
+    marker = dst / ".stage_complete"
+    if marker.exists():
+        return dst  # already fully staged in this container
+    if dst.exists():
+        shutil.rmtree(dst)  # partial stage from an interrupted attempt
+
+    t0 = time.time()
+    files = [p for p in src.rglob("*") if p.is_file()]
+    size = sum(f.stat().st_size for f in files)
+    print(f"Staging {size / 1e9:.1f} GB ({len(files)} files) to local disk "
+          f"(parallel)...")
+
+    def _copy(f: Path):
+        d = dst / f.relative_to(src)
+        d.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(f, d)
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=32) as ex:
+        for _ in ex.map(_copy, files):
+            pass
+    marker.touch()
+    print(f"  staged in {time.time() - t0:.0f}s")
     return dst
 
 
@@ -236,8 +259,11 @@ def generate(out: str = "shards-v5", args: str = ""):
 @app.function(
     image=image,
     gpu=_GPU,
-    cpu=16.0,
-    memory=64 * 1024,
+    # On-the-fly augmentation is CPU-heavy per sample; with too few cores the
+    # dataloader can't feed the GPU and it idles. 32 cores keeps ~28 loader
+    # workers busy so the H100 stays compute-bound. Cheap relative to the GPU.
+    cpu=32.0,
+    memory=96 * 1024,
     timeout=24 * 3600,
     volumes=_VOLUMES,
     retries=modal.Retries(max_retries=3, initial_delay=60.0),
