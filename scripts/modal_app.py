@@ -135,6 +135,11 @@ def _child_env():
     env["PYTHONUNBUFFERED"] = "1"
     env["TORCHINDUCTOR_CACHE_DIR"] = f"{_RUNS}/.cache/torchinductor"
     env["TRITON_CACHE_DIR"] = f"{_RUNS}/.cache/triton"
+    # The flex_attention Triton kernel needs ~278 KB of shared memory at our
+    # window sizes; H100/A100/L40S all cap below that, so every forward pass
+    # crashes. Fall through to the SDPA path (same numerics). Verified by the
+    # smoke run — not optional on these GPUs.
+    env["LIPI_DISABLE_FLEX_ATTENTION"] = "1"
     return env
 
 
@@ -238,6 +243,17 @@ def train(data: str = "shards-v5", run_name: str = "v5", args: str = "",
 
     cmd = [sys.executable, "scripts/train/train.py",
            "--data", str(data_dir), "--save-dir", str(save_dir), *argv]
+    # Default to eager: torch.compile's Inductor value-range analysis trips
+    # on the SDPA fallback's boolean mask algebra ("A Boolean argument can
+    # only be used in Eq and Ne") under dynamic shapes. Compile is a speed
+    # optimization, not correctness — a crashing default is worse than a
+    # working one. Pass --compile in --args once the SDPA path is made
+    # compile-clean to recover the ~1.5–2x speedup.
+    if "--compile" in argv:
+        argv.remove("--compile")
+        cmd = [c for c in cmd if c != "--compile"]
+    elif "--no-compile" not in argv:
+        cmd.append("--no-compile")
     if "--resume" not in argv:
         latest = _latest_checkpoint(save_dir)
         if latest:

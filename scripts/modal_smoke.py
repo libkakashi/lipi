@@ -175,6 +175,11 @@ def train():
         "--save-dir", str(save_dir),
         "--epochs", "1",
         "--consistency-weight", "0.5",
+        # Eager: the SDPA fallback's boolean mask algebra trips Inductor's
+        # dynamic-shape value-range analysis on H100 ("A Boolean argument can
+        # only be used in Eq and Ne"). The smoke validates the data → train →
+        # checkpoint → resume pipeline; compile is a separate perf decision.
+        "--no-compile",
     ]
     latest = _latest_checkpoint(save_dir)
     if latest:
