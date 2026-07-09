@@ -46,6 +46,53 @@ import os as _os
 if _os.environ.get("LIPI_DISABLE_FLEX_ATTENTION", "0") == "1":
     _HAS_FLEX_ATTENTION = False
 
+# torch.compile escape hatch used by the SDPA mask builder below. Falls back
+# to an identity decorator on builds without torch._dynamo (never compiled).
+try:
+    import torch._dynamo as _dynamo
+    _dynamo_disable = _dynamo.disable
+except (ImportError, AttributeError):
+    def _dynamo_disable(fn):
+        return fn
+
+
+@_dynamo_disable
+def _pad_wrap_mask_bias(nW: int, win_h: int, win_w: int, wp: int,
+                        w_real: int, shift_w: int, n_batch: int,
+                        device, dtype) -> Tensor:
+    """Additive SDPA attention-mask bias for shift/pad columns.
+
+    Built eagerly (torch._dynamo.disable): the boolean column algebra reasons
+    over shape-derived tensors, and Inductor's dynamic-shape value-range pass
+    rejects ordering comparisons on booleans ("A Boolean argument can only be
+    used in Eq and Ne"), crashing compilation. The mask is a pure function of
+    the integer window geometry — no dependence on q/k/v values and no
+    gradient — so running it in eager Python is exact and cheap (win_size ≤
+    256) and lets the rest of attention compile. Returns
+    (n_batch, 1, win_size, win_size).
+    """
+    win_size = win_h * win_w
+    # Per rolled column: pad = pre-roll column >= w_real;
+    # wrap = the last shift_w rolled positions overall.
+    cols = torch.arange(wp, device=device)
+    pad_flag = ((cols + shift_w) % wp) >= w_real
+    if shift_w > 0:
+        wrap_flag = cols >= (wp - shift_w)
+    else:
+        wrap_flag = torch.zeros_like(pad_flag)
+    # (nW, win_w) → tile rows to intra-window flattening (h, w)
+    pad_win = pad_flag.reshape(nW, 1, win_w).expand(
+        nW, win_h, win_w).reshape(nW, win_size)
+    wrap_win = wrap_flag.reshape(nW, 1, win_w).expand(
+        nW, win_h, win_w).reshape(nW, win_size)
+    allowed = ((wrap_win[:, :, None] == wrap_win[:, None, :])
+               & (~pad_win[:, None, :] | pad_win[:, :, None]))
+    mask_bias = torch.zeros(nW, win_size, win_size, device=device, dtype=dtype)
+    mask_bias.masked_fill_(~allowed, -100.0)
+    # Repeat across sample batches: (B*nH*nW, 1, win_size, win_size)
+    reps = n_batch // nW
+    return mask_bias.unsqueeze(1).repeat(reps, 1, 1, 1)
+
 
 class DropPath(nn.Module):
     """Stochastic depth per sample (drop whole residual branches).
@@ -250,29 +297,12 @@ class WindowedAttention(nn.Module):
         rel_bias = rel_bias.unsqueeze(0).to(q.dtype)
 
         if shift_w > 0 or pad_w > 0:
-            N_b = q.shape[0]  # B*nH*nW
-            device = q.device
-            # Per rolled column: pad = pre-roll column >= w_real;
-            # wrap = the last shift_w rolled positions overall.
-            cols = torch.arange(wp, device=device)
-            pad_flag = ((cols + shift_w) % wp) >= w_real
-            if shift_w > 0:
-                wrap_flag = cols >= (wp - shift_w)
-            else:
-                wrap_flag = torch.zeros_like(pad_flag)
-            # (nW, win_w) → tile rows to intra-window flattening (h, w)
-            pad_win = pad_flag.reshape(nW, 1, win_w).expand(
-                nW, win_h, win_w).reshape(nW, win_size)
-            wrap_win = wrap_flag.reshape(nW, 1, win_w).expand(
-                nW, win_h, win_w).reshape(nW, win_size)
-            allowed = ((wrap_win[:, :, None] == wrap_win[:, None, :])
-                       & (~pad_win[:, None, :] | pad_win[:, :, None]))
-            mask_bias = torch.zeros(nW, win_size, win_size,
-                                    device=device, dtype=q.dtype)
-            mask_bias.masked_fill_(~allowed, -100.0)
-            # Repeat across sample batches: (B*nH*nW, 1, W, W)
-            reps = N_b // nW
-            full_bias = rel_bias + mask_bias.unsqueeze(1).repeat(reps, 1, 1, 1)
+            # Constant additive mask built eagerly (see _pad_wrap_mask_bias);
+            # rel_bias carries the learned gradient and stays in the graph.
+            mask_bias = _pad_wrap_mask_bias(
+                nW, win_h, win_w, wp, w_real, shift_w, q.shape[0],
+                q.device, q.dtype)
+            full_bias = rel_bias + mask_bias
         else:
             full_bias = rel_bias
 
