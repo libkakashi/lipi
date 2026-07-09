@@ -240,10 +240,10 @@ class LipiMoEEncoder(nn.Module):
         script_dps = [next(dp_iter) for _ in range(num_script_layers)]
 
         # ── LID-1: per-frame group classification ─────────────────────
-        # Branches off SWA-D output (at h=2) before merge_d1. Pool h=2→1,
-        # run a dedicated lid1_attn block (window w=32) for LID-1's own
-        # horizontal-context capacity, then a small MLP head.
-        self.group_h_pool = nn.AdaptiveAvgPool2d((1, None))
+        # Branches off SWA-D output (at h=2) before merge_d1. Pool h=2→1
+        # (a plain mean over the row axis; see forward), run a dedicated
+        # lid1_attn block (window w=32) for LID-1's own horizontal-context
+        # capacity, then a small MLP head.
         # lid1_attn keeps LayerScale at 1.0: its identity-at-init comes
         # from the zero-init projections below, and a near-zero
         # LayerScale on top would suppress its gradients ~1e4x.
@@ -469,8 +469,11 @@ class LipiMoEEncoder(nn.Module):
         # LID-1 branch: pool h=2→1, run lid1_attn (window w=32), classify.
         # Uses the pre-merge_d1 tensor so merge_d1 only ever sees CTC
         # gradient.
-        x_for_group = x.reshape(B, h, w, d).permute(0, 3, 1, 2)  # (B, d, 2, w)
-        x_for_group = self.group_h_pool(x_for_group).squeeze(2).permute(0, 2, 1)
+        # Pool h→1 by averaging the row axis. A plain mean (not
+        # AdaptiveAvgPool2d((1, None)), which is identical here since it
+        # preserves width) keeps this compile-clean: adaptive pooling's
+        # output-size relational can't be resolved over a symbolic width.
+        x_for_group = x.reshape(B, h, w, d).mean(dim=1)  # (B, w, d)
         x_for_group = self.lid1_attn(x_for_group, 1, w)
         group_logits = self.group_head(x_for_group)  # (B, w, num_groups+1)
 
