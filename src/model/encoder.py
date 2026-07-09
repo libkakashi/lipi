@@ -36,7 +36,7 @@ from torch import Tensor
 
 from src.model.blocks import (
     ConvStem, ConvNeXtBlock, BlurPool2d, LayerScale, SWABlock, MoELayer,
-    GroupCTCModule, _patch_merge_h, _per_sample_key_lens,
+    GroupCTCModule, _patch_merge_h, _per_sample_key_lens, _dynamo_disable,
 )
 from src.taxonomy import NUM_GROUPS
 
@@ -328,9 +328,19 @@ class LipiMoEEncoder(nn.Module):
             for g in range(num_groups)
         ])
 
+    @_dynamo_disable
     def _ctc_logits(self, x: Tensor, flat_scripts: Tensor,
                     script_lens_cpu: list) -> Tensor:
         """Dispatch per-script CTC heads over routed frames.
+
+        Runs eager (torch._dynamo.disable): the loop skips scripts absent
+        from the batch, so which heads fire is data-dependent, and each
+        head's Linear has a distinct vocab (parameter) shape. Under compile
+        that means a fresh recompile per batch composition — dozens, past
+        the dynamo cache limit, silently falling back to eager anyway. The
+        heads are cheap (one Linear per script at the tail of the forward);
+        keeping them eager lets the trunk + MoE compile once and stay
+        compiled. Autograd still flows through this region.
 
         CTC heads are position-wise Linear(dim → vocab), so we can
         dispatch them by boolean mask on the full sequence — no need
@@ -354,9 +364,14 @@ class LipiMoEEncoder(nn.Module):
             logits[mask] = F.pad(head_out, (0, max_vocab - vs))
         return logits
 
+    @_dynamo_disable
     def _ctc_feedback(self, inter_logits: Tensor, flat_scripts: Tensor,
                       script_lens_cpu: list) -> Tensor:
         """Project the intermediate CTC posterior back to feature space.
+
+        Eager for the same reason as _ctc_logits (data-dependent per-script
+        dispatch with distinct vocab shapes). The graph breaks here, before
+        the script stack; the trunk and both MoE stacks still compile.
 
         Tied weights: each script's CTC head is Linear(dim → vocab) with
         weight (vocab, dim), so posterior @ weight maps the per-frame

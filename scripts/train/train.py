@@ -983,7 +983,11 @@ def main():
     # torch.compile after optimizer + resume (avoids param group mismatch)
     if device_type == "cuda" and not args.no_compile:
         print("Compiling model with torch.compile...")
-        model = torch.compile(model)
+        # dynamic=True: one symbolic-shape graph covers all bucket widths.
+        # With the default (auto) mode, each of the ~15 static bucket widths
+        # can trigger a recompile; past the dynamo cache limit that silently
+        # falls back to eager. Forcing dynamic keeps a single compiled graph.
+        model = torch.compile(model, dynamic=True)
         vram("after compile", device_type)
 
     ce_loss_fn = nn.CrossEntropyLoss(label_smoothing=0.1)  # ignore_index=-100 skips padding
