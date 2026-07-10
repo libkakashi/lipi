@@ -19,7 +19,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from src.encoding.decompose import encode_text as _encode_text, script_vocab_size
-from src.encoding.direction import is_rtl_script
+from src.encoding.direction import segment_is_rtl
 
 
 # Cache encoded token sequences — segments repeat the same (text, script)
@@ -231,7 +231,7 @@ def compute_ctc_loss_segments(
     B, T, _ = logits.shape
 
     # Group valid segments by (group, script) for batched CTC
-    buckets: dict[tuple[int, int], list[dict]] = {}
+    buckets: dict[tuple[int, int, bool], list[dict]] = {}
     skipped_no_script = 0
     skipped_no_ids = 0
     skipped_too_long = 0
@@ -274,10 +274,13 @@ def compute_ctc_loss_segments(
             if vs == 0:
                 continue
 
-            buckets.setdefault((g, s), []).append({
+            # Digit segments of RTL scripts read left-to-right, so buckets
+            # are keyed by direction too — every chunk stays uniform.
+            seg_rtl = segment_is_rtl(script_name, text)
+            buckets.setdefault((g, s, seg_rtl), []).append({
                 "b": b, "frame_start": frame_start, "frame_end": frame_end,
                 "seg_len": seg_len, "ids": ids, "vs": vs,
-                "rtl": is_rtl_script(script_name),
+                "rtl": seg_rtl,
             })
 
     ctc_loss = torch.zeros(1, device=device)
@@ -335,7 +338,7 @@ def compute_ctc_loss_segments(
                               blank=0, reduction="sum", zero_infinity=True)
             return loss, len(concat_targets)
 
-    for (g, s), segs in buckets.items():
+    for (g, s, _), segs in buckets.items():
         vs = segs[0]["vs"]
         # Sort by seg_len so chunks have similar padding waste
         segs = sorted(segs, key=lambda sg: sg["seg_len"])

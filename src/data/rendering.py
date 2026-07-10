@@ -158,6 +158,19 @@ def _unit_direction(blocks: list, text_index: int) -> str | None:
     return number_direction
 
 
+def _unit_strong_direction(blocks: list, text_index: int) -> str | None:
+    """First strong direction only — numbers don't set the paragraph base
+    direction (UAX#9 P2/P3), so a number-initial RTL line stays RTL."""
+    for block in blocks:
+        for char in block[text_index]:
+            bidi = unicodedata.bidirectional(char)
+            if bidi in _RTL_BIDI_CLASSES:
+                return "rtl"
+            if bidi == "L":
+                return "ltr"
+    return None
+
+
 def visual_order_blocks(blocks: list, text_index: int) -> list:
     """Reorder logical word blocks into left-to-right canvas order.
 
@@ -175,6 +188,7 @@ def visual_order_blocks(blocks: list, text_index: int) -> list:
 
     units: list[list] = []
     separators: list[list] = []
+    leading: list = []
     current: list = []
     pending_gaps: list = []
 
@@ -186,19 +200,24 @@ def visual_order_blocks(blocks: list, text_index: int) -> list:
             pending_gaps.append(block)
             continue
         if pending_gaps:
-            separators.append(pending_gaps)
+            if units:
+                separators.append(pending_gaps)
+            else:
+                leading = pending_gaps
             pending_gaps = []
         current.append(block)
     if current:
         units.append(current)
 
     if len(units) < 2:
-        direction = _unit_direction(units[0], text_index) if units else None
-        ordered = list(reversed(units[0])) if direction == "rtl" else blocks
-        return ordered + pending_gaps
+        if units and _unit_direction(units[0], text_index) == "rtl":
+            return leading + list(reversed(units[0])) + pending_gaps
+        return blocks
 
     directions = [_unit_direction(unit, text_index) for unit in units]
-    base = next((direction for direction in directions if direction), "ltr")
+    base = next((direction for direction in
+                 (_unit_strong_direction(unit, text_index) for unit in units)
+                 if direction), "ltr")
 
     # Resolve neutral-only units from their neighbors, then paragraph base.
     for i, direction in enumerate(directions):
@@ -228,7 +247,7 @@ def visual_order_blocks(blocks: list, text_index: int) -> list:
         else:
             visual_units.extend(run_units)
 
-    ordered = []
+    ordered = list(leading)
     for i, unit in enumerate(visual_units):
         ordered.extend(unit)
         if i < len(separators):

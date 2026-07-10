@@ -125,6 +125,24 @@ def save_shards(images, labels, script, out_dir, prefix="real"):
         print(f"  Han split: kept {total}, skipped {skipped} mixed-run samples")
         return total
 
+    # RTL labels with embedded digit/Latin runs would need per-run pixel
+    # ranges to keep the reversed CTC traversal valid — real data has no
+    # character boxes, so drop mixed samples (mirrors the Han policy above).
+    from src.encoding.direction import is_rtl_script
+    if is_rtl_script(script):
+        from src.data.script_detect import split_by_script
+
+        kept = [(image, label) for image, label in zip(images, labels)
+                if len([s for s in split_by_script(label, script)
+                        if s[0].strip()]) == 1]
+        skipped = len(images) - len(kept)
+        if skipped:
+            print(f"  {script}: dropped {skipped} mixed-direction samples")
+        images = [image for image, _ in kept]
+        labels = [label for _, label in kept]
+        if not images:
+            return 0
+
     script_id = SCRIPT_TO_ID.get(script)
     group_id = GROUP_TO_ID.get(SCRIPT_TO_GROUP.get(script, ""), None)
     if script_id is None or group_id is None:

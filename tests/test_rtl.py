@@ -6,8 +6,14 @@ import src.training.eval as eval_mod
 import src.training.losses as losses_mod
 from scripts.train.train import resume_from_checkpoint
 from src.data.rendering import visual_order_blocks
+from src.data.script_detect import split_by_script
 from src.data.word_lists import _rtl_word_is_encodable
-from src.encoding.direction import ctc_time_order, is_rtl_script
+from src.encoding.direction import (
+    ctc_time_order,
+    is_rtl_script,
+    segment_is_rtl,
+    undo_visual_digit_order,
+)
 
 
 def _block(text: str):
@@ -48,6 +54,63 @@ def test_visual_order_moves_split_suffix_punctuation_to_rtl_left_edge():
     assert _texts(visual) == ["?", "مرحبا"]
 
 
+def test_segment_is_rtl_excludes_digit_runs():
+    assert segment_is_rtl("arabic", "سال")
+    assert segment_is_rtl("hebrew", "שלום")
+    # Digit runs render left-to-right even inside RTL text.
+    assert not segment_is_rtl("arabic", "۱۳۹۸")
+    assert not segment_is_rtl("arabic", "١٢٣")
+    assert not segment_is_rtl("latin", "hello")
+
+
+def test_split_by_script_peels_digit_runs_from_rtl_words():
+    assert split_by_script("سال۱۳۹۸", "arabic") == [
+        ("سال", "arabic"), ("۱۳۹۸", "arabic")]
+    assert split_by_script("۱۲ماه۳۴", "arabic") == [
+        ("۱۲", "arabic"), ("ماه", "arabic"), ("۳۴", "arabic")]
+    # ASCII digits keep their existing latin peel-off.
+    assert split_by_script("שנת2024", "hebrew") == [
+        ("שנת", "hebrew"), ("2024", "latin")]
+    # Non-RTL parents keep their digits attached.
+    assert split_by_script("वर्ष२०", "devanagari") == [("वर्ष२०", "devanagari")]
+
+
+def test_undo_visual_digit_order_restores_digit_runs():
+    assert undo_visual_digit_order("۸۹۳۱") == "۱۳۹۸"
+    assert undo_visual_digit_order("لاس ۸۹۳۱ رخآ") == "لاس ۱۳۹۸ رخآ"
+    assert undo_visual_digit_order("بدون رقم") == "بدون رقم"
+    assert undo_visual_digit_order("") == ""
+
+
+def test_rtl_digit_segments_use_frame_order(monkeypatch):
+    """An RTL-script digit segment must consume frames left-to-right."""
+    monkeypatch.setattr(losses_mod, "_encode_text_cached",
+                        lambda text, script: (1, 2))
+    logits = torch.full((1, 4, 3), -10.0)
+    for t, token in enumerate([0, 1, 2, 0]):  # canvas order = target order
+        logits[0, t, token] = 10.0
+    segments = [[{"group_id": 0, "script_id": 0, "text": "۱۲",
+                  "offset": 0, "width": 16}]]
+    loss = losses_mod.compute_ctc_loss_segments(
+        logits, segments, torch.tensor([4]), [["arabic"]], [[3]])
+    assert loss.item() < 1e-6
+
+
+def test_visual_order_base_direction_skips_number_units():
+    # Logical: number first, then an Arabic word — base stays RTL, so the
+    # logically-first number renders at the right edge.
+    logical = [_block("۲۰"), _gap(), _block("شمس")]
+    visual = visual_order_blocks(logical, text_index=2)
+    assert [text for text in _texts(visual) if text] == ["شمس", "۲۰"]
+
+
+def test_visual_order_keeps_leading_gap():
+    logical = [_gap(), _block("שלום"), _gap(), _block("עולם")]
+    visual = visual_order_blocks(logical, text_index=2)
+    assert len(visual) == len(logical)
+    assert _texts(visual) == ["", "עולם", "", "שלום"]
+
+
 def test_rtl_word_filter_rejects_silently_dropped_characters():
     assert _rtl_word_is_encodable("العربية", "arabic")
     assert _rtl_word_is_encodable("فارسی", "arabic")
@@ -66,7 +129,7 @@ def _directional_logits():
     for t, token in enumerate([0, 1, 2, 0]):
         logits[1, t, token] = 10.0
     segments = [
-        [{"group_id": 0, "script_id": 0, "text": "ab",
+        [{"group_id": 0, "script_id": 0, "text": "اب",
           "offset": 0, "width": 16}],
         [{"group_id": 1, "script_id": 0, "text": "ab",
           "offset": 0, "width": 16}],

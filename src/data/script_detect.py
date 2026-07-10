@@ -15,6 +15,7 @@ Both operate on Unicode code-point ranges. The tight predicates
 callers that need to test one code point at a time.
 """
 
+from src.encoding.direction import is_number_char, is_rtl_script
 from src.encoding.han_split import (
     HAN_SCRIPTS,
     HAN_SPARSE,
@@ -127,16 +128,22 @@ def split_by_script(text: str, parent_script: str) -> list[tuple[str, str]]:
     ASCII characters (0x21-0x7E) become "latin" segments regardless of
     parent. For Han/Kana parents, kana and sparse/dense Han also split into
     separate runs so the training pipeline can label each segment with the
-    correct expert and CTC head. Everything else stays in parent_script.
+    correct expert and CTC head. For RTL parents, digit runs (Arabic-Indic/
+    Persian numerals, bidi EN/AN) split into their own same-script segments:
+    they render left-to-right inside RTL text, so the CTC frame traversal
+    must not reverse them with the surrounding letters. Everything else
+    stays in parent_script.
 
     Returns [(chunk_text, script_name), ...].
     """
     if not text:
         return []
 
+    parent_rtl = is_rtl_script(parent_script)
     segments = []
     current: list[str] = []
     current_script: str | None = None
+    current_digit = False
 
     for ch in text:
         cp = ord(ch)
@@ -158,11 +165,15 @@ def split_by_script(text: str, parent_script: str) -> list[tuple[str, str]]:
         else:
             script = parent_script
 
-        if script != current_script and current_script is not None and script is not None:
+        digit = (parent_rtl and script == parent_script
+                 and is_number_char(ch))
+        if ((script != current_script or digit != current_digit)
+                and current_script is not None and script is not None):
             segments.append(("".join(current), current_script))
             current = []
         if script is not None:
             current_script = script
+            current_digit = digit
         current.append(ch)
 
     if current and current_script is not None:

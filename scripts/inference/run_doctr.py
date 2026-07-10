@@ -20,7 +20,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.data.color import rgb_to_input
 from src.encoding.decompose import decode_ids, script_vocab_size
-from src.encoding.direction import ctc_time_order
+from src.encoding.direction import (
+    ctc_time_order,
+    is_rtl_script,
+    undo_visual_digit_order,
+)
 from src.model.encoder import LipiMoEEncoder
 from src.training.checkpoint import normalize_model_state_keys
 from src.training.taxonomy_checkpoint import (
@@ -360,6 +364,9 @@ def _decode_one(logits_i, group_ids, frame_scripts, script_names):
                 logits_i[start:end, :vs], script_name)
             ids = ctc_decode(run_logits, vs)
             text = decode_ids(ids, script_name)
+            if text and is_rtl_script(script_name):
+                # The reversed traversal reads embedded digit runs backwards.
+                text = undo_visual_digit_order(text)
             if text:
                 runs.append((group_id, script_name, text,
                              ctc_confidence(run_logits, vs), end - start))
@@ -370,7 +377,33 @@ def _decode_one(logits_i, group_ids, frame_scripts, script_names):
     primary = max(runs, key=lambda run: run[4])
     total_frames = sum(run[4] for run in runs)
     confidence = sum(run[3] * run[4] for run in runs) / total_frames
-    return primary[0], primary[1], "".join(run[2] for run in runs), confidence, runs
+    text = "".join(run[2] for run in _logical_run_order(runs))
+    return primary[0], primary[1], text, confidence, runs
+
+
+def _logical_run_order(runs):
+    """Reorder visual (left-to-right frame) runs into logical reading order.
+
+    When most frames belong to an RTL script, the crop reads right-to-left:
+    runs are consumed from the right, keeping each maximal sequence of
+    adjacent non-RTL runs (latin, digits) in its visual order.
+    """
+    rtl_frames = sum(run[4] for run in runs if is_rtl_script(run[1]))
+    if rtl_frames * 2 <= sum(run[4] for run in runs):
+        return runs
+    ordered = []
+    i = len(runs) - 1
+    while i >= 0:
+        if is_rtl_script(runs[i][1]):
+            ordered.append(runs[i])
+            i -= 1
+        else:
+            j = i
+            while j >= 0 and not is_rtl_script(runs[j][1]):
+                j -= 1
+            ordered.extend(runs[j + 1:i + 1])
+            i = j
+    return ordered
 
 
 @torch.no_grad()
@@ -474,7 +507,9 @@ def recognize_crops(model, crops: list[dict], script_names: list[list[str]],
         all_frame_scripts = output["frame_scripts"]  # (B, T)
 
         for b, idx in enumerate(indices):
-            valid_t = tensors[b].shape[2] // model.time_downsample
+            # Ceil-div: flooring would drop up to 3px of the right edge —
+            # the first logical character of an RTL crop.
+            valid_t = -(-tensors[b].shape[2] // model.time_downsample)
             group_id, script_name, text, conf, runs = _decode_one(
                 all_logits[b, :valid_t],
                 all_group_ids[b, :valid_t],

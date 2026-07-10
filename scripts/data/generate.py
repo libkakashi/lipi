@@ -44,6 +44,7 @@ from src.data.augmentation import (
     text_decoration, highlighter, table_rules, photo_background,
 )
 from src.encoding.vocab import build_script_vocab
+from src.encoding.direction import is_rtl_script
 from src.encoding.han_split import (
     HAN_DENSE,
     HAN_SCRIPTS,
@@ -1037,10 +1038,12 @@ def _get_word_pool(font_filter, script, fonts, words, h=32, punct_prob=0.15):
     while len(pool) < target and attempts < target * 3:
         attempts += 1
         word = _sample_word(script, words)
-        # Pool entries carry one script label, so extract a matching maximal
-        # run from mixed CJK words instead of assigning the whole word to one
-        # Han/Kana head.
-        if script in HAN_SCRIPTS or script == "kana":
+        # Pool entries carry one script label and render as one segment, so
+        # extract a matching maximal run from mixed CJK words instead of
+        # assigning the whole word to one Han/Kana head. RTL words take the
+        # same path: digit runs must not share a segment with the letters,
+        # or the reversed CTC traversal reads the digits backwards.
+        if script in HAN_SCRIPTS or script == "kana" or is_rtl_script(script):
             segs = split_by_script(word, script)
             candidates = [text for text, seg_script in segs
                           if seg_script == script and text.strip()]
