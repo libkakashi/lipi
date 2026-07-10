@@ -4,7 +4,6 @@ Image rendering and validation for OCR training data.
 Handles:
 - Word rendering with random ink/paper colors
 - Single-character rendering with cmap-based font filtering
-- Emoji rendering (synthetic colored blocks)
 - Image validation (blank/faint detection)
 - Image sizing (resize/pad to target dimensions)
 """
@@ -282,38 +281,6 @@ def compose_line_baseline(blocks: list, target_h: int
     final_w = max(4, round(total_w * scale))
     line = canvas.resize((final_w, target_h), Image.BILINEAR)
     return line, placed, final_w / total_w
-
-
-# ---------------------------------------------------------------------------
-# Emoji rendering
-# ---------------------------------------------------------------------------
-
-def render_emoji(height: int = 32, max_width: int = 192) -> Image.Image:
-    """Render a synthetic emoji-like colorful block image.
-
-    Emojis are visually distinct: bright colors, round shapes, high contrast.
-    Simulates with colored circles/rectangles on white backgrounds.
-    """
-    from PIL import ImageDraw
-
-    w = random.randint(height, min(height * 3, max_width))
-    img = Image.new("RGB", (w, height), (255, 255, 255))
-    draw = ImageDraw.Draw(img)
-
-    # Random bright shapes
-    n_shapes = random.randint(1, 4)
-    for _ in range(n_shapes):
-        color = (random.randint(100, 255), random.randint(50, 255), random.randint(50, 255))
-        x1 = random.randint(0, w - 4)
-        y1 = random.randint(0, height - 4)
-        x2 = random.randint(x1 + 4, min(x1 + height, w))
-        y2 = random.randint(y1 + 4, min(y1 + height, height))
-        if random.random() < 0.5:
-            draw.ellipse([x1, y1, x2, y2], fill=color)
-        else:
-            draw.rectangle([x1, y1, x2, y2], fill=color)
-
-    return img
 
 
 # ---------------------------------------------------------------------------

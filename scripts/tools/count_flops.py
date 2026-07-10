@@ -24,10 +24,9 @@ GROUP_SCRIPT_VOCAB_SIZES = [
     [550, 950, 500],              # 8  dravidian_north
     [900, 350],                   # 9  dravidian_south
     [450, 500, 650, 950],         # 10 se_asian
-    [107],                        # 11 emoji
-    [150, 186],                   # 12 caucasus
-    [521],                        # 13 ethiopic
-    [550],                        # 14 tibetan
+    [150, 186],                   # 11 caucasus
+    [521],                        # 12 ethiopic
+    [550],                        # 13 tibetan
 ]
 
 
@@ -95,13 +94,13 @@ def main():
         "swa_d (3 blocks)": model.swa_d,
         "merge_cd / merge_d1": [model.merge_cd, model.merge_d1],
         "lid1_attn + group_head": [model.lid1_attn, model.group_head],
-        "group MoE stack (N × shared_attn + 15 routed MLPs + shared MLP)":
+        "group MoE stack (N × shared_attn + 14 routed MLPs + shared MLP)":
             model.group_layers,
         "lid2 heads": model.lid2_heads,
-        "script MoE stack (N × shared_attn + 28 routed MLPs + shared MLP)":
+        "script MoE stack (N × shared_attn + 27 routed MLPs + shared MLP)":
             model.script_layers,
         "norm": model.norm,
-        "ctc heads (28 scripts)": model.ctc_modules,
+        "ctc heads (27 scripts)": model.ctc_modules,
     }
     print("Param breakdown:")
     for name, mod in breakdown.items():
@@ -127,7 +126,6 @@ def main():
         (128, 4, 1,  "han_dense"),
         (128, 6, 0,  "korean"),    # multi-script via decomposition
         (128, 7, 0,  "devanagari"),# multi-script group → fires LID-2
-        (128, 11, 0, "emoji"),     # tiny vocab
     ]
     for w, gid, sid, label in configs:
         flops = measure_flops(model, w, gid, sid)

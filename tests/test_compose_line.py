@@ -18,6 +18,7 @@ FONT_DIR = REPO / "training_data" / "fonts"
 
 from src.data.rendering import compose_line_baseline, font_covers_text
 from src.data.text_renderer import render_word_baseline
+from src.taxonomy import NUM_GROUPS
 
 
 def _latin_font():
@@ -140,4 +141,4 @@ class TestRenderPlanLine:
         # gap between the words is blank-labeled
         gap_x = (segments[0]["offset"] + segments[0]["width"]
                  + segments[1]["offset"]) // 2
-        assert gl[gap_x] == 15  # NUM_GROUPS blank
+        assert gl[gap_x] == NUM_GROUPS

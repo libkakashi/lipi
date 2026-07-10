@@ -2,7 +2,7 @@
 
 ## Motivation
 
-Currently all 28 routed script heads share 4 SWA blocks before LID-1 classifies into 15 groups. The shared features are a compromise — optimized for no script family in particular. LID-1 must distinguish 15 groups using these generic features.
+Currently all 27 routed script heads share 4 SWA blocks before LID-1 classifies into 14 groups. The shared features are a compromise — optimized for no script family in particular. LID-1 must distinguish 14 groups using these generic features.
 
 With LID-0, we split early: 2 shared SWA blocks → LID-0 routes to a super-group → 2 per-super-group SWA blocks → LID-1 routes within the super-group. Each super-group gets specialized features tuned for its script family before LID-1 even runs.
 
@@ -54,9 +54,9 @@ Derived from Brahmi script. Base consonant + vowel mark system. Includes South/S
 - Note: SE Asian scripts (Thai, Lao, Burmese, Khmer) are historically Brahmic.
   Shared super-group SWA can learn the base+mark structure common to all.
 
-### 5. Other (3 groups, 3 scripts)
+### 5. Other (2 groups, 2 scripts)
 Unique scripts with no close relatives.
-- ethiopic, tibetan, emoji
+- ethiopic, tibetan
 - Low similarity to each other and everything else.
 - Could also merge with Alphabetic (ethiopic is an abugida) or Brahmic (tibetan is Brahmic-derived). Grouping here avoids forcing them into a poor fit.
 
@@ -66,7 +66,7 @@ Unique scripts with no close relatives.
 
 2. **LID-1 becomes easier.** Instead of 15-way classification on generic features, each LID-1 classifies 2-7 groups using specialized features. Brahmic LID-1 (hardest: 7 groups among similar scripts) gets Brahmic-tuned features.
 
-3. **Gradual feature specialization.** Shared → super-group → group → script. Each level narrows the feature space. No single bottleneck where generic features must distinguish all 28 routed heads.
+3. **Gradual feature specialization.** Shared → super-group → group → script. Each level narrows the feature space. No single bottleneck where generic features must distinguish all 27 routed heads.
 
 4. **Natural parameter scaling.** Super-group SWA blocks are shared within the family (not per-group), so cost is 5 × 2 blocks = 10 SWA blocks total vs current 4 shared. Net +6 SWA blocks, each ~1M params = ~6M extra. Modest.
 
@@ -117,6 +117,6 @@ With LID-0:
 
 2. **Brahmic super-group size.** 7 groups / 17 scripts is large. Could split into "Indic" and "SE Asian" super-groups (4+3 groups). But the shared Brahmic structure (base+vowel mark) benefits from joint features. Keep as one for now, split later if LID-1 within Brahmic underperforms.
 
-3. **"Other" super-group coherence.** Ethiopic, Tibetan, and Emoji have nothing in common. The super-group SWA blocks can't learn shared features. Alternative: merge ethiopic with Alphabetic (it's an abugida with letter-like structure), tibetan with Brahmic (historically derived), emoji stays solo. This eliminates the "Other" super-group.
+3. **"Other" super-group coherence.** Ethiopic and Tibetan have little in common. An alternative is to merge Ethiopic with Alphabetic and Tibetan with Brahmic.
 
 4. **Drop path across super-group boundary.** Currently drop_path increases linearly across all blocks. With the super-group split, should drop_path continue across the boundary or reset? Recommendation: continue — the frame has still passed through N blocks total regardless of routing.

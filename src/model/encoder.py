@@ -16,7 +16,7 @@ Backbone (2× width downsample overall, so T = W/4):
     -> LID-1 branch: lid1_merge(2 rows + ConvB texture tap), lid1_attn
        (w=32), group_head
     -> merge h=2→1, Linear(768→384)                            ( 1, W/4, 384)
-    -> Group MoE stack: N × (shared attn + 15 routed MLPs + shared MLP)
+    -> Group MoE stack: N × (shared attn + 14 routed MLPs + shared MLP)
        (LID-2 heads tap the stack one block before the end)
     -> intermediate CTC + self-conditioning feedback (tied head weights)
     -> Script MoE stack: N × (shared attn + 27 routed MLPs + shared MLP)
@@ -53,7 +53,7 @@ class LipiMoEEncoder(nn.Module):
          LID-1 has its own capacity for script-family discrimination
          without forcing the CTC feature path into a family/character
          compromise.
-      2. Group MoE stack: N stacked MoELayers with 15 routed MLPs each.
+      2. Group MoE stack: N stacked MoELayers with 14 routed MLPs each.
          Every frame passes through the same attention; its MLP is
          picked by group_id, and a shared MLP always runs alongside.
       3. LID-2 classifies each frame into a script within its group
@@ -299,7 +299,7 @@ class LipiMoEEncoder(nn.Module):
 
         # ── Group MoE stack (routed by group_id) ──────────────────────
         # N stacked MoELayers, alternating local/wide window widths and
-        # shifts. Each layer: shared attention + 15 routed MLPs (one per
+        # shifts. Each layer: shared attention + 14 routed MLPs (one per
         # group) + shared MLP (always on).
         self.group_layers = nn.ModuleList([
             MoELayer(

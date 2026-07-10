@@ -22,7 +22,13 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from src.taxonomy import SCRIPTS, SCRIPT_TO_GROUP, GROUP_TO_ID, SCRIPT_TO_ID
+from src.taxonomy import (
+    SCRIPTS,
+    SCRIPT_TO_GROUP,
+    GROUP_TO_ID,
+    SCRIPT_TO_ID,
+    TAXONOMY_VERSION,
+)
 from src.data.color import rgb_to_input
 from src.data.augmentation import (
     RandAugmentOCR, CHAINS_BY_NAME,
@@ -45,7 +51,7 @@ from src.encoding.han_split import (
     HAN_SPLIT_VERSION,
 )
 from src.data.rendering import (
-    render_word, render_emoji, image_has_ink,
+    render_word, image_has_ink,
     resize_or_pad, filter_fonts_by_cmap, font_covers_text,
     compose_line_baseline, visual_order_blocks,
 )
@@ -599,20 +605,6 @@ def _render_plan_line(plan, fonts_by_script, h, mw):
             total_w += ws_w
             continue
 
-        if script == "emoji":
-            e_h = int(font_size * 1.1)
-            img = render_emoji(e_h, e_h * 3)
-            if img is None or not under_budget(img.width):
-                continue
-            emoji_gid = GROUP_TO_ID.get(SCRIPT_TO_GROUP.get(script, ""), 0)
-            emoji_sid = SCRIPT_TO_ID.get(script, 0)
-            # Emoji sit roughly on the baseline
-            blocks.append((img, int(img.height * 0.85), text,
-                           emoji_gid, emoji_sid, img.width))
-            total_w += img.width
-            est_line_h = max(est_line_h, img.height)
-            continue
-
         # Line font for this script — picked once; per-word fallback only
         # when that font lacks coverage for this specific text.
         font = line_fonts.get(script)
@@ -696,16 +688,6 @@ def _render_plan_ransom(plan, fonts_by_script, h, mw, word_pools):
                 break
             blocks.append((None, "", BLANK_ID, 0, ws_w))
             total_w += ws_w
-            continue
-
-        if script == "emoji":
-            img = render_emoji(h, mw - total_w if total_w < mw else 32)
-            if img is None:
-                continue
-            emoji_gid = GROUP_TO_ID.get(SCRIPT_TO_GROUP.get(script, ""), 0)
-            emoji_sid = SCRIPT_TO_ID.get(script, 0)
-            blocks.append((img, text, emoji_gid, emoji_sid, img.width))
-            total_w += img.width
             continue
 
         # Mix pool picks (fast) with live renders of the planned text.
@@ -954,11 +936,6 @@ def discover_fonts(active_scripts, word_lists):
     script_fonts = {}
     valid_scripts = []
     for script in active_scripts:
-        if script == "emoji":
-            script_fonts[script] = ["__emoji__"]
-            valid_scripts.append(script)
-            print(f"  {'emoji':<15}   - (synthetic)")
-            continue
         if not word_lists.get(script):
             print(f"  {script:<15}   no word list — SKIPPED")
             continue
@@ -1114,8 +1091,6 @@ def build_line_chunks(tasks, script_fonts, word_lists, valid_scripts, args,
     # Build all_script_info for mixed lines: (script, fonts, words, group_id)
     all_script_info = []
     for script in valid_scripts:
-        if script == "emoji":
-            continue
         fonts = script_fonts.get(script, [])
         words = word_lists.get(script, [])
         if fonts and words:
@@ -1174,8 +1149,6 @@ def build_char_chunks(valid_scripts, script_fonts, args, shard_dir, start_chunk_
     char_chunks = []
     chunk_idx = start_chunk_idx
     for script in valid_scripts:
-        if script == "emoji":
-            continue
         fonts = script_fonts[script]
         chars = get_renderable_chars(script)
         if not chars:
@@ -1524,11 +1497,7 @@ def main():
 
     script_fonts, valid_scripts = discover_fonts(active_scripts, word_lists)
 
-    # Build per-script targets
-    # Emoji is excluded from line tasks: plan builders never emit emoji
-    # segments, so an emoji chunk just produced ordinary mixed lines whose
-    # sample-level script_id mislabeled them as emoji.
-    line_scripts = [s for s in valid_scripts if s != "emoji"]
+    line_scripts = list(valid_scripts)
 
     if args.vocab_proportional:
         import math
@@ -1629,6 +1598,7 @@ def main():
         "active_scripts": valid_scripts,
         "active_groups": active_groups,
         "han_split_version": HAN_SPLIT_VERSION,
+        "taxonomy_version": TAXONOMY_VERSION,
         "height": args.height,
         "max_width": args.max_width,
     }, shard_dir / "metadata.pt")

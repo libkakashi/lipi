@@ -8,6 +8,7 @@ merging primary and extra files (e.g., latin.txt + english_common.txt + french.t
 import bisect
 import itertools
 import random
+import re
 import unicodedata
 from pathlib import Path
 
@@ -15,6 +16,14 @@ from src.encoding.han_split import HAN_DENSE, HAN_SCRIPTS, HAN_SPARSE
 
 WORD_LIST_DIR = Path(__file__).parent.parent.parent / "training_data" / "word_lists"
 CORPORA_DIR = Path(__file__).parent.parent.parent / "training_data" / "corpora"
+
+_EMOJI_RE = re.compile(
+    r"[\u2600-\u27BF\U0001F300-\U0001F6FF\U0001F900-\U0001F9FF]")
+
+
+def contains_emoji(text: str) -> bool:
+    """Return whether text contains an unsupported emoji code point."""
+    return _EMOJI_RE.search(text) is not None
 
 
 class WordSampler:
@@ -154,6 +163,7 @@ def load_word_list(script: str) -> list[str]:
             for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
                 w = unicodedata.normalize("NFC", line.strip())
                 if (2 <= len(w) <= 15 and not w[0].isdigit()
+                        and not contains_emoji(w)
                         and _rtl_word_is_encodable(w, script)):
                     words.append(w)
 
@@ -176,9 +186,6 @@ def load_all_word_lists(scripts: list[str]) -> dict[str, list[str]]:
     """
     result = {}
     for script in scripts:
-        if script == "emoji":
-            result[script] = ["emoji"]
-            continue
         words = load_word_list(script)
         if words:
             result[script] = words

@@ -36,6 +36,7 @@ from src.taxonomy import (
     SCRIPT_TO_GROUP,
     NUM_GROUPS,
     GROUPS,
+    TAXONOMY_VERSION,
     canonical_script_name,
 )
 from src.training.dataloader import (
@@ -49,9 +50,9 @@ from src.training.losses import (
 from src.training.ema import ModelEMA
 from src.training.routing import build_frame_labels_from_segments
 from src.training.eval import evaluate
-from src.training.han_checkpoint import (
-    has_legacy_han_layout,
-    migrate_legacy_han_state,
+from src.training.taxonomy_checkpoint import (
+    needs_taxonomy_migration,
+    migrate_taxonomy_state,
 )
 from src.training.checkpoint import normalize_model_state_keys
 
@@ -212,8 +213,8 @@ def resolve_device(args):
 def build_script_sample_weights(train_dir: str, beta: float) -> np.ndarray | None:
     """Per-sample weights giving script s total sampling mass ∝ vocab^beta.
 
-    Motivation: flat per-script sampling collapsed CJK (each Han head still
-    has roughly 2K classes vs emoji's 107). Weighting mass by
+    Motivation: flat per-script sampling collapsed CJK (each Han head has
+    roughly 2K classes vs Armenian's 150). Weighting mass by
     vocab_size^beta gives large-vocabulary scripts proportionally more visits.
 
     Returns None (resampling disabled) when the script_ids.npy sidecar is
@@ -269,6 +270,10 @@ def load_and_prepare_data(args, device):
                 "These shards predate the han_sparse/han_dense split. "
                 "Their Han word blocks have no per-run complexity labels; "
                 "regenerate the shards before training the split heads.")
+        if "emoji" in meta.get("active_scripts", []):
+            raise RuntimeError(
+                "These shards contain the removed Emoji script/group. "
+                "Regenerate them with the current 14-group taxonomy.")
         active_scripts = meta["active_scripts"]
     else:
         active_scripts = list(SCRIPT_TO_GROUP.keys())
@@ -485,11 +490,14 @@ def resume_from_checkpoint(args, model, optimizer, base_optimizer, scaler, sched
         print(f"  --skip-backbone-load: dropped {len(dropped)} backbone keys")
 
     current_state = model.state_dict()
-    han_layout_changed = has_legacy_han_layout(ckpt.get("model_config"))
-    if han_layout_changed:
-        migrated = migrate_legacy_han_state(
-            model_state, current_state, ckpt.get("model_config"), model.config)
-        print(f"  Han layout upgraded: warm-started {migrated} state entries; "
+    current_model_config = getattr(model, "config", {})
+    taxonomy_changed = needs_taxonomy_migration(
+        ckpt.get("model_config"), current_model_config)
+    if taxonomy_changed:
+        migrated = migrate_taxonomy_state(
+            model_state, current_state, ckpt.get("model_config"),
+            current_model_config)
+        print(f"  Taxonomy upgraded: remapped {migrated} state entries; "
               "optimizer and EMA state will restart")
 
     # Skip mismatched shapes (e.g., CTC proj after vocab change)
@@ -539,7 +547,7 @@ def resume_from_checkpoint(args, model, optimizer, base_optimizer, scaler, sched
     if "optimizer" not in ckpt:
         print("  No optimizer state in checkpoint (fresh optimizer)")
     elif (skipped or dtype_changed or groups_changed or freeze_mode
-          or direction_changed or han_layout_changed):
+          or direction_changed or taxonomy_changed):
         reasons = []
         if skipped:
             reasons.append("vocab changed")
@@ -551,14 +559,14 @@ def resume_from_checkpoint(args, model, optimizer, base_optimizer, scaler, sched
             reasons.append(f"freeze mode ({args.freeze_except})")
         if direction_changed:
             reasons.append("RTL CTC objective changed")
-        if han_layout_changed:
-            reasons.append("Han expert/CTC layout changed")
+        if taxonomy_changed:
+            reasons.append("script/group taxonomy changed")
         print(f"  Skipping optimizer state ({', '.join(reasons)})")
     else:
         optimizer.load_state_dict(ckpt["optimizer"])
     if "scaler" in ckpt:
         scaler.load_state_dict(ckpt["scaler"])
-    ema_state = None if direction_changed or han_layout_changed else ckpt.get("ema")
+    ema_state = None if direction_changed or taxonomy_changed else ckpt.get("ema")
     start_epoch = ckpt.get("epoch", 0) + 1
 
     # Always rebuild scheduler on resume — checkpoint might have a different
@@ -597,6 +605,7 @@ def save_checkpoint(model, optimizer, scheduler, scaler, epoch, args, save_dir,
         "args": vars(args),
         "ctc_direction_version": CTC_DIRECTION_VERSION,
         "han_split_version": HAN_SPLIT_VERSION,
+        "taxonomy_version": TAXONOMY_VERSION,
     }
     if ema is not None:
         payload["ema"] = ema.state_dict()

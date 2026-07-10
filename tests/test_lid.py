@@ -34,5 +34,7 @@ class TestLIDCoarse:
             assert logits.shape == (1, NUM_GROUPS)
 
     def test_num_groups(self):
-        assert NUM_GROUPS == 15
-        assert len(GROUPS) == 15
+        assert NUM_GROUPS == 14
+        assert len(GROUPS) == 14
+        assert "emoji" not in GROUPS
+        assert "emoji" not in SCRIPTS

@@ -86,14 +86,6 @@ _SCRIPT_RANGES = {
     "georgian": [(0x10A0, 0x10FF), (0x2D00, 0x2D2F)],
     "ethiopic": [(0x1200, 0x137F), (0x1380, 0x139F), (0x2D80, 0x2DDF)],
     "tibetan": [(0x0F00, 0x0FFF)],
-    "emoji": [
-        (0x1F600, 0x1F64F),  # Emoticons
-        (0x1F300, 0x1F5FF),  # Misc Symbols and Pictographs
-        (0x1F680, 0x1F6FF),  # Transport and Map
-        (0x1F900, 0x1F9FF),  # Supplemental Symbols
-        (0x2600, 0x26FF),    # Misc Symbols
-        (0x2700, 0x27BF),    # Dingbats
-    ],
 }
 
 

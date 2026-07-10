@@ -26,6 +26,10 @@ from src.taxonomy import GROUPS, NUM_GROUPS, SCRIPT_TO_GROUP
 from src.data.color import rgb_to_input
 from src.encoding.decompose import decode_ids, script_vocab_size
 from src.training.eval import _edit_distance
+from src.training.taxonomy_checkpoint import (
+    needs_taxonomy_migration,
+    migrate_taxonomy_state,
+)
 
 
 BENCHMARKS = {
@@ -202,8 +206,13 @@ def main():
     # Build model
     group_script_vocab_sizes, group_script_names = build_vocab_tables()
     if "model_config" in ckpt:
-        cfg = ckpt["model_config"]
+        cfg = dict(ckpt["model_config"])
         print(f"Model config from checkpoint: dim={cfg['dim']}")
+        cfg.update(
+            num_groups=NUM_GROUPS,
+            group_script_vocab_sizes=group_script_vocab_sizes,
+            group_script_names=group_script_names,
+        )
         model = LipiMoEEncoder(**cfg).to(device)
     else:
         model = LipiMoEEncoder(
@@ -215,7 +224,10 @@ def main():
 
     model_state = ckpt["model"] if "model" in ckpt else ckpt
     model_state, _ = normalize_model_state_keys(model_state)
-    model.load_state_dict(model_state)
+    if needs_taxonomy_migration(ckpt.get("model_config"), model.config):
+        migrate_taxonomy_state(
+            model_state, model.state_dict(), ckpt.get("model_config"), model.config)
+    model.load_state_dict(model_state, strict=False)
     print(f"Loaded checkpoint: {args.resume}")
 
     # Run benchmarks

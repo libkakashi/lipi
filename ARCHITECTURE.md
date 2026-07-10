@@ -1,6 +1,6 @@
 # Lipi: Multilingual OCR via Mixture of Experts
 
-> 28 routed script heads, 15 groups, 100+ languages. 80.5M params, ~1.7 GFLOPs/word.
+> 27 routed script heads, 14 groups, 100+ languages. 80.5M params, ~1.7 GFLOPs/word.
 
 ---
 
@@ -55,7 +55,7 @@ Branches off shared_c output before the CTC path merge.
 ```
 AdaptiveAvgPool h=2→1                      pool vertical
 lid1_attn: SWABlock(dim=256, w=32, h=1)   dedicated script-discrimination context
-group_head: Linear(256→128) + GELU + Linear(128→16)   15 groups + blank
+group_head: Linear(256→128) + GELU + Linear(128→15)   14 groups + blank
 
 Output: per-frame group logits (B, T, 16)
 ```
@@ -121,7 +121,7 @@ Greedy decode: argmax → collapse repeats → remove blanks → token IDs → t
 
 ---
 
-## Groups and Scripts (15 groups, 28 routed script heads)
+## Groups and Scripts (14 groups, 27 routed script heads)
 
 | # | Group | Scripts | Vocab | LID-2 |
 |---|-------|---------|-------|-------|
@@ -136,10 +136,9 @@ Greedy decode: argmax → collapse repeats → remove blanks → token IDs → t
 | 8 | dravidian_north | kannada, telugu, sinhala | 550, 950, 500 | yes |
 | 9 | dravidian_south | malayalam, tamil | 900, 350 | yes |
 | 10 | se_asian | thai, lao, burmese, khmer | 450, 500, 650, 950 | yes |
-| 11 | emoji | emoji | 107 | - |
-| 12 | caucasus | armenian, georgian | 150, 186 | yes |
-| 13 | ethiopic | ethiopic | 521 | - |
-| 14 | tibetan | tibetan | 550 | - |
+| 11 | caucasus | armenian, georgian | 150, 186 | yes |
+| 12 | ethiopic | ethiopic | 521 | - |
+| 13 | tibetan | tibetan | 550 | - |
 
 ---
 
@@ -206,12 +205,12 @@ script experts: 0.100
 | Shared SWA-C (2, h=2, w=64, dim=256) | 1.6M | 2.0% |
 | Merges (a + b + c) | 0.2M | 0.3% |
 | lid1_attn + group_head | 0.8M | 1.0% |
-| Group experts (15 × 2 blocks) | 23.7M | 29.4% |
-| Group aggregates (15) | 2.0M | 2.4% |
+| Group experts (14 × 2 blocks) | 23.7M | 29.4% |
+| Group aggregates (14) | 2.0M | 2.4% |
 | LID-2 heads (6) | 0.2M | 0.2% |
-| Script experts (28 × 2 blocks) | 42.6M | 52.9% |
-| Script aggregates (28) | 3.5M | 4.4% |
-| CTC heads (28 routed scripts) | 5.0M | 6.2% |
+| Script experts (27 × 2 blocks) | 42.6M | 52.9% |
+| Script aggregates (27) | 3.5M | 4.4% |
+| CTC heads (27 routed scripts) | 5.0M | 6.2% |
 | **Total** | **80.5M** | |
 | Shared (all scripts) | 3.5M | 4.3% |
 | MoE (per-group/script) | 77.0M | 95.7% |

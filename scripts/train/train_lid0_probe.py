@@ -39,7 +39,7 @@ from src.training.dataloader import LipiStreamingDataset
 
 
 # ---------------------------------------------------------------------------
-# Super-group mapping (6 super-groups by visual family)
+# Super-group mapping (5 super-groups by visual family)
 # ---------------------------------------------------------------------------
 
 SUPER_GROUPS = [
@@ -48,7 +48,6 @@ SUPER_GROUPS = [
     "cjk",          # han, kana, korean
     "brahmic",      # ne_indic, dravidian_north, dravidian_south, se_asian
     "other",        # ethiopic, tibetan
-    "emoji",        # emoji
 ]
 NUM_SUPER_GROUPS = len(SUPER_GROUPS)
 BLANK_SUPER = NUM_SUPER_GROUPS  # whitespace / padding class id (not a real class)
@@ -68,7 +67,6 @@ GROUP_NAME_TO_SUPER = {
     "se_asian":        3,
     "ethiopic":        4,
     "tibetan":         4,
-    "emoji":           5,
 }
 assert set(GROUP_NAME_TO_SUPER) == set(GROUPS), \
     f"mismatch: {set(GROUP_NAME_TO_SUPER) ^ set(GROUPS)}"

@@ -25,7 +25,13 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from src.taxonomy import SCRIPTS, SCRIPT_TO_GROUP, GROUP_TO_ID, SCRIPT_TO_ID
+from src.taxonomy import (
+    SCRIPTS,
+    SCRIPT_TO_GROUP,
+    GROUP_TO_ID,
+    SCRIPT_TO_ID,
+    TAXONOMY_VERSION,
+)
 from src.data.color import rgb_to_input
 from src.data.rendering import resize_or_pad, image_has_ink
 
@@ -87,6 +93,12 @@ def encode_labels_for_shard(labels, script):
 
 def save_shards(images, labels, script, out_dir, prefix="real"):
     """Save images and labels as shards with pre-encoded targets."""
+    from src.data.word_lists import contains_emoji
+
+    filtered = [(image, label) for image, label in zip(images, labels)
+                if not contains_emoji(label)]
+    images = [image for image, _ in filtered]
+    labels = [label for _, label in filtered]
     if not images:
         return 0
 
@@ -603,8 +615,8 @@ def main():
             traceback.print_exc()
 
     # Save metadata
-    all_scripts = list(set(s for s in SCRIPTS if s != "emoji"
-                           and any((out_dir).glob(f"*_{s}_*.pt"))))
+    all_scripts = list(set(s for s in SCRIPTS
+                           if any((out_dir).glob(f"*_{s}_*.pt"))))
     if all_scripts:
         active_groups = []
         seen = set()
@@ -623,6 +635,7 @@ def main():
             "augmented": False,
             "has_labels": True,
             "source": "real_world",
+            "taxonomy_version": TAXONOMY_VERSION,
         }, out_dir / "metadata.pt")
 
     total_shards = len(list(out_dir.glob("*.pt"))) - 1  # minus metadata

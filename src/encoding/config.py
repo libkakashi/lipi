@@ -171,13 +171,6 @@ NO_FUSION_SCRIPTS: dict[str, NoFusionCodec] = {
         TYPOGRAPHIC_COMMON,
     )),
 
-    "emoji": NoFusionCodec(_build_char_list(
-        [(0x0020, 0x007E)],     # Full printable ASCII
-        [(0x00AB, 0x00AB)],     # «
-        [(0x00BB, 0x00BB)],     # »
-        TYPOGRAPHIC_COMMON,
-    )),
-
     "kana": NoFusionCodec(_build_char_list(
         ASCII_COMMON,
         [(0x3040, 0x309F)],     # Hiragana

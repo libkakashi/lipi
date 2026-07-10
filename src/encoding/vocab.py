@@ -3,7 +3,7 @@ Vocabulary loading for all scripts.
 
 All scripts derive their vocab from config.py:
   - No-fusion scripts: NoFusionCodec (latin, cyrillic, greek, hebrew,
-    armenian, georgian, ethiopic, emoji, kana)
+    armenian, georgian, ethiopic, kana)
   - Fusion scripts: FusionCodec (arabic, brahmic scripts, thai, lao, etc.)
   - Korean: KoreanCodec
   - Han: CJKCodec (kanji/hanzi, Chinese + Japanese kanji)

@@ -306,7 +306,7 @@ class TestHanComplexitySplit:
         from src.taxonomy import GROUP_SCRIPTS, SCRIPT_TO_ID
         assert GROUP_SCRIPTS["han"] == ["han_sparse", "han_dense"]
         assert SCRIPT_TO_ID["han_sparse"] == 5
-        assert SCRIPT_TO_ID["han_dense"] == 27
+        assert SCRIPT_TO_ID["han_dense"] == 26
         assert SCRIPT_TO_ID["kana"] == 6
 
     def test_visual_complexity_examples(self):
@@ -378,26 +378,27 @@ class TestHanComplexitySplit:
 
     def test_legacy_checkpoint_warm_starts_both_heads(self):
         import torch
-        from src.training.han_checkpoint import migrate_legacy_han_state
+        from src.training.taxonomy_checkpoint import migrate_taxonomy_state
 
         old = _get_codec()
         sparse = _get_split_codec("han_sparse")
         dense = _get_split_codec("han_dense")
         old_weight = torch.arange(old.vocab_size * 2, dtype=torch.float32).reshape(-1, 2)
         old_bias = torch.arange(old.vocab_size, dtype=torch.float32)
+        old_expert = torch.ones(2, 2)
         state = {
             "ctc_modules.0.heads.0.proj.weight": old_weight,
             "ctc_modules.0.heads.0.proj.bias": old_bias,
-            "script_layers.0.routed_mlps.5.fc1.weight": torch.ones(2, 2),
+            "script_layers.0.routed_mlps.0.fc1.weight": old_expert,
         }
         current = {
             "ctc_modules.0.heads.0.proj.weight": torch.zeros(sparse.vocab_size, 2),
             "ctc_modules.0.heads.0.proj.bias": torch.zeros(sparse.vocab_size),
             "ctc_modules.0.heads.1.proj.weight": torch.zeros(dense.vocab_size, 2),
             "ctc_modules.0.heads.1.proj.bias": torch.zeros(dense.vocab_size),
-            "script_layers.0.routed_mlps.27.fc1.weight": torch.zeros(2, 2),
+            "script_layers.0.routed_mlps.26.fc1.weight": torch.zeros(2, 2),
         }
-        changed = migrate_legacy_han_state(
+        changed = migrate_taxonomy_state(
             state,
             current,
             {"group_script_names": [["han"]]},
@@ -413,6 +414,6 @@ class TestHanComplexitySplit:
             old_weight[old_token],
         )
         assert torch.equal(
-            state["script_layers.0.routed_mlps.27.fc1.weight"],
-            state["script_layers.0.routed_mlps.5.fc1.weight"],
+            state["script_layers.0.routed_mlps.26.fc1.weight"],
+            old_expert,
         )

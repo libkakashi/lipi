@@ -26,6 +26,10 @@ from src.training.dataloader import (
     build_script_tokenizers, collate_moe, LipiStreamingDataset,
 )
 from src.training.eval import evaluate
+from src.training.taxonomy_checkpoint import (
+    needs_taxonomy_migration,
+    migrate_taxonomy_state,
+)
 
 
 def main():
@@ -83,8 +87,13 @@ def main():
 
     # Build model from checkpoint config if available, else use CLI args
     if "model_config" in ckpt:
-        cfg = ckpt["model_config"]
+        cfg = dict(ckpt["model_config"])
         print(f"Using model config from checkpoint: dim={cfg['dim']}")
+        cfg.update(
+            num_groups=n_groups,
+            group_script_vocab_sizes=group_script_vocab_sizes,
+            group_script_names=group_script_names,
+        )
         model = LipiMoEEncoder(**cfg).to(device)
     else:
         print(f"No model config in checkpoint, using CLI args: dim={args.dim}")
@@ -97,9 +106,11 @@ def main():
 
     model_state = ckpt["model"] if "model" in ckpt else ckpt
     model_state, _ = normalize_model_state_keys(model_state)
+    if needs_taxonomy_migration(ckpt.get("model_config"), model.config):
+        migrate_taxonomy_state(
+            model_state, model.state_dict(), ckpt.get("model_config"), model.config)
 
-    # Load weights (strict — checkpoint must match model exactly)
-    model.load_state_dict(model_state)
+    model.load_state_dict(model_state, strict=False)
     print(f"Loaded {len(model_state)} tensors from {args.resume}")
 
     # AMP

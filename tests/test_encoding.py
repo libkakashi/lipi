@@ -9,8 +9,15 @@ from pathlib import Path
 
 from src.encoding.decompose import encode_text, decode_ids, script_vocab_size
 from src.taxonomy import SCRIPTS
+from src.data.word_lists import contains_emoji
 
 WORD_LIST_DIR = Path(__file__).resolve().parent.parent / "training_data" / "word_lists"
+
+
+def test_emoji_codepoints_are_rejected_from_training_text():
+    assert contains_emoji("hello😀")
+    assert contains_emoji("warning ⚠")
+    assert not contains_emoji("ordinary text")
 
 # Script → word list files for testing
 SCRIPT_WORD_SOURCES = {

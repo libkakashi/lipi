@@ -3,11 +3,11 @@ Script and group taxonomy — shared by data, encoding, training, and the model.
 
 Two-level identity system for LID routing:
 
-Scripts (28): routed script labels — latin, cyrillic, greek, arabic,
+Scripts (27): routed script labels — latin, cyrillic, greek, arabic,
     hebrew, sparse/dense Han, kana, korean, and the Brahmic / South Asian /
     SE Asian scripts.
 
-  Groups (15): visual/linguistic families of scripts that share expert
+  Groups (14): visual/linguistic families of scripts that share expert
     capacity — e.g. `cyrillic_greek` groups Cyrillic and Greek, `ne_indic`
     groups the 5 North Indian Brahmic scripts. Groups with only one script
     skip LID-2 at routing time.
@@ -25,7 +25,7 @@ Population and rough coverage (in the ARCHITECTURE.md ordering):
   Dravidian North (~500, Kannada/Telugu/Sinhala, ~200M),
   Dravidian South (~350, Malayalam/Tamil, ~100M),
   SE Asian (~770, Thai/Lao/Burmese/Khmer, ~150M),
-  Emoji (universal), Caucasus (~330, Armenian/Georgian, ~10M),
+  Caucasus (~330, Armenian/Georgian, ~10M),
   Ethiopic (~520, Amharic, ~57M), Tibetan (~270, ~6M).
 """
 
@@ -66,21 +66,20 @@ SCRIPTS = [
     "lao",         # 19
     "burmese",     # 20
     "khmer",       # 21
-    # Group 12: Emoji
-    "emoji",       # 22
-    # Group 13: Caucasus
-    "armenian",    # 23
-    "georgian",    # 24
-    # Group 14: Ethiopic
-    "ethiopic",    # 25
-    # Group 15: Tibetan
-    "tibetan",     # 26
-    # Appended to preserve every existing global script ID.
-    "han_dense",   # 27
+    # Group 12: Caucasus
+    "armenian",    # 22
+    "georgian",    # 23
+    # Group 13: Ethiopic
+    "ethiopic",    # 24
+    # Group 14: Tibetan
+    "tibetan",     # 25
+    # Dense Han stays last so all scripts before the removed Emoji keep IDs.
+    "han_dense",   # 26
 ]
 
 SCRIPT_TO_ID = {name: i for i, name in enumerate(SCRIPTS)}
 NUM_SCRIPTS = len(SCRIPTS)
+TAXONOMY_VERSION = 2
 
 # Names found in shards/checkpoints created before the Han complexity split.
 SCRIPT_ALIASES = {"han": "han_sparse"}
@@ -91,7 +90,7 @@ def canonical_script_name(name: str) -> str:
     return SCRIPT_ALIASES.get(name, name)
 
 
-# --- Groups (15 families) ---
+# --- Groups (14 families) ---
 
 GROUPS = [
     "latin",             # 0
@@ -105,10 +104,9 @@ GROUPS = [
     "dravidian_north",   # 8  (kannada, telugu, sinhala)
     "dravidian_south",   # 9  (malayalam, tamil)
     "se_asian",          # 10
-    "emoji",             # 11
-    "caucasus",          # 12
-    "ethiopic",          # 13
-    "tibetan",           # 14
+    "caucasus",          # 11
+    "ethiopic",          # 12
+    "tibetan",           # 13
 ]
 
 GROUP_TO_ID = {name: i for i, name in enumerate(GROUPS)}
@@ -139,7 +137,6 @@ SCRIPT_TO_GROUP = {
     "lao": "se_asian",
     "burmese": "se_asian",
     "khmer": "se_asian",
-    "emoji": "emoji",
     "armenian": "caucasus",
     "georgian": "caucasus",
     "ethiopic": "ethiopic",
@@ -159,7 +156,6 @@ GROUP_SCRIPTS = {
     "dravidian_north": ["kannada", "telugu", "sinhala"],
     "dravidian_south": ["malayalam", "tamil"],
     "se_asian": ["thai", "lao", "burmese", "khmer"],
-    "emoji": ["emoji"],
     "caucasus": ["armenian", "georgian"],
     "ethiopic": ["ethiopic"],
     "tibetan": ["tibetan"],

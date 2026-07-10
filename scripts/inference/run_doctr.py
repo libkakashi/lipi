@@ -23,6 +23,10 @@ from src.encoding.decompose import decode_ids, script_vocab_size
 from src.encoding.direction import ctc_time_order
 from src.model.encoder import LipiMoEEncoder
 from src.training.checkpoint import normalize_model_state_keys
+from src.training.taxonomy_checkpoint import (
+    needs_taxonomy_migration,
+    migrate_taxonomy_state,
+)
 from src.taxonomy import GROUPS, GROUP_SCRIPTS, SCRIPTS, SCRIPT_TO_GROUP, GROUP_TO_ID, SCRIPT_TO_ID
 
 # Height the model expects
@@ -44,11 +48,16 @@ def build_vocab_tables():
 def load_model(checkpoint_path: str, device: torch.device):
     """Load LipiMoEEncoder from checkpoint."""
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-
+    vocab_sizes, script_names = build_vocab_tables()
     if "model_config" in ckpt:
-        model = LipiMoEEncoder(**ckpt["model_config"])
+        config = dict(ckpt["model_config"])
+        config.update(
+            num_groups=len(GROUPS),
+            group_script_vocab_sizes=vocab_sizes,
+            group_script_names=script_names,
+        )
+        model = LipiMoEEncoder(**config)
     else:
-        vocab_sizes, script_names = build_vocab_tables()
         model = LipiMoEEncoder(
             dim=512,
             num_groups=len(GROUPS),
@@ -60,6 +69,9 @@ def load_model(checkpoint_path: str, device: torch.device):
 
     state = ckpt["model"] if "model" in ckpt else ckpt
     state, _ = normalize_model_state_keys(state)
+    if needs_taxonomy_migration(ckpt.get("model_config"), model.config):
+        migrate_taxonomy_state(
+            state, model.state_dict(), ckpt.get("model_config"), model.config)
     model.load_state_dict(state, strict=False)
     model.to(device).eval()
     print(f"Loaded checkpoint: {checkpoint_path}")
@@ -511,7 +523,6 @@ SCRIPT_COLORS = {
     "malayalam": "#673AB7",
     "tamil": "#795548",
     "thai": "#607D8B",
-    "emoji": "#FFEB3B",
 }
 
 
