@@ -46,7 +46,7 @@ class LipiMoEEncoder(nn.Module):
     """Lipi v5: ConvStem + ConvNeXt(A,B) + SWA-C/D + LID-1 + MoE stacks.
 
     Two-level expert routing:
-      1. LID-1 classifies each frame into a script group (15 + blank).
+      1. LID-1 classifies each frame into a script group (14 + blank).
          Its input is a private learned merge (`lid1_merge`) of the two
          SWA-D rows plus a stroke-texture tap from ConvB, and a
          dedicated `lid1_attn` SWA block sits before the classifier so
@@ -130,13 +130,18 @@ class LipiMoEEncoder(nn.Module):
         for g, vs in enumerate(group_script_vocab_sizes):
             for s in range(len(vs)):
                 # Full-taxonomy models use the global taxonomy ID. This keeps
-                # every pre-split expert fixed and appends han_dense at 27,
+                # every pre-split expert fixed and appends han_dense last,
                 # even though it is local script 1 inside group 4.
                 flat_id = (SCRIPT_TO_ID[group_script_names[g][s]]
                            if use_stable_global_ids else flat)
                 self._flat_script_id[(g, s)] = flat_id
                 self._flat_to_group_script[flat_id] = (g, s)
                 flat += 1
+        # Grouped CTC dispatch consumes frames sorted ascending by flat id,
+        # so heads must be visited in that order — (g, s) insertion order is
+        # NOT ascending once a stable global id lands mid-group (han_dense).
+        self._heads_in_flat_order = sorted(
+            self._flat_script_id.items(), key=lambda item: item[1])
 
         # Which groups are multi-script
         self._multi_script_groups = {
@@ -410,7 +415,7 @@ class LipiMoEEncoder(nn.Module):
 
             outs = []
             start = 0
-            for (g, s), flat_id in self._flat_script_id.items():
+            for (g, s), flat_id in self._heads_in_flat_order:
                 k = counts[flat_id]
                 if k == 0:
                     continue
@@ -457,7 +462,7 @@ class LipiMoEEncoder(nn.Module):
 
             outs = []
             start = 0
-            for (g, s), flat_id in self._flat_script_id.items():
+            for (g, s), flat_id in self._heads_in_flat_order:
                 k = counts[flat_id]
                 if k == 0:
                     continue
