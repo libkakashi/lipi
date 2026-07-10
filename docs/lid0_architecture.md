@@ -64,7 +64,7 @@ Unique scripts with no close relatives.
 
 1. **Specialized features before LID-1.** Brahmic super-group SWA learns matra patterns, headline bars, conjunct structures. CJK SWA learns stroke density, radical patterns. LID-1 then classifies within a family using family-tuned features.
 
-2. **LID-1 becomes easier.** Instead of 15-way classification on generic features, each LID-1 classifies 2-7 groups using specialized features. Brahmic LID-1 (hardest: 7 groups among similar scripts) gets Brahmic-tuned features.
+2. **LID-1 becomes easier.** Instead of 14-way classification on generic features, each LID-1 classifies 2-7 groups using specialized features. Brahmic LID-1 (hardest: 7 groups among similar scripts) gets Brahmic-tuned features.
 
 3. **Gradual feature specialization.** Shared → super-group → group → script. Each level narrows the feature space. No single bottleneck where generic features must distinguish all 27 routed heads.
 

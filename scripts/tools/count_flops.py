@@ -93,7 +93,8 @@ def main():
             [model.swac_in_proj, model.swa_c],
         "swa_d (3 blocks)": model.swa_d,
         "merge_cd / merge_d1": [model.merge_cd, model.merge_d1],
-        "lid1_attn + group_head": [model.lid1_attn, model.group_head],
+        "lid1_merge + lid1_attn + group_head":
+            [model.lid1_merge, model.lid1_attn, model.group_head],
         "group MoE stack (N × shared_attn + 14 routed MLPs + shared MLP)":
             model.group_layers,
         "lid2 heads": model.lid2_heads,

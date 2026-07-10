@@ -42,8 +42,8 @@ scripts/
   eval/           Checkpoint evaluation — eval.py, benchmark.py
   inference/      Deployable pipelines — run_doctr.py
   tools/          Analysis + one-off utilities — count_flops.py,
-                  migrate_checkpoint.py, test_punct_routing.py, diagnose.py,
-                  identify_checkpoint.py, merge_checkpoints.py, check_fonts.py,
+                  test_punct_routing.py, diagnose.py,
+                  merge_checkpoints.py, check_fonts.py,
                   check_renders.py
   experiments/    Experimental architectures
 
