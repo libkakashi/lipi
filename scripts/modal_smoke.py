@@ -126,7 +126,7 @@ def _latest_checkpoint(save_dir: Path):
     image=image,
     cpu=16.0,          # smoke uses a smaller CPU box than the real generator
     memory=32 * 1024,
-    timeout=2 * 3600,  # 200 samples/script * 27 scripts renders in minutes
+    timeout=2 * 3600,  # 200 samples/script * 28 scripts renders in minutes
     volumes=_VOLUMES,
 )
 def generate():

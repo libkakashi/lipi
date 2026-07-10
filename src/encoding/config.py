@@ -17,6 +17,11 @@ from __future__ import annotations
 import unicodedata
 from pathlib import Path
 
+from src.encoding.han_split import (
+    HAN_SCRIPTS,
+    han_script_for_char,
+)
+
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -782,15 +787,19 @@ def _is_kana(char: str) -> bool:
     return any(ord(c) in _KANA_CPS for c in char)
 
 
-def _build_han_codec() -> CJKCodec:
-    """Build han codec from cjk_vocab.txt / cjk_visual_mapping.tsv with kana filtered out."""
+def _build_han_codec(script: str) -> CJKCodec:
+    """Build one complexity-routed Han codec from the shared CJK tables."""
+    if script not in HAN_SCRIPTS:
+        raise ValueError(f"Unknown Han script: {script}")
+
     vocab_path = _FUSIONS_DIR / "cjk_vocab.txt"
     base_set = set(_HAN_BASE)
     freq_chars: list[str] = []
     if vocab_path.exists():
         for line in vocab_path.read_text(encoding="utf-8").splitlines():
             char = line.strip()
-            if char and char not in base_set and not _is_kana(char):
+            if (char and char not in base_set and not _is_kana(char)
+                    and han_script_for_char(char) == script):
                 freq_chars.append(char)
 
     mapping_path = _FUSIONS_DIR / "cjk_visual_mapping.tsv"
@@ -800,19 +809,55 @@ def _build_han_codec() -> CJKCodec:
             parts = line.split("\t")
             if len(parts) >= 3:
                 char, slot, match = parts[0], int(parts[1]), parts[2]
-                # Skip kana entries (target char or match char being kana)
-                if _is_kana(char) or _is_kana(match):
+                # A rare character inherits its visual prototype's route in
+                # han_script_for_char(), keeping LEAF + ALT in one CTC head.
+                if (_is_kana(char) or _is_kana(match)
+                        or han_script_for_char(char) != script):
                     continue
                 alt_mapping[char] = (slot, match)
 
     return CJKCodec(_HAN_BASE, freq_chars, alt_mapping)
 
 
-_han_codec: CJKCodec | None = None
+_han_codecs: dict[str, CJKCodec] = {}
+_legacy_han_codec: CJKCodec | None = None
 
 
-def get_han_codec() -> CJKCodec:
-    global _han_codec
-    if _han_codec is None:
-        _han_codec = _build_han_codec()
-    return _han_codec
+def get_han_codec(script: str = "han") -> CJKCodec:
+    """Return a split Han codec, or the full codec for legacy ``han`` calls."""
+    if script == "han":
+        return get_legacy_han_codec()
+    if script not in HAN_SCRIPTS:
+        raise ValueError(f"Unknown Han script: {script}")
+    if script not in _han_codecs:
+        _han_codecs[script] = _build_han_codec(script)
+    return _han_codecs[script]
+
+
+def get_legacy_han_codec() -> CJKCodec:
+    """Build the single Han codec used by pre-split checkpoints."""
+    global _legacy_han_codec
+    if _legacy_han_codec is not None:
+        return _legacy_han_codec
+
+    vocab_path = _FUSIONS_DIR / "cjk_vocab.txt"
+    base_set = set(_HAN_BASE)
+    freq_chars = []
+    if vocab_path.exists():
+        for line in vocab_path.read_text(encoding="utf-8").splitlines():
+            char = line.strip()
+            if char and char not in base_set and not _is_kana(char):
+                freq_chars.append(char)
+
+    mapping_path = _FUSIONS_DIR / "cjk_visual_mapping.tsv"
+    alt_mapping = {}
+    if mapping_path.exists():
+        for line in mapping_path.read_text(encoding="utf-8").splitlines()[1:]:
+            parts = line.split("\t")
+            if len(parts) >= 3:
+                char, slot, match = parts[0], int(parts[1]), parts[2]
+                if not _is_kana(char) and not _is_kana(match):
+                    alt_mapping[char] = (slot, match)
+
+    _legacy_han_codec = CJKCodec(_HAN_BASE, freq_chars, alt_mapping)
+    return _legacy_han_codec

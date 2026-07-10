@@ -1,6 +1,6 @@
 # Lipi: Multilingual OCR via Mixture of Experts
 
-> 27 scripts, 15 groups, 100+ languages. 80.5M params, ~1.7 GFLOPs/word.
+> 28 routed script heads, 15 groups, 100+ languages. 80.5M params, ~1.7 GFLOPs/word.
 
 ---
 
@@ -121,7 +121,7 @@ Greedy decode: argmax → collapse repeats → remove blanks → token IDs → t
 
 ---
 
-## Groups and Scripts (15 groups, 27 scripts)
+## Groups and Scripts (15 groups, 28 routed script heads)
 
 | # | Group | Scripts | Vocab | LID-2 |
 |---|-------|---------|-------|-------|
@@ -129,7 +129,7 @@ Greedy decode: argmax → collapse repeats → remove blanks → token IDs → t
 | 1 | cyrillic_greek | cyrillic, greek | 364, 426 | yes |
 | 2 | arabic | arabic | 500 | - |
 | 3 | hebrew | hebrew | 192 | - |
-| 4 | han | han | 3811 | - |
+| 4 | han | han_sparse, han_dense | 2153, 2018 | yes |
 | 5 | kana | kana | 263 | - |
 | 6 | korean | korean | 1500 | - |
 | 7 | ne_indic | devanagari, gurmukhi, gujarati, bengali, odia | 1000, 600, 900, 900, 850 | yes |
@@ -149,7 +149,7 @@ Greedy decode: argmax → collapse repeats → remove blanks → token IDs → t
 |------|---------|--------|
 | No-fusion | latin, cyrillic, greek, hebrew, armenian, georgian, ethiopic, kana | 1 char = 1 token |
 | Fusion | devanagari, bengali, gujarati, gurmukhi, odia, kannada, telugu, malayalam, tamil, sinhala, thai, lao, burmese, khmer | base chars + virama-pair conjuncts |
-| CJK | han | single-token frequent chars + ALT-slot visual similarity for rare chars |
+| CJK | han_sparse, han_dense | outline-complexity routing; single-token frequent chars + ALT-slot visual similarity for rare chars |
 | Korean | korean | jamo decomposition (onset + vowel + coda) |
 | Arabic | arabic | base characters + frequent diacritic grapheme clusters; HarfBuzz shapes positional glyph forms |
 
@@ -161,7 +161,7 @@ ASCII punctuation and digits are in every codec's vocab but labeled as latin in 
 
 ### Data Generation
 
-Synthetic data from word lists + fonts. Per-line content plans with mixed-script support. Japanese words split at kana/kanji boundaries via `split_by_script()`. ASCII characters in non-latin words become separate latin segments.
+Synthetic data from word lists + fonts. Per-line content plans have mixed-script support. Hanzi/Kanji/Hanja are split into maximal sparse/dense runs, and Japanese words additionally split at Kana boundaries via `split_by_script()`. ASCII characters in non-latin words become separate Latin segments.
 
 ### Loss Functions
 
@@ -209,9 +209,9 @@ script experts: 0.100
 | Group experts (15 × 2 blocks) | 23.7M | 29.4% |
 | Group aggregates (15) | 2.0M | 2.4% |
 | LID-2 heads (6) | 0.2M | 0.2% |
-| Script experts (27 × 2 blocks) | 42.6M | 52.9% |
-| Script aggregates (27) | 3.5M | 4.4% |
-| CTC heads (27 scripts) | 5.0M | 6.2% |
+| Script experts (28 × 2 blocks) | 42.6M | 52.9% |
+| Script aggregates (28) | 3.5M | 4.4% |
+| CTC heads (28 routed scripts) | 5.0M | 6.2% |
 | **Total** | **80.5M** | |
 | Shared (all scripts) | 3.5M | 4.3% |
 | MoE (per-group/script) | 77.0M | 95.7% |

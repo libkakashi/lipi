@@ -5,7 +5,8 @@ Renderable-character enumeration.
 that the training pipeline can draw as standalone glyphs for that script.
 
 Semantics per script:
-  han                  — every assigned CJK Unified + Extension A codepoint
+  han_sparse/dense     — assigned CJK Unified + Extension A codepoints routed
+                         by deterministic IDS complexity
   kana                 — hiragana + katakana + prolonged-sound-mark
   fusion scripts       — base chars + fusion clusters from the codec
   korean               — displayable tokens from the jamo codec
@@ -22,18 +23,21 @@ from src.encoding.config import (
     NO_FUSION_SCRIPTS, FUSION_BASE_CHARS, get_fusion_codec,
     get_korean_codec,
 )
+from src.encoding.han_split import HAN_SCRIPTS, han_script_for_char
 
 
 def get_renderable_chars(script: str) -> list[str]:
-    if script == "han":
+    if script in HAN_SCRIPTS:
         chars = []
         for cp in range(0x3400, 0x4DC0):      # CJK Ext A
             c = chr(cp)
-            if unicodedata.category(c) != 'Cn':
+            if (unicodedata.category(c) != 'Cn'
+                    and han_script_for_char(c) == script):
                 chars.append(c)
         for cp in range(0x4E00, 0xA000):      # CJK Unified
             c = chr(cp)
-            if unicodedata.category(c) != 'Cn':
+            if (unicodedata.category(c) != 'Cn'
+                    and han_script_for_char(c) == script):
                 chars.append(c)
         return chars
 

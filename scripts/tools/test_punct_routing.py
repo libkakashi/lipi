@@ -81,7 +81,7 @@ def main():
     del ckpt
 
     # Find a CJK font and a Latin font
-    cjk_fonts = find_fonts_for_script("han")
+    cjk_fonts = find_fonts_for_script("han_sparse")
     latin_fonts = find_fonts_for_script("latin")
     cjk_font = str(cjk_fonts[0]) if cjk_fonts else None
     latin_font = str(latin_fonts[0]) if latin_fonts else None
@@ -137,9 +137,9 @@ def main():
     print("=" * 70)
 
     mixed_samples = [
-        ("東京（2024）", "han", cjk_font),
-        ("价格：$100", "han", cjk_font),
-        ("日本語、中国語", "han", cjk_font),
+        ("東京（2024）", "han_sparse", cjk_font),
+        ("价格：$100", "han_sparse", cjk_font),
+        ("日本語、中国語", "han_sparse", cjk_font),
         ("Hello, world!", "latin", latin_font),
         ("Test #123", "latin", latin_font),
     ]

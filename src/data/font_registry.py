@@ -13,6 +13,9 @@ imported by fonts.py):
 """
 
 
+_HAN_FONT_SCRIPTS = ["han_sparse", "han_dense", "kana"]
+
+
 # Explicit font filename → scripts mapping.
 # Only fonts in this list are used. No pattern matching.
 # Derived from setup_fonts.py — these are the fonts we download and control.
@@ -72,30 +75,30 @@ FONT_TO_SCRIPTS: dict[str, list[str]] = {
     "MiriamLibre-Regular.ttf": ["hebrew"],
     # --- Han (kanji/hanzi) + Kana (hiragana/katakana) ---
     # All CJK fonts cover both kanji and kana, so they're listed for both.
-    "NotoSansSC[wght].ttf": ["han", "kana"],
-    "NotoSansJP[wght].ttf": ["han", "kana"],
-    "NotoSansCJKsc-Regular.otf": ["han", "kana"],
-    "NotoSansCJKjp-Regular.otf": ["han", "kana"],
-    "NotoSerifCJKsc-Regular.otf": ["han", "kana"],
-    "HachiMaruPop-Regular.ttf": ["han", "kana"],
-    "KleeOne-Regular.ttf": ["han", "kana"],
-    "Yomogi-Regular.ttf": ["han", "kana"],
-    "MaShanZheng-Regular.ttf": ["han", "kana"],
-    "LiuJianMaoCao-Regular.ttf": ["han", "kana"],
-    "LongCang-Regular.ttf": ["han", "kana"],
-    "ZhiMangXing-Regular.ttf": ["han", "kana"],
-    "ShipporiMincho-Regular.ttf": ["han", "kana"],
-    "ZenMaruGothic-Regular.ttf": ["han", "kana"],
-    "ZenKurenaido-Regular.ttf": ["han", "kana"],
-    "ZCOOLQingKeHuangYou-Regular.ttf": ["han", "kana"],
-    "ZCOOLKuaiLe-Regular.ttf": ["han", "kana"],
-    "ZenOldMincho-Regular.ttf": ["han", "kana"],
-    "SawarabiMincho-Regular.ttf": ["han", "kana"],
-    "SawarabiGothic-Regular.ttf": ["han", "kana"],
-    "KosugiMaru-Regular.ttf": ["han", "kana"],
-    "DelaGothicOne-Regular.ttf": ["han", "kana"],
-    "YuseiMagic-Regular.ttf": ["han", "kana"],
-    "MPLUS1[wght].ttf": ["han", "kana"],
+    "NotoSansSC[wght].ttf": _HAN_FONT_SCRIPTS,
+    "NotoSansJP[wght].ttf": _HAN_FONT_SCRIPTS,
+    "NotoSansCJKsc-Regular.otf": _HAN_FONT_SCRIPTS,
+    "NotoSansCJKjp-Regular.otf": _HAN_FONT_SCRIPTS,
+    "NotoSerifCJKsc-Regular.otf": _HAN_FONT_SCRIPTS,
+    "HachiMaruPop-Regular.ttf": _HAN_FONT_SCRIPTS,
+    "KleeOne-Regular.ttf": _HAN_FONT_SCRIPTS,
+    "Yomogi-Regular.ttf": _HAN_FONT_SCRIPTS,
+    "MaShanZheng-Regular.ttf": _HAN_FONT_SCRIPTS,
+    "LiuJianMaoCao-Regular.ttf": _HAN_FONT_SCRIPTS,
+    "LongCang-Regular.ttf": _HAN_FONT_SCRIPTS,
+    "ZhiMangXing-Regular.ttf": _HAN_FONT_SCRIPTS,
+    "ShipporiMincho-Regular.ttf": _HAN_FONT_SCRIPTS,
+    "ZenMaruGothic-Regular.ttf": _HAN_FONT_SCRIPTS,
+    "ZenKurenaido-Regular.ttf": _HAN_FONT_SCRIPTS,
+    "ZCOOLQingKeHuangYou-Regular.ttf": _HAN_FONT_SCRIPTS,
+    "ZCOOLKuaiLe-Regular.ttf": _HAN_FONT_SCRIPTS,
+    "ZenOldMincho-Regular.ttf": _HAN_FONT_SCRIPTS,
+    "SawarabiMincho-Regular.ttf": _HAN_FONT_SCRIPTS,
+    "SawarabiGothic-Regular.ttf": _HAN_FONT_SCRIPTS,
+    "KosugiMaru-Regular.ttf": _HAN_FONT_SCRIPTS,
+    "DelaGothicOne-Regular.ttf": _HAN_FONT_SCRIPTS,
+    "YuseiMagic-Regular.ttf": _HAN_FONT_SCRIPTS,
+    "MPLUS1[wght].ttf": _HAN_FONT_SCRIPTS,
     # --- Korean ---
     "NotoSansKR[wght].ttf": ["korean"],
     "NotoSansCJKkr-Regular.otf": ["korean"],
@@ -521,4 +524,3 @@ DISPLAY_KEYWORDS = [
     "reemkufi", "secular", "karantina", "koulen", "moul", "dangrek",
     "bayon", "galada", "langar",
 ]
-

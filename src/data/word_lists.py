@@ -11,6 +11,8 @@ import random
 import unicodedata
 from pathlib import Path
 
+from src.encoding.han_split import HAN_DENSE, HAN_SCRIPTS, HAN_SPARSE
+
 WORD_LIST_DIR = Path(__file__).parent.parent.parent / "training_data" / "word_lists"
 CORPORA_DIR = Path(__file__).parent.parent.parent / "training_data" / "corpora"
 
@@ -94,9 +96,10 @@ _SCRIPT_EXTRA_FILES = {
     "cyrillic": ["ukrainian.txt"],
     "devanagari": ["marathi.txt", "hindi_legal.txt"],
     "arabic": ["persian.txt", "urdu.txt"],
-    # Han reads Chinese and Japanese (generator will split Japanese at kana/kanji
-    # boundaries and emit kana chunks as separate segments).
-    "han": ["chinese.txt", "japanese.txt"],
+    # Both Han complexity routes read the same Chinese/Japanese sources. The
+    # generator splits each sampled word into maximal sparse/dense/Kana runs.
+    HAN_SPARSE: ["chinese.txt", "japanese.txt"],
+    HAN_DENSE: ["chinese.txt", "japanese.txt"],
     # Kana uses Japanese word lists — words get split at script boundaries;
     # kana portions become kana segments.
     "kana": ["japanese.txt"],
@@ -156,6 +159,11 @@ def load_word_list(script: str) -> list[str]:
 
     if words:
         words = list(set(words))
+        if script in HAN_SCRIPTS:
+            from src.data.script_detect import split_by_script
+            words = [word for word in words
+                     if any(seg_script == script
+                            for _, seg_script in split_by_script(word, script))]
         random.shuffle(words)
     return words
 

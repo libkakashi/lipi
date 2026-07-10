@@ -22,6 +22,7 @@ from src.data.color import rgb_to_input
 from src.encoding.decompose import decode_ids, script_vocab_size
 from src.encoding.direction import ctc_time_order
 from src.model.encoder import LipiMoEEncoder
+from src.training.checkpoint import normalize_model_state_keys
 from src.taxonomy import GROUPS, GROUP_SCRIPTS, SCRIPTS, SCRIPT_TO_GROUP, GROUP_TO_ID, SCRIPT_TO_ID
 
 # Height the model expects
@@ -55,7 +56,10 @@ def load_model(checkpoint_path: str, device: torch.device):
             group_script_names=script_names,
         )
 
+    script_names = model.config["group_script_names"]
+
     state = ckpt["model"] if "model" in ckpt else ckpt
+    state, _ = normalize_model_state_keys(state)
     model.load_state_dict(state, strict=False)
     model.to(device).eval()
     print(f"Loaded checkpoint: {checkpoint_path}")
@@ -324,38 +328,37 @@ def build_script_filter(allowed_scripts: list[str] | None):
     return allowed_group_ids, allowed_local_ids
 
 
-def _decode_one(logits_i, group_id, script_logits_list, batch_idx, mask_offset,
-                script_names, script_filter):
-    """Decode a single sample from batched output."""
-    # LID-2: pick script within group
-    local_script_id = 0
-    for g, sl, mask in script_logits_list:
-        if g == group_id and mask[batch_idx]:
-            # Find this sample's index within the group mask
-            group_mask_indices = mask[:batch_idx + 1].sum().item() - 1
-            if script_filter is not None:
-                allowed_local = script_filter[1].get(group_id)
-                if allowed_local:
-                    masked_sl = sl[int(group_mask_indices)].clone()
-                    for s in range(masked_sl.shape[0]):
-                        if s not in allowed_local:
-                            masked_sl[s] = -float("inf")
-                    local_script_id = masked_sl.argmax().item()
-                else:
-                    local_script_id = sl[int(group_mask_indices)].argmax().item()
-            else:
-                local_script_id = sl[int(group_mask_indices)].argmax().item()
-            break
+def _decode_one(logits_i, group_ids, frame_scripts, script_names):
+    """Decode contiguous per-frame routing runs from one crop."""
+    routes = list(zip(group_ids.tolist(), frame_scripts.tolist()))
+    runs = []
+    start = 0
+    while start < len(routes):
+        route = routes[start]
+        end = start + 1
+        while end < len(routes) and routes[end] == route:
+            end += 1
+        group_id, local_script_id = route
+        if 0 <= group_id < len(script_names) and script_names[group_id]:
+            local_script_id = min(local_script_id,
+                                  len(script_names[group_id]) - 1)
+            script_name = script_names[group_id][local_script_id]
+            vs = script_vocab_size(script_name)
+            run_logits = ctc_time_order(
+                logits_i[start:end, :vs], script_name)
+            ids = ctc_decode(run_logits, vs)
+            text = decode_ids(ids, script_name)
+            if text:
+                runs.append((group_id, script_name, text,
+                             ctc_confidence(run_logits, vs), end - start))
+        start = end
 
-    group_scripts = script_names[group_id]
-    local_script_id = min(local_script_id, len(group_scripts) - 1)
-    script_name = group_scripts[local_script_id]
-    vs = script_vocab_size(script_name)
-    logits_i = ctc_time_order(logits_i, script_name)
-    ids = ctc_decode(logits_i, vs)
-    text = decode_ids(ids, script_name)
-    conf = ctc_confidence(logits_i, vs)
-    return script_name, text, conf
+    if not runs:
+        return 0, "latin", "", 0.0, []
+    primary = max(runs, key=lambda run: run[4])
+    total_frames = sum(run[4] for run in runs)
+    confidence = sum(run[3] * run[4] for run in runs) / total_frames
+    return primary[0], primary[1], "".join(run[2] for run in runs), confidence, runs
 
 
 @torch.no_grad()
@@ -418,16 +421,28 @@ def recognize_crops(model, crops: list[dict], script_names: list[list[str]],
             masked = output["group_logits"].clone()
             for g in range(len(GROUPS)):
                 if g not in allowed_group_ids:
-                    masked[:, g] = -float("inf")
+                    masked[..., g] = -float("inf")
             forced = masked.argmax(dim=-1)
+            forced_scripts = torch.zeros_like(forced)
+            for g, allowed_local in script_filter[1].items():
+                lid2 = output["lid2_logits_per_group"].get(g)
+                if lid2 is None:
+                    continue
+                filtered = lid2.clone()
+                for local_id in range(filtered.shape[-1]):
+                    if local_id not in allowed_local:
+                        filtered[..., local_id] = -float("inf")
+                pred = filtered.argmax(dim=-1)
+                forced_scripts = torch.where(
+                    forced == g, pred, forced_scripts)
 
-            # Only re-run if any were misrouted
-            if (forced != output["group_ids"]).any():
-                if use_amp:
-                    with torch.autocast(device.type, dtype=amp_dtype):
-                        output = model(batch_tensor, group_ids=forced)
-                else:
-                    output = model(batch_tensor, group_ids=forced)
+            if use_amp:
+                with torch.autocast(device.type, dtype=amp_dtype):
+                    output = model(batch_tensor, group_ids=forced,
+                                   script_ids=forced_scripts)
+            else:
+                output = model(batch_tensor, group_ids=forced,
+                               script_ids=forced_scripts)
         else:
             if use_amp:
                 with torch.autocast(device.type, dtype=amp_dtype):
@@ -443,18 +458,19 @@ def recognize_crops(model, crops: list[dict], script_names: list[list[str]],
 
         # Decode each sample in batch
         all_logits = output["logits"]  # (B, T, max_vocab)
-        all_group_ids = output["group_ids"]  # (B,)
+        all_group_ids = output["group_ids"]       # (B, T)
+        all_frame_scripts = output["frame_scripts"]  # (B, T)
 
         for b, idx in enumerate(indices):
-            group_id = all_group_ids[b].item()
             valid_t = tensors[b].shape[2] // model.time_downsample
-            script_name, text, conf = _decode_one(
-                all_logits[b, :valid_t], group_id,
-                output["script_logits_per_group"],
-                b, 0, script_names, script_filter)
+            group_id, script_name, text, conf, runs = _decode_one(
+                all_logits[b, :valid_t],
+                all_group_ids[b, :valid_t],
+                all_frame_scripts[b, :valid_t],
+                script_names)
 
             corrected = False
-            if spell_checker is not None:
+            if spell_checker is not None and len({run[1] for run in runs}) == 1:
                 text, corrected = spell_checker.maybe_correct(
                     text, conf, script_name)
 
@@ -480,7 +496,8 @@ SCRIPT_COLORS = {
     "latin": "#2196F3",
     "devanagari": "#4CAF50",
     "arabic": "#FF9800",
-    "han": "#E91E63",
+    "han_sparse": "#E91E63",
+    "han_dense": "#AD1457",
     "kana": "#F06292",
     "korean": "#9C27B0",
     "cyrillic": "#00BCD4",

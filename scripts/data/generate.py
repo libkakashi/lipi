@@ -38,6 +38,12 @@ from src.data.augmentation import (
     text_decoration, highlighter, table_rules, photo_background,
 )
 from src.encoding.vocab import build_script_vocab
+from src.encoding.han_split import (
+    HAN_DENSE,
+    HAN_SCRIPTS,
+    HAN_SPARSE,
+    HAN_SPLIT_VERSION,
+)
 from src.data.rendering import (
     render_word, render_emoji, image_has_ink,
     resize_or_pad, filter_fonts_by_cmap, font_covers_text,
@@ -364,15 +370,16 @@ _MIX_PATTERNS_LATIN_ONLY = [
 
 # Script-native punctuation — real Hindi text has danda (U+0964) everywhere,
 # Arabic uses its own comma/question/full stop, CJK uses fullwidth forms.
-# All entries verified encodable by encode_text for their script. Kana is
-# excluded: CJK punctuation only encodes under the han codec.
+# All entries are verified encodable by their script. CJK punctuation is
+# shared by the two Han codecs and attaches to its neighboring Han run.
 _SCRIPT_PUNCT = {
     "devanagari": ["।", "॥"],
     "bengali": ["।"],
     "gurmukhi": ["।"],
     "odia": ["।"],
     "arabic": ["،", "؛", "؟", "۔"],
-    "han": ["。", "、", "，", "！", "？"],
+    HAN_SPARSE: ["。", "、", "，", "！", "？"],
+    HAN_DENSE: ["。", "、", "，", "！", "？"],
     "armenian": ["։", "՞"],
     "ethiopic": ["።", "፣"],
     "tibetan": ["།"],
@@ -1053,19 +1060,16 @@ def _get_word_pool(font_filter, script, fonts, words, h=32, punct_prob=0.15):
     while len(pool) < target and attempts < target * 3:
         attempts += 1
         word = _sample_word(script, words)
-        # Skip any word that isn't STRICTLY the requested script. The pool
-        # labels every entry as `script`, so admitting e.g. a pure-katakana
-        # word to the "han" pool would label visual kana as han — exactly
-        # the mislabel that hurt LID-1 han accuracy previously. Using
-        # split_by_script catches mixed AND pure-mismatched words in one
-        # check (japanese.txt is ~52% pure-kana, ~3% pure-kanji).
-        # For han/kana pools: skip mixed Japanese words (they'd get
-        # the wrong single-script label). split_by_script handles them
-        # correctly in the plan builders instead.
-        if script in ("han", "kana"):
+        # Pool entries carry one script label, so extract a matching maximal
+        # run from mixed CJK words instead of assigning the whole word to one
+        # Han/Kana head.
+        if script in HAN_SCRIPTS or script == "kana":
             segs = split_by_script(word, script)
-            if len(segs) != 1 or segs[0][1] != script:
+            candidates = [text for text, seg_script in segs
+                          if seg_script == script and text.strip()]
+            if not candidates:
                 continue
+            word = random.choice(candidates)
         # For non-latin pools: skip words with ASCII chars.
         # split_by_script in plan builders will route those chars to
         # latin, but the pool renders whole words with a single label.
@@ -1624,6 +1628,7 @@ def main():
     torch.save({
         "active_scripts": valid_scripts,
         "active_groups": active_groups,
+        "han_split_version": HAN_SPLIT_VERSION,
         "height": args.height,
         "max_width": args.max_width,
     }, shard_dir / "metadata.pt")

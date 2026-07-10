@@ -17,7 +17,7 @@ GROUP_SCRIPT_VOCAB_SIZES = [
     [364, 426],                   # 1  cyrillic_greek
     [500],                        # 2  arabic
     [192],                        # 3  hebrew
-    [3811],                       # 4  han
+    [2153, 2018],                 # 4  han_sparse, han_dense
     [263],                        # 5  kana
     [1500],                       # 6  korean
     [1000, 600, 900, 900, 850],   # 7  ne_indic
@@ -98,10 +98,10 @@ def main():
         "group MoE stack (N × shared_attn + 15 routed MLPs + shared MLP)":
             model.group_layers,
         "lid2 heads": model.lid2_heads,
-        "script MoE stack (N × shared_attn + 27 routed MLPs + shared MLP)":
+        "script MoE stack (N × shared_attn + 28 routed MLPs + shared MLP)":
             model.script_layers,
         "norm": model.norm,
-        "ctc heads (27 scripts)": model.ctc_modules,
+        "ctc heads (28 scripts)": model.ctc_modules,
     }
     print("Param breakdown:")
     for name, mod in breakdown.items():
@@ -123,7 +123,8 @@ def main():
         (64,  0, 0,  "latin"),
         (128, 0, 0,  "latin"),
         (256, 0, 0,  "latin"),
-        (128, 4, 0,  "han"),       # large vocab
+        (128, 4, 0,  "han_sparse"),
+        (128, 4, 1,  "han_dense"),
         (128, 6, 0,  "korean"),    # multi-script via decomposition
         (128, 7, 0,  "devanagari"),# multi-script group → fires LID-2
         (128, 11, 0, "emoji"),     # tiny vocab

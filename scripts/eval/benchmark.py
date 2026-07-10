@@ -21,6 +21,7 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.model.encoder import LipiMoEEncoder
+from src.training.checkpoint import normalize_model_state_keys
 from src.taxonomy import GROUPS, NUM_GROUPS, SCRIPT_TO_GROUP
 from src.data.color import rgb_to_input
 from src.encoding.decompose import decode_ids, script_vocab_size
@@ -213,6 +214,7 @@ def main():
         ).to(device)
 
     model_state = ckpt["model"] if "model" in ckpt else ckpt
+    model_state, _ = normalize_model_state_keys(model_state)
     model.load_state_dict(model_state)
     print(f"Loaded checkpoint: {args.resume}")
 

@@ -20,6 +20,7 @@ from torch.utils.data import DataLoader
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.model.encoder import LipiMoEEncoder
+from src.training.checkpoint import normalize_model_state_keys
 from src.taxonomy import SCRIPT_TO_GROUP, NUM_GROUPS, GROUPS
 from src.training.dataloader import (
     build_script_tokenizers, collate_moe, LipiStreamingDataset,
@@ -95,6 +96,7 @@ def main():
         ).to(device)
 
     model_state = ckpt["model"] if "model" in ckpt else ckpt
+    model_state, _ = normalize_model_state_keys(model_state)
 
     # Load weights (strict — checkpoint must match model exactly)
     model.load_state_dict(model_state)

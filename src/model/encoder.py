@@ -39,7 +39,7 @@ from src.model.blocks import (
     ConvStem, ConvNeXtBlock, BlurPool2d, LayerScale, SWABlock, MoELayer,
     GroupCTCModule, _patch_merge_h, _per_sample_key_lens, _dynamo_disable,
 )
-from src.taxonomy import NUM_GROUPS
+from src.taxonomy import NUM_GROUPS, SCRIPTS, SCRIPT_TO_ID
 
 
 class LipiMoEEncoder(nn.Module):
@@ -122,11 +122,20 @@ class LipiMoEEncoder(nn.Module):
         self._flat_script_id = {}  # (g, s) → flat
         self._flat_to_group_script = {}  # flat → (g, s)
         self._group_script_counts = [len(vs) for vs in group_script_vocab_sizes]
+        names = [name for group_names in group_script_names
+                 for name in group_names]
+        use_stable_global_ids = (len(names) == len(SCRIPTS)
+                                 and set(names) == set(SCRIPTS))
         flat = 0
         for g, vs in enumerate(group_script_vocab_sizes):
             for s in range(len(vs)):
-                self._flat_script_id[(g, s)] = flat
-                self._flat_to_group_script[flat] = (g, s)
+                # Full-taxonomy models use the global taxonomy ID. This keeps
+                # every pre-split expert fixed and appends han_dense at 27,
+                # even though it is local script 1 inside group 4.
+                flat_id = (SCRIPT_TO_ID[group_script_names[g][s]]
+                           if use_stable_global_ids else flat)
+                self._flat_script_id[(g, s)] = flat_id
+                self._flat_to_group_script[flat_id] = (g, s)
                 flat += 1
 
         # Which groups are multi-script

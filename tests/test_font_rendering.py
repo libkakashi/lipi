@@ -698,7 +698,9 @@ class TestFontIsolation:
         But each script also needs unique fonts for visual diversity.
         """
         from src.taxonomy import GROUP_SCRIPTS
-        EXEMPT_GROUPS = {"cyrillic_greek"}
+        # Han heads intentionally share fonts; their distinction is glyph
+        # complexity, not a separate writing system or typeface family.
+        EXEMPT_GROUPS = {"cyrillic_greek", "han"}
 
         failures = []
         for group, scripts in GROUP_SCRIPTS.items():
@@ -804,9 +806,8 @@ class TestDataQuality:
             total_chars = 0
             encoded_chars = 0
             for w in words[:2000]:
-                # han/kana share japanese.txt; generator splits at script boundaries,
-                # so only count chars that belong to the target script.
-                if script in ("han", "kana"):
+                # CJK heads share sources; generation splits at script boundaries.
+                if script in ("han_sparse", "han_dense", "kana"):
                     w = "".join(c for c in w if _char_to_script(c) == script)
                     if not w:
                         continue

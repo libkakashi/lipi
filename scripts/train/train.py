@@ -31,7 +31,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from src.model.encoder import LipiMoEEncoder
 from src.model.memory import find_bucket_capacities
 from src.encoding.direction import CTC_DIRECTION_VERSION
-from src.taxonomy import SCRIPT_TO_GROUP, NUM_GROUPS, GROUPS
+from src.encoding.han_split import HAN_SPLIT_VERSION
+from src.taxonomy import (
+    SCRIPT_TO_GROUP,
+    NUM_GROUPS,
+    GROUPS,
+    canonical_script_name,
+)
 from src.training.dataloader import (
     build_script_tokenizers, collate_moe, BucketBatchSampler,
     compute_bucket_edges, LipiStreamingDataset,
@@ -43,6 +49,11 @@ from src.training.losses import (
 from src.training.ema import ModelEMA
 from src.training.routing import build_frame_labels_from_segments
 from src.training.eval import evaluate
+from src.training.han_checkpoint import (
+    has_legacy_han_layout,
+    migrate_legacy_han_state,
+)
+from src.training.checkpoint import normalize_model_state_keys
 
 
 # Parameter-name prefixes for the "expert" param split (distinct LR / clip
@@ -111,7 +122,7 @@ def parse_args():
                              "gets sampling mass ∝ vocab_size(s)^beta. "
                              "beta=0 gives every script equal mass; larger "
                              "beta shifts visits toward large-vocab scripts "
-                             "(han, korean) that collapsed under flat "
+                             "(Han, Korean) that collapsed under flat "
                              "sampling. Negative disables resampling "
                              "(natural shard distribution). Needs the "
                              "script_ids.npy sidecar (regenerated shards).")
@@ -201,11 +212,9 @@ def resolve_device(args):
 def build_script_sample_weights(train_dir: str, beta: float) -> np.ndarray | None:
     """Per-sample weights giving script s total sampling mass ∝ vocab^beta.
 
-    Motivation: flat per-script sampling collapsed CJK (han has 3811
-    classes vs emoji's 107 but got the same number of visits). Weighting
-    mass by vocab_size^beta gives complex scripts proportionally more
-    visits; beta=0.5 ≈ 6x more han than armenian rather than 25x (beta=1)
-    or 1x (beta=0).
+    Motivation: flat per-script sampling collapsed CJK (each Han head still
+    has roughly 2K classes vs emoji's 107). Weighting mass by
+    vocab_size^beta gives large-vocabulary scripts proportionally more visits.
 
     Returns None (resampling disabled) when the script_ids.npy sidecar is
     missing — shards generated before the sidecar existed.
@@ -254,9 +263,16 @@ def load_and_prepare_data(args, device):
         meta_path = data_path.parent / "metadata.pt"
     if meta_path.exists():
         meta = torch.load(meta_path, weights_only=False)
+        if ("han" in meta.get("active_scripts", [])
+                and meta.get("han_split_version", 0) < HAN_SPLIT_VERSION):
+            raise RuntimeError(
+                "These shards predate the han_sparse/han_dense split. "
+                "Their Han word blocks have no per-run complexity labels; "
+                "regenerate the shards before training the split heads.")
         active_scripts = meta["active_scripts"]
     else:
         active_scripts = list(SCRIPT_TO_GROUP.keys())
+    active_scripts = [canonical_script_name(s) for s in active_scripts]
 
     if args.scripts != "all":
         selected = set(s.strip() for s in args.scripts.split(","))
@@ -450,7 +466,9 @@ def resume_from_checkpoint(args, model, optimizer, base_optimizer, scaler, sched
                            steps_per_epoch, device_type):
     print(f"\nResuming from {args.resume}...")
     ckpt = torch.load(args.resume, map_location="cpu", weights_only=False)
-    model_state = ckpt["model"]
+    model_state, unwrapped = normalize_model_state_keys(ckpt["model"])
+    if unwrapped:
+        print("  Normalized torch.compile checkpoint parameter names")
 
     # Optionally drop backbone keys so they keep fresh init
     if getattr(args, 'skip_backbone_load', False):
@@ -466,8 +484,15 @@ def resume_from_checkpoint(args, model, optimizer, base_optimizer, scaler, sched
             del model_state[k]
         print(f"  --skip-backbone-load: dropped {len(dropped)} backbone keys")
 
-    # Skip mismatched shapes (e.g., CTC proj after vocab change)
     current_state = model.state_dict()
+    han_layout_changed = has_legacy_han_layout(ckpt.get("model_config"))
+    if han_layout_changed:
+        migrated = migrate_legacy_han_state(
+            model_state, current_state, ckpt.get("model_config"), model.config)
+        print(f"  Han layout upgraded: warm-started {migrated} state entries; "
+              "optimizer and EMA state will restart")
+
+    # Skip mismatched shapes (e.g., CTC proj after vocab change)
     skipped = []
     for k in list(model_state.keys()):
         if k in current_state and model_state[k].shape != current_state[k].shape:
@@ -514,7 +539,7 @@ def resume_from_checkpoint(args, model, optimizer, base_optimizer, scaler, sched
     if "optimizer" not in ckpt:
         print("  No optimizer state in checkpoint (fresh optimizer)")
     elif (skipped or dtype_changed or groups_changed or freeze_mode
-          or direction_changed):
+          or direction_changed or han_layout_changed):
         reasons = []
         if skipped:
             reasons.append("vocab changed")
@@ -526,12 +551,14 @@ def resume_from_checkpoint(args, model, optimizer, base_optimizer, scaler, sched
             reasons.append(f"freeze mode ({args.freeze_except})")
         if direction_changed:
             reasons.append("RTL CTC objective changed")
+        if han_layout_changed:
+            reasons.append("Han expert/CTC layout changed")
         print(f"  Skipping optimizer state ({', '.join(reasons)})")
     else:
         optimizer.load_state_dict(ckpt["optimizer"])
     if "scaler" in ckpt:
         scaler.load_state_dict(ckpt["scaler"])
-    ema_state = None if direction_changed else ckpt.get("ema")
+    ema_state = None if direction_changed or han_layout_changed else ckpt.get("ema")
     start_epoch = ckpt.get("epoch", 0) + 1
 
     # Always rebuild scheduler on resume — checkpoint might have a different
@@ -559,15 +586,17 @@ def resume_from_checkpoint(args, model, optimizer, base_optimizer, scaler, sched
 def save_checkpoint(model, optimizer, scheduler, scaler, epoch, args, save_dir,
                     ema=None):
     ckpt_path = save_dir / f"moe_epoch{epoch}.pt"
+    model_to_save = getattr(model, "_orig_mod", model)
     payload = {
-        "model": {k: v.cpu() for k, v in model.state_dict().items()},
-        "model_config": model.config,
+        "model": {k: v.cpu() for k, v in model_to_save.state_dict().items()},
+        "model_config": model_to_save.config,
         "optimizer": optimizer.state_dict(),
         "scheduler": scheduler.state_dict(),
         "scaler": scaler.state_dict(),
         "epoch": epoch,
         "args": vars(args),
         "ctc_direction_version": CTC_DIRECTION_VERSION,
+        "han_split_version": HAN_SPLIT_VERSION,
     }
     if ema is not None:
         payload["ema"] = ema.state_dict()

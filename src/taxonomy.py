@@ -3,8 +3,9 @@ Script and group taxonomy — shared by data, encoding, training, and the model.
 
 Two-level identity system for LID routing:
 
-  Scripts (27): individual writing systems — latin, cyrillic, greek, arabic,
-    hebrew, han, kana, korean, and the Brahmic / South Asian / SE Asian scripts.
+Scripts (28): routed script labels — latin, cyrillic, greek, arabic,
+    hebrew, sparse/dense Han, kana, korean, and the Brahmic / South Asian /
+    SE Asian scripts.
 
   Groups (15): visual/linguistic families of scripts that share expert
     capacity — e.g. `cyrillic_greek` groups Cyrillic and Greek, `ne_indic`
@@ -17,7 +18,7 @@ safe to import from any layer without pulling the model in.
 Population and rough coverage (in the ARCHITECTURE.md ordering):
   Latin (~800 chars, 36 langs, ~3B speakers), Cyrillic+Greek (~760, ~300M),
   Arabic (~490 incl. Persian/Urdu, ~500M), Hebrew (~190, ~9M),
-  Han (~3.8K tokens, Chinese/Japanese kanji, ~1.4B),
+  Han (two complexity-routed heads, Hanzi/Kanji/Hanja, ~1.4B),
   Kana (~260, Japanese syllabaries, ~125M),
   Korean (~1.5K jamo-decomposed tokens, ~80M),
   N+E Indic (~850, Devanagari/Gurmukhi/Gujarati/Bengali/Odia, ~1B+),
@@ -41,8 +42,8 @@ SCRIPTS = [
     "arabic",      # 3
     # Group 4: Hebrew
     "hebrew",      # 4
-    # Group 5: Han (kanji/hanzi, Chinese + Japanese)
-    "han",         # 5
+    # Group 5: Han (Hanzi / Kanji / Hanja), split by glyph complexity
+    "han_sparse",  # 5 (renamed from han; numeric ID intentionally preserved)
     # Group 6: Kana (hiragana + katakana, Japanese syllabaries)
     "kana",        # 6
     # Group 7: Korean
@@ -74,10 +75,20 @@ SCRIPTS = [
     "ethiopic",    # 25
     # Group 15: Tibetan
     "tibetan",     # 26
+    # Appended to preserve every existing global script ID.
+    "han_dense",   # 27
 ]
 
 SCRIPT_TO_ID = {name: i for i, name in enumerate(SCRIPTS)}
 NUM_SCRIPTS = len(SCRIPTS)
+
+# Names found in shards/checkpoints created before the Han complexity split.
+SCRIPT_ALIASES = {"han": "han_sparse"}
+
+
+def canonical_script_name(name: str) -> str:
+    """Return the current script name for a legacy or current label."""
+    return SCRIPT_ALIASES.get(name, name)
 
 
 # --- Groups (15 families) ---
@@ -111,7 +122,7 @@ SCRIPT_TO_GROUP = {
     "greek": "cyrillic_greek",
     "arabic": "arabic",
     "hebrew": "hebrew",
-    "han": "han",
+    "han_sparse": "han",
     "kana": "kana",
     "korean": "korean",
     "devanagari": "ne_indic",
@@ -133,6 +144,7 @@ SCRIPT_TO_GROUP = {
     "georgian": "caucasus",
     "ethiopic": "ethiopic",
     "tibetan": "tibetan",
+    "han_dense": "han",
 }
 
 GROUP_SCRIPTS = {
@@ -140,7 +152,7 @@ GROUP_SCRIPTS = {
     "cyrillic_greek": ["cyrillic", "greek"],
     "arabic": ["arabic"],
     "hebrew": ["hebrew"],
-    "han": ["han"],
+    "han": ["han_sparse", "han_dense"],
     "kana": ["kana"],
     "korean": ["korean"],
     "ne_indic": ["devanagari", "gurmukhi", "gujarati", "bengali", "odia"],

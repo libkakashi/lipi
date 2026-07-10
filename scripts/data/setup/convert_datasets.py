@@ -90,6 +90,29 @@ def save_shards(images, labels, script, out_dir, prefix="real"):
     if not images:
         return 0
 
+    # Legacy converters identify Chinese data only as Han. Keep samples that
+    # contain one complexity run and drop mixed lines: without character boxes
+    # there is no reliable way to assign pixel ranges to two CTC heads.
+    if script == "han":
+        from src.data.script_detect import split_by_script
+        from src.encoding.han_split import HAN_SCRIPTS
+
+        by_script = {name: ([], []) for name in HAN_SCRIPTS}
+        skipped = 0
+        for image, label in zip(images, labels):
+            segments = [(text, name) for text, name in
+                        split_by_script(label, "han") if text.strip()]
+            if len(segments) != 1 or segments[0][1] not in HAN_SCRIPTS:
+                skipped += 1
+                continue
+            name = segments[0][1]
+            by_script[name][0].append(image)
+            by_script[name][1].append(label)
+        total = sum(save_shards(imgs, texts, name, out_dir, prefix)
+                    for name, (imgs, texts) in by_script.items() if imgs)
+        print(f"  Han split: kept {total}, skipped {skipped} mixed-run samples")
+        return total
+
     script_id = SCRIPT_TO_ID.get(script)
     group_id = GROUP_TO_ID.get(SCRIPT_TO_GROUP.get(script, ""), None)
     if script_id is None or group_id is None:
