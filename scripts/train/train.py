@@ -467,6 +467,15 @@ def build_optimizer_and_scheduler(args, model, device_type, steps_per_epoch):
 # Checkpoint resume
 # ---------------------------------------------------------------------------
 
+def _optimizer_group_sizes(optimizer_or_state):
+    """Return parameter counts per group for an optimizer or state dict."""
+    if isinstance(optimizer_or_state, dict):
+        groups = optimizer_or_state.get("param_groups", [])
+    else:
+        groups = optimizer_or_state.param_groups
+    return tuple(len(group.get("params", ())) for group in groups)
+
+
 def resume_from_checkpoint(args, model, optimizer, base_optimizer, scaler, scheduler,
                            steps_per_epoch, device_type):
     print(f"\nResuming from {args.resume}...")
@@ -529,13 +538,13 @@ def resume_from_checkpoint(args, model, optimizer, base_optimizer, scaler, sched
             break
     model_dtype = next(model.parameters()).dtype
     dtype_changed = ckpt_dtype is not None and ckpt_dtype != model_dtype
-    # Check param groups match (count and size)
+    # Check parameter-group layout, not the number of optimizer state entries.
+    # Adam creates state lazily, so a valid checkpoint can omit state for
+    # parameters that did not receive a gradient in the saved steps.
     ckpt_opt = ckpt.get("optimizer", {})
-    ckpt_groups = len(ckpt_opt.get("param_groups", []))
-    cur_groups = len(base_optimizer.param_groups)
-    ckpt_param_count = len(ckpt_opt.get("state", {}))
-    cur_param_count = sum(len(pg["params"]) for pg in base_optimizer.param_groups)
-    groups_changed = ckpt_groups != cur_groups or ckpt_param_count != cur_param_count
+    ckpt_group_sizes = _optimizer_group_sizes(ckpt_opt)
+    cur_group_sizes = _optimizer_group_sizes(base_optimizer)
+    groups_changed = ckpt_group_sizes != cur_group_sizes
     freeze_mode = hasattr(args, 'freeze_except') and args.freeze_except is not None
     direction_changed = (
         "model_config" in ckpt
@@ -554,7 +563,8 @@ def resume_from_checkpoint(args, model, optimizer, base_optimizer, scaler, sched
         if dtype_changed:
             reasons.append(f"dtype changed ({ckpt_dtype}→{model_dtype})")
         if groups_changed:
-            reasons.append(f"param groups changed ({ckpt_groups}→{cur_groups})")
+            reasons.append(
+                f"param groups changed ({ckpt_group_sizes}→{cur_group_sizes})")
         if freeze_mode:
             reasons.append(f"freeze mode ({args.freeze_except})")
         if direction_changed:
