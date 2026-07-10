@@ -26,8 +26,7 @@ SCRIPT_WORD_SOURCES = {
     "greek": ["greek.txt"],
     "arabic": ["arabic.txt"],
     "hebrew": ["hebrew.txt"],
-    "han_sparse": ["chinese.txt"],
-    "han_dense": ["chinese.txt"],
+    "han": ["chinese.txt"],
     "kana": ["japanese.txt"],
     "korean": ["korean.txt"],
     "devanagari": ["devanagari.txt"],
@@ -113,7 +112,7 @@ class TestRoundtrip:
     @pytest.mark.parametrize("script", [
         "latin", "cyrillic", "greek", "hebrew", "armenian", "georgian",
         "ethiopic", "devanagari", "tamil", "thai", "korean",
-        "han_sparse", "han_dense", "kana",
+        "han", "kana",
     ])
     def test_roundtrip_basic(self, script):
         """Quick roundtrip with known-good text."""
@@ -129,8 +128,7 @@ class TestRoundtrip:
             "tamil": "வணக்கம்",
             "thai": "สวัสดี",
             "korean": "한국어",
-            "han_sparse": "明日世界",
-            "han_dense": "語能學漢",
+            "han": "明日世界語能學漢",
             "kana": "あいうえお",     # pure hiragana
         }
         text = samples[script]

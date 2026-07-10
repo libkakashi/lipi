@@ -5,12 +5,12 @@ from src.encoding.decompose import encode_text, script_vocab_size
 from src.taxonomy import GROUP_SCRIPTS
 
 
-def test_decode_one_joins_sparse_dense_and_kana_runs():
+def test_decode_one_joins_han_and_kana_runs():
     scripts = [list(GROUP_SCRIPTS[group]) for group in (
         "latin", "cyrillic_greek", "arabic", "hebrew", "han", "kana")]
     routed = [
-        (4, 0, "han_sparse", "山"),
-        (4, 1, "han_dense", "語"),
+        (4, 0, "han", "山"),
+        (4, 0, "han", "語"),
         (5, 0, "kana", "か"),
     ]
     max_vocab = max(script_vocab_size(script) for *_, script, _ in routed)
@@ -34,7 +34,7 @@ def test_decode_one_joins_sparse_dense_and_kana_runs():
     )
 
     assert group == 4
-    assert script == "han_sparse"
+    assert script == "han"
     assert text == "山語か"
     assert confidence > 0.99
-    assert [run[1] for run in runs] == ["han_sparse", "han_dense", "kana"]
+    assert [run[1] for run in runs] == ["han", "kana"]

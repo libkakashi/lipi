@@ -1,6 +1,6 @@
 # Lipi: Multilingual OCR via Mixture of Experts
 
-> 27 routed script heads, 14 groups, 100+ languages. 171.9M stored
+> 26 routed script heads, 14 groups, 100+ languages. 168.1M stored
 > parameters; about 26.4M parameters touched and 4.0 GFLOPs for a
 > single-script Latin crop at `W=128`.
 
@@ -142,7 +142,7 @@ Each group layer stores about 17.73M parameters. The routed MLP output
 projections start at zero and both residual branches use LayerScale
 initialized to `1e-4`.
 
-### LID-2: Within-Group Script Routing (0.69M)
+### LID-2: Within-Group Script Routing (0.59M)
 
 LID-2 reads the group-stack features after layer 2, concatenated with the
 same 128-dimensional ConvB texture tap. Group layer 3 continues refining
@@ -152,7 +152,6 @@ Only multi-script groups have LID-2 heads:
 
 ```text
 cyrillic_greek:   2-way  cyrillic, greek
-han:              2-way  han_sparse, han_dense
 ne_indic:         5-way  devanagari, gurmukhi, gujarati, bengali, odia
 dravidian_north:  3-way  kannada, telugu, sinhala
 dravidian_south:  2-way  malayalam, tamil
@@ -183,10 +182,10 @@ auxiliary intermediate-CTC loss.
 This is currently one-step self-conditioning: there are two full CTC
 predictions and one feedback event. It is not an iterative diffusion loop.
 
-### Script MoE Stack (99.26M)
+### Script MoE Stack (95.71M)
 
 The feedback-conditioned features pass through three sequential script
-MoE layers, routed per frame by the flat 27-script ID:
+MoE layers, routed per frame by the flat 26-script ID:
 
 ```text
 Layer 1: shared attention w=16, unshifted
@@ -194,22 +193,22 @@ Layer 2: shared attention w=64, shifted
 Layer 3: shared attention w=16, unshifted
 ```
 
-Each layer has one shared attention branch, 27 routed script MLPs at ratio
+Each layer has one shared attention branch, 26 routed script MLPs at ratio
 4, and one always-on shared MLP at ratio 2. One layer stores about 33.09M
 parameters:
 
 ```text
 shared attention branch:   0.593M
-27 routed script MLPs:    31.902M
+26 routed script MLPs:    30.720M
 shared MLP branch:         0.592M
 ```
 
 Attention weights are shared across scripts within a layer. The three
 layers do not share weights with one another.
 
-### Final CTC and Decoding (7.57M)
+### Final CTC and Decoding (7.43M)
 
-There are 27 per-script linear heads:
+There are 26 per-script linear heads:
 
 ```text
 LayerNorm(384) -> selected Linear(384->script_vocab_size)
@@ -234,7 +233,7 @@ CTC time follows logical right-to-left reading order.
 | 1 | cyrillic_greek | cyrillic, greek | 364, 426 | yes |
 | 2 | arabic | arabic | 500 | no |
 | 3 | hebrew | hebrew | 192 | no |
-| 4 | han | han_sparse, han_dense | 2153, 2018 | yes |
+| 4 | han | han | 3811 | no |
 | 5 | kana | kana | 263 | no |
 | 6 | korean | korean | 1500 | no |
 | 7 | ne_indic | devanagari, gurmukhi, gujarati, bengali, odia | 1000, 600, 900, 900, 850 | yes |
@@ -256,17 +255,16 @@ generation.
 |------|---------|--------|
 | No fusion | latin, cyrillic, greek, hebrew, armenian, georgian, ethiopic, kana | one Unicode character per token |
 | Fusion | arabic, devanagari, gurmukhi, gujarati, bengali, odia, kannada, telugu, sinhala, malayalam, tamil, thai, lao, burmese, khmer, tibetan | grapheme clusters, learned frequent fusions, codepoint fallback |
-| Han | han_sparse, han_dense | direct frequent characters plus ALT slots for rare visually similar characters |
+| Han | han | direct frequent characters plus ALT slots for rare visually similar characters |
 | Korean | korean | onset, vowel, and coda Jamo decomposition |
 
 Han characters, including Chinese Hanzi, Japanese Kanji, and Korean Hanja,
-route to `han_sparse` or `han_dense`. The stable direct-character manifest
-uses Noto Sans CJK outline complexity with a threshold of 60 recorded outline
-operations. Rare ALT characters follow the route of their visual prototype,
-with IDS component count as a fallback.
+route to the single `han` head. The stable direct-character manifest covers
+frequent characters, and rare ALT characters follow the route of their
+visual prototype.
 
 Mixed lines are split into maximal routing runs. Japanese text separates
-Kana from Han and also separates sparse from dense Han. ASCII punctuation
+Kana from Han. ASCII punctuation
 and digits become Latin segments even inside non-Latin words. CJK
 punctuation attaches to an adjacent Han route. Emoji codepoints are rejected
 from generated and converted data.
@@ -347,16 +345,16 @@ Values can be comma-separated.
 | SWA-C/D and SWA-C input projection | 7.76M | 4.5% |
 | Height merges | 0.49M | 0.3% |
 | LID-1 branch | 2.20M | 1.3% |
-| Group MoE stack, 3 layers | 53.18M | 30.9% |
-| LID-2 heads | 0.69M | 0.4% |
-| Script MoE stack, 3 layers | 99.26M | 57.7% |
+| Group MoE stack, 3 layers | 53.18M | 31.6% |
+| LID-2 heads | 0.59M | 0.4% |
+| Script MoE stack, 3 layers | 95.71M | 56.9% |
 | Final norm and feedback gate | 0.001M | <0.1% |
-| CTC heads, 27 scripts | 7.57M | 4.4% |
-| **Total stored** | **171.91M** | **100%** |
+| CTC heads, 26 scripts | 7.43M | 4.4% |
+| **Total stored** | **168.13M** | **100%** |
 
 All expert banks are stored and optimized, but routing only executes the
 MLPs needed by the frames in the batch. A single-script line touches about
-26.4M unique parameters for Latin and 26.9M for Han. Mixed-script lines can
+26.4M unique parameters for Latin and 27.5M for Han. Mixed-script lines can
 activate additional routed MLPs and CTC heads.
 
 Measured with `torch.utils.flop_counter.FlopCounterMode`, batch size 1, and
@@ -365,8 +363,7 @@ ground-truth routing:
 | Input | Active path |
 |-------|------------:|
 | Latin, `W=128`, `T=32` | 3.975 GFLOPs |
-| Han sparse, `W=128`, `T=32` | 4.075 GFLOPs |
-| Han dense, `W=128`, `T=32` | 4.065 GFLOPs |
+| Han, `W=128`, `T=32` | 4.075 GFLOPs |
 | Latin, `W=256`, `T=64` | 7.258 GFLOPs |
 
 The CTC head vocabulary causes the small per-script FLOP difference. Both
@@ -387,7 +384,6 @@ src/
     config.py                  per-script codecs and vocabulary definitions
     decompose.py               encode_text, decode_ids, vocab dispatch
     direction.py               RTL CTC traversal helpers
-    han_split.py               sparse/dense Han routing
     vocab.py                   fusion and frequency vocabulary construction
   data/
     font_registry.py           font-to-script registry
@@ -410,7 +406,6 @@ scripts/
   data/
     generate.py                synthetic mixed-script data generation
     convert_to_mds.py          external shard conversion
-    build_han_split.py         outline-complexity Han manifest
     cjk_visual_similarity.py   Han ALT visual-prototype mapping
     setup/                     source fetchers and real-data conversion
   train/

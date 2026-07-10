@@ -31,7 +31,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from src.model.encoder import LipiMoEEncoder
 from src.model.memory import find_bucket_capacities
 from src.encoding.direction import CTC_DIRECTION_VERSION
-from src.encoding.han_split import HAN_SPLIT_VERSION
 from src.taxonomy import (
     SCRIPT_TO_GROUP,
     NUM_GROUPS,
@@ -600,7 +599,6 @@ def save_checkpoint(model, optimizer, scheduler, scaler, epoch, args, save_dir,
         "epoch": epoch,
         "args": vars(args),
         "ctc_direction_version": CTC_DIRECTION_VERSION,
-        "han_split_version": HAN_SPLIT_VERSION,
         "taxonomy_version": TAXONOMY_VERSION,
     }
     if ema is not None:

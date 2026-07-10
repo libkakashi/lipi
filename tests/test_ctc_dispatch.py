@@ -30,9 +30,9 @@ def _make_model():
 def _make_full_taxonomy_model():
     """Full-taxonomy model — flat IDs must match global SCRIPT_TO_ID.
 
-    Guards the dispatch-order regression: when han_dense briefly held an
-    appended global ID (26) at (group 4, local 1), (g, s) iteration order
-    stopped being ascending in flat ID and frames got another head's
+    Guards the dispatch-order regression: when the (briefly) split Han head
+    held an appended global ID at (group 4, local 1), (g, s) iteration
+    order stopped being ascending in flat ID and frames got another head's
     logits. Flat IDs are flatten-ordered again, but these tests keep the
     dispatch honest against any future reordering.
     """
@@ -48,13 +48,13 @@ def _make_full_taxonomy_model():
     )
 
 
-def _mixed_han_dense_routing(model, T=24):
-    """Frames mixing han_dense with scripts whose flat ids straddle it."""
-    dense = SCRIPT_TO_ID["han_dense"]
-    row0 = [SCRIPT_TO_ID["han_sparse"], dense, SCRIPT_TO_ID["kana"],
-            dense, SCRIPT_TO_ID["korean"], -1, SCRIPT_TO_ID["tibetan"], dense]
-    row1 = [SCRIPT_TO_ID["latin"], dense, SCRIPT_TO_ID["kannada"],
-            SCRIPT_TO_ID["armenian"], -1, dense, SCRIPT_TO_ID["kana"],
+def _mixed_script_routing(model, T=24):
+    """Frames interleaving scripts from across the whole flat-ID range."""
+    han = SCRIPT_TO_ID["han"]
+    row0 = [han, SCRIPT_TO_ID["kana"], han, SCRIPT_TO_ID["korean"],
+            -1, SCRIPT_TO_ID["tibetan"], han, SCRIPT_TO_ID["greek"]]
+    row1 = [SCRIPT_TO_ID["latin"], han, SCRIPT_TO_ID["kannada"],
+            SCRIPT_TO_ID["armenian"], -1, han, SCRIPT_TO_ID["kana"],
             SCRIPT_TO_ID["cyrillic"]]
     flat = torch.tensor([row0 * (T // len(row0)), row1 * (T // len(row1))])
     lens = _per_sample_key_lens(flat, model.total_scripts).tolist()
@@ -163,19 +163,19 @@ def test_ctc_feedback_matches_reference():
 
 def test_ctc_logits_stable_global_id_dispatch():
     model = _make_full_taxonomy_model()
-    flat, lens = _mixed_han_dense_routing(model)
+    flat, lens = _mixed_script_routing(model)
     torch.manual_seed(8)
     x = torch.randn(*flat.shape, 128)
 
     ref = _ref_ctc_logits(model, x, flat, lens)
     got = model._ctc_logits(x, flat, lens)
     assert torch.allclose(got, ref, atol=1e-6), \
-        "han_dense frames received another head's logits"
+        "frames received another head's logits"
 
 
 def test_ctc_feedback_stable_global_id_dispatch():
     model = _make_full_taxonomy_model()
-    flat, lens = _mixed_han_dense_routing(model)
+    flat, lens = _mixed_script_routing(model)
     max_vocab = max(m.max_vocab for m in model.ctc_modules)
     torch.manual_seed(9)
     inter = torch.randn(*flat.shape, max_vocab)
@@ -183,7 +183,7 @@ def test_ctc_feedback_stable_global_id_dispatch():
     ref = _ref_ctc_feedback(model, inter, flat, lens)
     got = model._ctc_feedback(inter, flat, lens)
     assert torch.allclose(got, ref, atol=1e-6), \
-        "han_dense frames received another head's feedback"
+        "frames received another head's feedback"
 
 
 def test_ctc_logits_all_blank():

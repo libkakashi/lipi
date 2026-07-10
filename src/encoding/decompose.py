@@ -19,7 +19,6 @@ from src.encoding.config import (
     NO_FUSION_SCRIPTS, FUSION_BASE_CHARS, get_fusion_codec,
     get_korean_codec, get_han_codec,
 )
-from src.encoding.han_split import HAN_SCRIPTS
 
 
 def _codec_for(script: str):
@@ -34,8 +33,8 @@ def _codec_for(script: str):
         return get_fusion_codec(script)
     if script == "korean":
         return get_korean_codec()
-    if script in HAN_SCRIPTS or script == "han":
-        return get_han_codec(script)
+    if script == "han":
+        return get_han_codec()
     return None
 
 

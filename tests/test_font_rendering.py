@@ -807,7 +807,7 @@ class TestDataQuality:
             encoded_chars = 0
             for w in words[:2000]:
                 # CJK heads share sources; generation splits at script boundaries.
-                if script in ("han_sparse", "han_dense", "kana"):
+                if script in ("han", "kana"):
                     w = "".join(c for c in w if _char_to_script(c) == script)
                     if not w:
                         continue

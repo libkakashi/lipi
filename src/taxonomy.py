@@ -3,8 +3,8 @@ Script and group taxonomy — shared by data, encoding, training, and the model.
 
 Two-level identity system for LID routing:
 
-Scripts (27): routed script labels — latin, cyrillic, greek, arabic,
-    hebrew, sparse/dense Han, kana, korean, and the Brahmic / South Asian /
+Scripts (26): routed script labels — latin, cyrillic, greek, arabic,
+    hebrew, han, kana, korean, and the Brahmic / South Asian /
     SE Asian scripts.
 
   Groups (14): visual/linguistic families of scripts that share expert
@@ -18,7 +18,7 @@ safe to import from any layer without pulling the model in.
 Population and rough coverage (in the ARCHITECTURE.md ordering):
   Latin (~800 chars, 36 langs, ~3B speakers), Cyrillic+Greek (~760, ~300M),
   Arabic (~490 incl. Persian/Urdu, ~500M), Hebrew (~190, ~9M),
-  Han (two complexity-routed heads, Hanzi/Kanji/Hanja, ~1.4B),
+  Han (Hanzi/Kanji/Hanja, ~1.4B),
   Kana (~260, Japanese syllabaries, ~125M),
   Korean (~1.5K jamo-decomposed tokens, ~80M),
   N+E Indic (~850, Devanagari/Gurmukhi/Gujarati/Bengali/Odia, ~1B+),
@@ -45,49 +45,51 @@ SCRIPTS = [
     "arabic",      # 3
     # Group 4: Hebrew
     "hebrew",      # 4
-    # Group 5: Han (Hanzi / Kanji / Hanja), split by glyph complexity
-    "han_sparse",  # 5
-    "han_dense",   # 6
+    # Group 5: Han (Hanzi / Kanji / Hanja)
+    "han",         # 5
     # Group 6: Kana (hiragana + katakana, Japanese syllabaries)
-    "kana",        # 7
+    "kana",        # 6
     # Group 7: Korean
-    "korean",      # 8
+    "korean",      # 7
     # Group 8: N+E Indian Brahmic
-    "devanagari",  # 9
-    "gurmukhi",    # 10
-    "gujarati",    # 11
-    "bengali",     # 12
-    "odia",        # 13
+    "devanagari",  # 8
+    "gurmukhi",    # 9
+    "gujarati",    # 10
+    "bengali",     # 11
+    "odia",        # 12
     # Group 9: Dravidian North (curvy, similar stroke patterns)
-    "kannada",     # 14
-    "telugu",      # 15
-    "sinhala",     # 16
+    "kannada",     # 13
+    "telugu",      # 14
+    "sinhala",     # 15
     # Group 10: Dravidian South (round, loopy)
-    "malayalam",   # 17
-    "tamil",       # 18
+    "malayalam",   # 16
+    "tamil",       # 17
     # Group 11: SE Asian
-    "thai",        # 19
-    "lao",         # 20
-    "burmese",     # 21
-    "khmer",       # 22
+    "thai",        # 18
+    "lao",         # 19
+    "burmese",     # 20
+    "khmer",       # 21
     # Group 12: Caucasus
-    "armenian",    # 23
-    "georgian",    # 24
+    "armenian",    # 22
+    "georgian",    # 23
     # Group 13: Ethiopic
-    "ethiopic",    # 25
+    "ethiopic",    # 24
     # Group 14: Tibetan
-    "tibetan",     # 26
+    "tibetan",     # 25
 ]
 
 SCRIPT_TO_ID = {name: i for i, name in enumerate(SCRIPTS)}
 NUM_SCRIPTS = len(SCRIPTS)
-# v3: han_dense moved from appended slot 26 to 6 (natural flatten order).
+# v4: Han complexity split removed — single han head again (measured on the
+# full 27.6K inventory 2026-07: the complexity axis is smooth and gapless,
+# so any split needs band/dual-decode machinery that outweighs its benefit).
 # Bumped whenever numeric script/group IDs shift; shards are stamped with it
 # and load_shard_metadata refuses mismatches.
-TAXONOMY_VERSION = 3
+TAXONOMY_VERSION = 4
 
-# Names found in shards/checkpoints created before the Han complexity split.
-SCRIPT_ALIASES = {"han": "han_sparse"}
+# Names found in shards/checkpoints created while the Han complexity split
+# existed (no trained checkpoints ever shipped with it).
+SCRIPT_ALIASES = {"han_sparse": "han", "han_dense": "han"}
 
 
 def canonical_script_name(name: str) -> str:
@@ -125,8 +127,7 @@ SCRIPT_TO_GROUP = {
     "greek": "cyrillic_greek",
     "arabic": "arabic",
     "hebrew": "hebrew",
-    "han_sparse": "han",
-    "han_dense": "han",
+    "han": "han",
     "kana": "kana",
     "korean": "korean",
     "devanagari": "ne_indic",
@@ -154,7 +155,7 @@ GROUP_SCRIPTS = {
     "cyrillic_greek": ["cyrillic", "greek"],
     "arabic": ["arabic"],
     "hebrew": ["hebrew"],
-    "han": ["han_sparse", "han_dense"],
+    "han": ["han"],
     "kana": ["kana"],
     "korean": ["korean"],
     "ne_indic": ["devanagari", "gurmukhi", "gujarati", "bengali", "odia"],

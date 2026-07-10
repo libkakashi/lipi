@@ -45,12 +45,6 @@ from src.data.augmentation import (
 )
 from src.encoding.vocab import build_script_vocab
 from src.encoding.direction import is_rtl_script
-from src.encoding.han_split import (
-    HAN_DENSE,
-    HAN_SCRIPTS,
-    HAN_SPARSE,
-    HAN_SPLIT_VERSION,
-)
 from src.data.rendering import (
     render_word, image_has_ink,
     resize_or_pad, filter_fonts_by_cmap, font_covers_text,
@@ -377,16 +371,15 @@ _MIX_PATTERNS_LATIN_ONLY = [
 
 # Script-native punctuation — real Hindi text has danda (U+0964) everywhere,
 # Arabic uses its own comma/question/full stop, CJK uses fullwidth forms.
-# All entries are verified encodable by their script. CJK punctuation is
-# shared by the two Han codecs and attaches to its neighboring Han run.
+# All entries are verified encodable by their script. CJK punctuation
+# attaches to its neighboring Han run.
 _SCRIPT_PUNCT = {
     "devanagari": ["।", "॥"],
     "bengali": ["।"],
     "gurmukhi": ["।"],
     "odia": ["।"],
     "arabic": ["،", "؛", "؟", "۔"],
-    HAN_SPARSE: ["。", "、", "，", "！", "？"],
-    HAN_DENSE: ["。", "、", "，", "！", "？"],
+    "han": ["。", "、", "，", "！", "？"],
     "armenian": ["։", "՞"],
     "ethiopic": ["።", "፣"],
     "tibetan": ["།"],
@@ -1043,7 +1036,7 @@ def _get_word_pool(font_filter, script, fonts, words, h=32, punct_prob=0.15):
         # assigning the whole word to one Han/Kana head. RTL words take the
         # same path: digit runs must not share a segment with the letters,
         # or the reversed CTC traversal reads the digits backwards.
-        if script in HAN_SCRIPTS or script == "kana" or is_rtl_script(script):
+        if script in ("han", "kana") or is_rtl_script(script):
             segs = split_by_script(word, script)
             candidates = [text for text, seg_script in segs
                           if seg_script == script and text.strip()]
@@ -1600,7 +1593,6 @@ def main():
     torch.save({
         "active_scripts": valid_scripts,
         "active_groups": active_groups,
-        "han_split_version": HAN_SPLIT_VERSION,
         "taxonomy_version": TAXONOMY_VERSION,
         "height": args.height,
         "max_width": args.max_width,

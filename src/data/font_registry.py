@@ -13,7 +13,7 @@ imported by fonts.py):
 """
 
 
-_HAN_FONT_SCRIPTS = ["han_sparse", "han_dense", "kana"]
+_HAN_FONT_SCRIPTS = ["han", "kana"]
 
 
 # Explicit font filename → scripts mapping.

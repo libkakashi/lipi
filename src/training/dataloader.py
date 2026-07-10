@@ -17,7 +17,6 @@ from torch.utils.data import Dataset, Sampler
 
 from streaming import Stream, StreamingDataset
 
-from src.encoding.han_split import HAN_SPLIT_VERSION
 from src.taxonomy import (
     SCRIPT_TO_GROUP, SCRIPT_TO_ID, GROUP_TO_ID, NUM_GROUPS, TAXONOMY_VERSION,
 )
@@ -45,12 +44,6 @@ def load_shard_metadata(data_path: Path) -> dict | None:
     if not meta_path.exists():
         return None
     meta = torch.load(meta_path, weights_only=False)
-    if ("han" in meta.get("active_scripts", [])
-            and meta.get("han_split_version", 0) < HAN_SPLIT_VERSION):
-        raise RuntimeError(
-            "These shards predate the han_sparse/han_dense split. "
-            "Their Han word blocks have no per-run complexity labels; "
-            "regenerate the shards before training the split heads.")
     if "emoji" in meta.get("active_scripts", []):
         raise RuntimeError(
             "These shards contain the removed Emoji script/group. "

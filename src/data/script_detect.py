@@ -7,7 +7,7 @@ Two related concerns share this file:
                                        script name (labeling / diagnostics).
   split_by_script(text, parent)      — carve a string into runs by script,
                                        peeling off ASCII to "latin" and
-                                       kana and sparse/dense Han within CJK
+                                       separating kana from Han within CJK
                                        parents.
 
 Both operate on Unicode code-point ranges. The tight predicates
@@ -16,11 +16,6 @@ callers that need to test one code point at a time.
 """
 
 from src.encoding.direction import is_number_char, is_rtl_script
-from src.encoding.han_split import (
-    HAN_SCRIPTS,
-    HAN_SPARSE,
-    han_script_for_char,
-)
 
 # Unicode block ranges for each script
 _SCRIPT_RANGES = {
@@ -54,13 +49,7 @@ _SCRIPT_RANGES = {
         (0x0590, 0x05FF),  # Hebrew
         (0xFB1D, 0xFB4F),  # Hebrew Presentation Forms
     ],
-    "han_sparse": [
-        (0x4E00, 0x9FFF),   # Routed below by IDS complexity
-        (0x3400, 0x4DBF),
-        (0x3000, 0x303F),
-        (0xFF00, 0xFFEF),
-    ],
-    "han_dense": [
+    "han": [
         (0x4E00, 0x9FFF),   # CJK Unified Ideographs
         (0x3400, 0x4DBF),   # CJK Extension A
         (0x3000, 0x303F),   # CJK Symbols/Punctuation (also valid in kana regions;
@@ -94,7 +83,7 @@ def _char_to_script(ch: str) -> str | None:
     """Map a single character to its script name, or None if unknown."""
     cp = ord(ch)
     if is_kanji_cp(cp):
-        return han_script_for_char(ch)
+        return "han"
     for script, ranges in _SCRIPT_RANGES.items():
         for start, end in ranges:
             if start <= cp <= end:
@@ -126,9 +115,9 @@ def split_by_script(text: str, parent_script: str) -> list[tuple[str, str]]:
     """Split text into runs of same-script characters, peeling off ASCII.
 
     ASCII characters (0x21-0x7E) become "latin" segments regardless of
-    parent. For Han/Kana parents, kana and sparse/dense Han also split into
-    separate runs so the training pipeline can label each segment with the
-    correct expert and CTC head. For RTL parents, digit runs (Arabic-Indic/
+    parent. For Han/Kana parents, kana and Han split into separate runs so
+    the training pipeline can label each segment with the correct expert
+    and CTC head. For RTL parents, digit runs (Arabic-Indic/
     Persian numerals, bidi EN/AN) split into their own same-script segments:
     they render left-to-right inside RTL text, so the CTC frame traversal
     must not reverse them with the surrounding letters. Everything else
@@ -150,16 +139,14 @@ def split_by_script(text: str, parent_script: str) -> list[tuple[str, str]]:
 
         if is_ascii_cp(cp):
             script: str | None = "latin"
-        elif parent_script in HAN_SCRIPTS or parent_script in ("han", "kana"):
+        elif parent_script in ("han", "kana"):
             if is_kana_cp(cp):
                 script = "kana"
             elif is_kanji_cp(cp):
-                script = han_script_for_char(ch)
+                script = "han"
             elif is_cjk_punct_cp(cp):
-                # Punctuation is shared by both Han codecs. Attach it to
-                # an adjacent Han run; Kana has no CJK-punctuation tokens.
-                script = (current_script if current_script in HAN_SCRIPTS
-                          else HAN_SPARSE)
+                # Kana has no CJK-punctuation tokens; attach to a Han run.
+                script = "han"
             else:
                 script = current_script  # non-ASCII, non-CJK → attach
         else:

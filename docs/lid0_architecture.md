@@ -2,7 +2,7 @@
 
 ## Motivation
 
-Currently all 27 routed script heads share 4 SWA blocks before LID-1 classifies into 14 groups. The shared features are a compromise — optimized for no script family in particular. LID-1 must distinguish 14 groups using these generic features.
+Currently all 26 routed script heads share 4 SWA blocks before LID-1 classifies into 14 groups. The shared features are a compromise — optimized for no script family in particular. LID-1 must distinguish 14 groups using these generic features.
 
 With LID-0, we split early: 2 shared SWA blocks → LID-0 routes to a super-group → 2 per-super-group SWA blocks → LID-1 routes within the super-group. Each super-group gets specialized features tuned for its script family before LID-1 even runs.
 
@@ -40,9 +40,9 @@ Right-to-left, cursive/connected, diacritical marks.
 - arabic, hebrew
 - Very distinct from all other families. Low similarity to everything (0.57 max).
 
-### 3. CJK (3 groups, 4 routed heads)
+### 3. CJK (3 groups, 3 routed heads)
 Dense logographic/syllabic, square grid layout.
-- han (han_sparse, han_dense), kana, korean
+- han, kana, korean
 - Internal similarity: han↔kana 0.83, han↔korean 0.81, kana↔korean 0.73
 
 ### 4. Brahmic (7 groups, 17 scripts)
@@ -66,7 +66,7 @@ Unique scripts with no close relatives.
 
 2. **LID-1 becomes easier.** Instead of 14-way classification on generic features, each LID-1 classifies 2-7 groups using specialized features. Brahmic LID-1 (hardest: 7 groups among similar scripts) gets Brahmic-tuned features.
 
-3. **Gradual feature specialization.** Shared → super-group → group → script. Each level narrows the feature space. No single bottleneck where generic features must distinguish all 27 routed heads.
+3. **Gradual feature specialization.** Shared → super-group → group → script. Each level narrows the feature space. No single bottleneck where generic features must distinguish all 26 routed heads.
 
 4. **Natural parameter scaling.** Super-group SWA blocks are shared within the family (not per-group), so cost is 5 × 2 blocks = 10 SWA blocks total vs current 4 shared. Net +6 SWA blocks, each ~1M params = ~6M extra. Modest.
 

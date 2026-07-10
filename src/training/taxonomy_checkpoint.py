@@ -6,8 +6,6 @@ import re
 
 import torch
 
-from src.encoding.config import get_han_codec, get_legacy_han_codec
-from src.encoding.han_split import HAN_DENSE, HAN_SPARSE
 from src.taxonomy import SCRIPT_TO_GROUP, SCRIPT_TO_ID, canonical_script_name
 
 
@@ -34,11 +32,9 @@ def _layout(group_script_names: list[list[str]]) -> tuple[
         for local_id, script in enumerate(scripts):
             locations[script] = (group_id, local_id)
 
-    # Expert flat IDs are group/local flatten order in every era: pre-split
-    # checkpoints matched their SCRIPT_TO_ID by construction, and since
-    # taxonomy v3 the invariant is explicit (SCRIPT_TO_ID == flatten order).
-    # The only exception — han-split-with-emoji checkpoints, which appended
-    # han_dense after emoji — never existed: no training ran in that window.
+    # Expert flat IDs are group/local flatten order in every era; since
+    # taxonomy v3 the invariant is explicit (SCRIPT_TO_ID == flatten order,
+    # pinned by test_script_ids_follow_flatten_order).
     flat_ids = {}
     flat = 0
     for scripts in group_script_names:
@@ -56,32 +52,7 @@ def needs_taxonomy_migration(old_config: dict | None,
 
 
 def _source_script(new_script: str, old_locations: dict) -> str | None:
-    if new_script in old_locations:
-        return new_script
-    if new_script in {HAN_SPARSE, HAN_DENSE} and "han" in old_locations:
-        return "han"
-    return None
-
-
-def _ctc_row_map(new_codec, old_codec) -> dict[int, int]:
-    old_token_ids = {token: i + 1 for i, token in enumerate(old_codec.tokens)}
-    rows = {0: 0}
-    for new_id, token in enumerate(new_codec.tokens, start=1):
-        old_id = old_token_ids.get(token)
-        if old_id is not None:
-            rows[new_id] = old_id
-    for slot in range(len(new_codec._alt_id_set)):
-        rows[new_codec._alt_base_id + slot] = old_codec._alt_base_id + slot
-    return rows
-
-
-def _remap_projection(source: torch.Tensor, target: torch.Tensor,
-                      row_map: dict[int, int]) -> torch.Tensor:
-    result = target.clone()
-    for new_row, old_row in row_map.items():
-        if new_row < result.shape[0] and old_row < source.shape[0]:
-            result[new_row].copy_(source[old_row])
-    return result
+    return new_script if new_script in old_locations else None
 
 
 def migrate_taxonomy_state(
@@ -90,7 +61,7 @@ def migrate_taxonomy_state(
     old_model_config: dict | None,
     new_model_config: dict,
 ) -> int:
-    """Remap group/script modules by name and seed split Han projections."""
+    """Remap group/script modules by name across taxonomy changes."""
     if not needs_taxonomy_migration(old_model_config, new_model_config):
         return 0
 
@@ -150,16 +121,9 @@ def migrate_taxonomy_state(
             source_key = (f"ctc_modules.{old_group_id}.heads.{old_local_id}"
                           f"{match.group(3)}")
             source = source_state.get(source_key)
-            if source is None:
+            if source is None or source.shape != target_value.shape:
                 continue
-            if source_script == "han" and new_script in {HAN_SPARSE, HAN_DENSE}:
-                rows = _ctc_row_map(get_han_codec(new_script),
-                                    get_legacy_han_codec())
-                state[target_key] = _remap_projection(source, target_value, rows)
-            elif source.shape == target_value.shape:
-                state[target_key] = source.clone()
-            else:
-                continue
+            state[target_key] = source.clone()
             changed += 1
             continue
 

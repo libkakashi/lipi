@@ -23,11 +23,6 @@ def _vocab_size():
     return _get_codec().vocab_size
 
 
-def _get_split_codec(script):
-    from src.encoding.config import get_han_codec
-    return get_han_codec(script)
-
-
 # ---------------------------------------------------------------------------
 # 1. Codec Loading
 # ---------------------------------------------------------------------------
@@ -297,123 +292,49 @@ class TestUnifiedAPI:
 
 
 # ---------------------------------------------------------------------------
-# 9. Sparse / dense Han routing
+# 9. Han / kana routing
 # ---------------------------------------------------------------------------
 
-class TestHanComplexitySplit:
+class TestHanKanaRouting:
 
     def test_taxonomy_names_and_flatten_ids(self):
         from src.taxonomy import GROUP_SCRIPTS, SCRIPT_TO_ID
-        assert GROUP_SCRIPTS["han"] == ["han_sparse", "han_dense"]
-        assert SCRIPT_TO_ID["han_sparse"] == 5
-        assert SCRIPT_TO_ID["han_dense"] == 6
-        assert SCRIPT_TO_ID["kana"] == 7
+        assert GROUP_SCRIPTS["han"] == ["han"]
+        assert SCRIPT_TO_ID["han"] == 5
+        assert SCRIPT_TO_ID["kana"] == 6
 
-    def test_visual_complexity_examples(self):
-        from src.encoding.han_split import (
-            HAN_DENSE, HAN_SPARSE, han_script_for_char,
-        )
-        assert all(han_script_for_char(c) == HAN_SPARSE for c in "一山川明日")
-        assert all(han_script_for_char(c) == HAN_DENSE for c in "語學漢鬱龍龜")
-
-    def test_split_codecs_are_smaller_than_legacy_head(self):
-        legacy_size = _get_codec().vocab_size
-        sparse_size = _get_split_codec("han_sparse").vocab_size
-        dense_size = _get_split_codec("han_dense").vocab_size
-        assert sparse_size < legacy_size
-        assert dense_size < legacy_size
-        assert max(sparse_size, dense_size) < 2500
-
-    def test_all_cjk_chars_roundtrip_through_assigned_head(self):
-        from src.encoding.han_split import han_script_for_char
+    def test_all_cjk_chars_roundtrip(self):
+        codec = _get_codec()
         failures = []
         for cp in list(range(0x3400, 0x4DC0)) + list(range(0x4E00, 0xA000)):
             char = chr(cp)
-            script = han_script_for_char(char)
-            codec = _get_split_codec(script)
             ids = codec.encode_text(char)
             if not ids or codec.decode_ids(ids) != char:
-                failures.append((char, script, ids))
+                failures.append((char, ids))
         assert not failures, failures[:10]
 
-    def test_visual_alt_pairs_stay_inside_one_head(self):
-        from src.encoding.han_split import han_script_for_char
+    def test_visual_alt_prototypes_are_encodable(self):
+        codec = _get_codec()
         mapping = (Path(__file__).parent.parent / "training_data" / "corpora"
                    / "cjk_visual_mapping.tsv")
         failures = []
         for line in mapping.read_text(encoding="utf-8").splitlines()[1:]:
             char, _slot, match, *_ = line.split("\t")
-            if han_script_for_char(char) != han_script_for_char(match):
+            if "぀" <= match[0] <= "ヿ":
+                continue  # kana prototypes are filtered out of the codec
+            if not codec.encode_text(match):
                 failures.append((char, match))
         assert not failures, failures[:10]
 
     def test_mixed_han_and_kana_split_into_maximal_runs(self):
         from src.data.script_detect import split_by_script
-        assert split_by_script("山語川", "han_sparse") == [
-            ("山", "han_sparse"),
-            ("語", "han_dense"),
-            ("川", "han_sparse"),
-        ]
-        assert split_by_script("山かな語", "han_sparse") == [
-            ("山", "han_sparse"),
+        assert split_by_script("山語川", "han") == [("山語川", "han")]
+        assert split_by_script("山かな語", "han") == [
+            ("山", "han"),
             ("かな", "kana"),
-            ("語", "han_dense"),
+            ("語", "han"),
         ]
         assert split_by_script("かな。", "kana") == [
             ("かな", "kana"),
-            ("。", "han_sparse"),
+            ("。", "han"),
         ]
-
-    def test_group_ctc_module_has_two_heads(self):
-        from src.model.blocks import GroupCTCModule
-        sizes = [_get_split_codec(s).vocab_size
-                 for s in ("han_sparse", "han_dense")]
-        module = GroupCTCModule(
-            enc_dim=32,
-            script_vocab_sizes=sizes,
-            script_names=["han_sparse", "han_dense"],
-        )
-        assert len(module.heads) == 2
-        assert [head.vocab_size for head in module.heads] == sizes
-
-    def test_legacy_checkpoint_warm_starts_both_heads(self):
-        import torch
-        from src.training.taxonomy_checkpoint import migrate_taxonomy_state
-
-        old = _get_codec()
-        sparse = _get_split_codec("han_sparse")
-        dense = _get_split_codec("han_dense")
-        old_weight = torch.arange(old.vocab_size * 2, dtype=torch.float32).reshape(-1, 2)
-        old_bias = torch.arange(old.vocab_size, dtype=torch.float32)
-        old_expert = torch.ones(2, 2)
-        state = {
-            "ctc_modules.0.heads.0.proj.weight": old_weight,
-            "ctc_modules.0.heads.0.proj.bias": old_bias,
-            "script_layers.0.routed_mlps.0.fc1.weight": old_expert,
-        }
-        current = {
-            "ctc_modules.0.heads.0.proj.weight": torch.zeros(sparse.vocab_size, 2),
-            "ctc_modules.0.heads.0.proj.bias": torch.zeros(sparse.vocab_size),
-            "ctc_modules.0.heads.1.proj.weight": torch.zeros(dense.vocab_size, 2),
-            "ctc_modules.0.heads.1.proj.bias": torch.zeros(dense.vocab_size),
-            "script_layers.0.routed_mlps.6.fc1.weight": torch.zeros(2, 2),
-        }
-        changed = migrate_taxonomy_state(
-            state,
-            current,
-            {"group_script_names": [["han"]]},
-            {"group_script_names": [["han_sparse", "han_dense"]]},
-        )
-        assert changed == 5
-        assert torch.equal(state["ctc_modules.0.heads.0.proj.weight"][0], old_weight[0])
-        assert torch.equal(state["ctc_modules.0.heads.1.proj.weight"][0], old_weight[0])
-        dense_token = dense.tokens.index("語") + 1
-        old_token = old.tokens.index("語") + 1
-        assert torch.equal(
-            state["ctc_modules.0.heads.1.proj.weight"][dense_token],
-            old_weight[old_token],
-        )
-        assert torch.equal(
-            state["script_layers.0.routed_mlps.6.fc1.weight"],
-            old_expert,
-        )

@@ -10,7 +10,6 @@ All scripts derive their vocab from config.py:
 """
 
 from src.encoding.decompose import script_vocab_size
-from src.encoding.han_split import HAN_SCRIPTS
 
 
 BLANK_TOKEN = "∅"  # ∅ — CTC blank, always token index 0
@@ -33,6 +32,6 @@ def build_script_vocab(script: str) -> list[str]:
         return [BLANK_TOKEN] + get_fusion_codec(script).tokens
     if script == "korean":
         return [BLANK_TOKEN] + get_korean_codec().tokens
-    if script in HAN_SCRIPTS or script == "han":
-        return [BLANK_TOKEN] + get_han_codec(script).tokens
+    if script == "han":
+        return [BLANK_TOKEN] + get_han_codec().tokens
     raise ValueError(f"Unknown script: {script}")
