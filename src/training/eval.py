@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from src.encoding.decompose import decode_ids, encode_text, script_vocab_size
+from src.encoding.direction import ctc_time_order
 from src.training.losses import compute_lid1_loss
 from src.training.routing import build_frame_labels_from_segments
 
@@ -86,7 +87,11 @@ def _batched_ctc_val_loss(logits, segments_batch, group_script_names,
         concat_targets = []
 
         for i, sg in enumerate(segs):
-            batched_logits[:sg["seg_len"], i, :] = logits[sg["b"], sg["frame_start"]:sg["frame_end"], :vs]
+            seg_logits = logits[
+                sg["b"], sg["frame_start"]:sg["frame_end"], :vs]
+            script_name = group_script_names[g][s]
+            batched_logits[:sg["seg_len"], i, :] = ctc_time_order(
+                seg_logits, script_name)
             input_lens[i] = sg["seg_len"]
             target_lens[i] = len(sg["ids"])
             concat_targets.extend(sg["ids"])
@@ -252,7 +257,9 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
                 else:
                     vs = script_vocab_size(script_name)
 
-                seq_gpu = logits_gpu[i, frame_start:frame_end, :vs].argmax(dim=-1)
+                seg_logits = logits_gpu[i, frame_start:frame_end, :vs]
+                seq_gpu = ctc_time_order(
+                    seg_logits, script_name).argmax(dim=-1)
                 seg_gpu_preds.append(
                     (seg_g, seg_s, script_name, ref_s, seq_gpu))
 

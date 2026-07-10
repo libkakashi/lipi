@@ -10,6 +10,7 @@ Handles:
 """
 
 import random
+import unicodedata
 
 import numpy as np
 from PIL import Image
@@ -139,6 +140,103 @@ def render_word(text: str, font_path: str, height: int = 32,
 # ---------------------------------------------------------------------------
 # Baseline line composition
 # ---------------------------------------------------------------------------
+
+_RTL_BIDI_CLASSES = frozenset({"R", "AL"})
+
+
+def _unit_direction(blocks: list, text_index: int) -> str | None:
+    """Return the first strong/number direction in a logical block unit."""
+    number_direction = None
+    for block in blocks:
+        for char in block[text_index]:
+            bidi = unicodedata.bidirectional(char)
+            if bidi in _RTL_BIDI_CLASSES:
+                return "rtl"
+            if bidi == "L":
+                return "ltr"
+            if bidi in {"EN", "AN"}:
+                number_direction = "ltr"
+    return number_direction
+
+
+def visual_order_blocks(blocks: list, text_index: int) -> list:
+    """Reorder logical word blocks into left-to-right canvas order.
+
+    Glyphs inside each block have already been shaped by Raqm. This applies
+    the remaining paragraph-level ordering at block granularity: RTL word
+    runs are reversed, LTR runs retain their order, and run order follows
+    the paragraph base direction. Whitespace widths are then reinserted
+    between the visual units.
+
+    A unit is the sequence of adjacent non-whitespace blocks between gaps;
+    this keeps split punctuation/number pieces attached to their word.
+    """
+    if len(blocks) < 2:
+        return blocks
+
+    units: list[list] = []
+    separators: list[list] = []
+    current: list = []
+    pending_gaps: list = []
+
+    for block in blocks:
+        if block[0] is None:
+            if current:
+                units.append(current)
+                current = []
+            pending_gaps.append(block)
+            continue
+        if pending_gaps:
+            separators.append(pending_gaps)
+            pending_gaps = []
+        current.append(block)
+    if current:
+        units.append(current)
+
+    if len(units) < 2:
+        direction = _unit_direction(units[0], text_index) if units else None
+        ordered = list(reversed(units[0])) if direction == "rtl" else blocks
+        return ordered + pending_gaps
+
+    directions = [_unit_direction(unit, text_index) for unit in units]
+    base = next((direction for direction in directions if direction), "ltr")
+
+    # Resolve neutral-only units from their neighbors, then paragraph base.
+    for i, direction in enumerate(directions):
+        if direction is not None:
+            continue
+        before = next((directions[j] for j in range(i - 1, -1, -1)
+                       if directions[j] is not None), None)
+        after = next((directions[j] for j in range(i + 1, len(directions))
+                      if directions[j] is not None), None)
+        directions[i] = before if before == after and before else base
+
+    runs: list[tuple[str, list[list]]] = []
+    for unit, direction in zip(units, directions):
+        if not runs or runs[-1][0] != direction:
+            runs.append((direction, [unit]))
+        else:
+            runs[-1][1].append(unit)
+
+    if base == "rtl":
+        runs.reverse()
+
+    visual_units = []
+    for direction, run_units in runs:
+        if direction == "rtl":
+            run_units.reverse()
+            visual_units.extend([list(reversed(unit)) for unit in run_units])
+        else:
+            visual_units.extend(run_units)
+
+    ordered = []
+    for i, unit in enumerate(visual_units):
+        ordered.extend(unit)
+        if i < len(separators):
+            ordered.extend(separators[i])
+    ordered.extend(pending_gaps)
+    return ordered
+
 
 def compose_line_baseline(blocks: list, target_h: int
                           ) -> tuple[Image.Image, list, float] | None:

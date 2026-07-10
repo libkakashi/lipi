@@ -8,6 +8,7 @@ merging primary and extra files (e.g., latin.txt + english_common.txt + french.t
 import bisect
 import itertools
 import random
+import unicodedata
 from pathlib import Path
 
 WORD_LIST_DIR = Path(__file__).parent.parent.parent / "training_data" / "word_lists"
@@ -101,6 +102,39 @@ _SCRIPT_EXTRA_FILES = {
     "kana": ["japanese.txt"],
 }
 
+_RTL_ALLOWED_CHARS: dict[str, frozenset[str]] = {}
+
+
+def _rtl_word_is_encodable(word: str, script: str) -> bool:
+    """Reject RTL entries whose rendered characters would be dropped.
+
+    ASCII is allowed because generation splits it into a Latin segment.
+    Non-ASCII characters must belong to the corresponding codec. Format
+    controls are intentionally rejected: they affect bidi/shaping but have no
+    visible CTC alignment and were previously discarded from the target.
+    """
+    if script not in {"arabic", "hebrew"}:
+        return True
+
+    from src.encoding.config import FUSION_BASE_CHARS, NO_FUSION_SCRIPTS
+
+    allowed = _RTL_ALLOWED_CHARS.get(script)
+    if allowed is None:
+        chars = (FUSION_BASE_CHARS[script] if script == "arabic"
+                 else NO_FUSION_SCRIPTS[script].chars)
+        allowed = frozenset(chars)
+        _RTL_ALLOWED_CHARS[script] = allowed
+
+    for char in word:
+        if unicodedata.category(char) == "Cf":
+            return False
+        cp = ord(char)
+        if char.isspace() or 0x21 <= cp <= 0x7E:
+            continue
+        if char not in allowed:
+            return False
+    return True
+
 
 def load_word_list(script: str) -> list[str]:
     """Load and merge all word list files for a script.
@@ -115,8 +149,9 @@ def load_word_list(script: str) -> list[str]:
     for path in files:
         if path.exists():
             for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
-                w = line.strip()
-                if 2 <= len(w) <= 15 and not w[0].isdigit():
+                w = unicodedata.normalize("NFC", line.strip())
+                if (2 <= len(w) <= 15 and not w[0].isdigit()
+                        and _rtl_word_is_encodable(w, script)):
                     words.append(w)
 
     if words:

@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.model.encoder import LipiMoEEncoder
 from src.model.memory import find_bucket_capacities
+from src.encoding.direction import CTC_DIRECTION_VERSION
 from src.taxonomy import SCRIPT_TO_GROUP, NUM_GROUPS, GROUPS
 from src.training.dataloader import (
     build_script_tokenizers, collate_moe, BucketBatchSampler,
@@ -503,9 +504,17 @@ def resume_from_checkpoint(args, model, optimizer, base_optimizer, scaler, sched
     cur_param_count = sum(len(pg["params"]) for pg in base_optimizer.param_groups)
     groups_changed = ckpt_groups != cur_groups or ckpt_param_count != cur_param_count
     freeze_mode = hasattr(args, 'freeze_except') and args.freeze_except is not None
+    direction_changed = (
+        "model_config" in ckpt
+        and ckpt.get("ctc_direction_version", 1) < CTC_DIRECTION_VERSION
+    )
+    if direction_changed:
+        print("  RTL CTC objective upgraded: keeping model weights but "
+              "resetting optimizer and EMA state")
     if "optimizer" not in ckpt:
         print("  No optimizer state in checkpoint (fresh optimizer)")
-    elif skipped or dtype_changed or groups_changed or freeze_mode:
+    elif (skipped or dtype_changed or groups_changed or freeze_mode
+          or direction_changed):
         reasons = []
         if skipped:
             reasons.append("vocab changed")
@@ -515,12 +524,14 @@ def resume_from_checkpoint(args, model, optimizer, base_optimizer, scaler, sched
             reasons.append(f"param groups changed ({ckpt_groups}→{cur_groups})")
         if freeze_mode:
             reasons.append(f"freeze mode ({args.freeze_except})")
+        if direction_changed:
+            reasons.append("RTL CTC objective changed")
         print(f"  Skipping optimizer state ({', '.join(reasons)})")
     else:
         optimizer.load_state_dict(ckpt["optimizer"])
     if "scaler" in ckpt:
         scaler.load_state_dict(ckpt["scaler"])
-    ema_state = ckpt.get("ema")
+    ema_state = None if direction_changed else ckpt.get("ema")
     start_epoch = ckpt.get("epoch", 0) + 1
 
     # Always rebuild scheduler on resume — checkpoint might have a different
@@ -556,6 +567,7 @@ def save_checkpoint(model, optimizer, scheduler, scaler, epoch, args, save_dir,
         "scaler": scaler.state_dict(),
         "epoch": epoch,
         "args": vars(args),
+        "ctc_direction_version": CTC_DIRECTION_VERSION,
     }
     if ema is not None:
         payload["ema"] = ema.state_dict()

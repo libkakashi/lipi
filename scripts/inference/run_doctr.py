@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.data.color import rgb_to_input
 from src.encoding.decompose import decode_ids, script_vocab_size
+from src.encoding.direction import ctc_time_order
 from src.model.encoder import LipiMoEEncoder
 from src.taxonomy import GROUPS, GROUP_SCRIPTS, SCRIPTS, SCRIPT_TO_GROUP, GROUP_TO_ID, SCRIPT_TO_ID
 
@@ -350,6 +351,7 @@ def _decode_one(logits_i, group_id, script_logits_list, batch_idx, mask_offset,
     local_script_id = min(local_script_id, len(group_scripts) - 1)
     script_name = group_scripts[local_script_id]
     vs = script_vocab_size(script_name)
+    logits_i = ctc_time_order(logits_i, script_name)
     ids = ctc_decode(logits_i, vs)
     text = decode_ids(ids, script_name)
     conf = ctc_confidence(logits_i, vs)
@@ -445,8 +447,10 @@ def recognize_crops(model, crops: list[dict], script_names: list[list[str]],
 
         for b, idx in enumerate(indices):
             group_id = all_group_ids[b].item()
+            valid_t = tensors[b].shape[2] // model.time_downsample
             script_name, text, conf = _decode_one(
-                all_logits[b], group_id, output["script_logits_per_group"],
+                all_logits[b, :valid_t], group_id,
+                output["script_logits_per_group"],
                 b, 0, script_names, script_filter)
 
             corrected = False

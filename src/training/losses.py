@@ -19,6 +19,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from src.encoding.decompose import encode_text as _encode_text, script_vocab_size
+from src.encoding.direction import is_rtl_script
 
 
 # Cache encoded token sequences — segments repeat the same (text, script)
@@ -276,6 +277,7 @@ def compute_ctc_loss_segments(
             buckets.setdefault((g, s), []).append({
                 "b": b, "frame_start": frame_start, "frame_end": frame_end,
                 "seg_len": seg_len, "ids": ids, "vs": vs,
+                "rtl": is_rtl_script(script_name),
             })
 
     ctc_loss = torch.zeros(1, device=device)
@@ -302,8 +304,13 @@ def compute_ctc_loss_segments(
         input_lens = torch.tensor([sg["seg_len"] for sg in chunk_segs],
                                   dtype=torch.long, device=device)
         steps = torch.arange(max_T, device=device)
-        t_idx = torch.minimum(f_start[:, None] + steps[None, :],
-                              (f_start + input_lens - 1)[:, None])
+        if chunk_segs[0]["rtl"]:
+            frame_last = f_start + input_lens - 1
+            t_idx = torch.maximum(frame_last[:, None] - steps[None, :],
+                                  f_start[:, None])
+        else:
+            t_idx = torch.minimum(f_start[:, None] + steps[None, :],
+                                  (f_start + input_lens - 1)[:, None])
         gathered = logits[b_idx[:, None], t_idx, :vs]  # (N, max_T, vs)
 
         log_probs = gathered.permute(1, 0, 2).float().log_softmax(dim=-1)
@@ -359,5 +366,4 @@ def compute_ctc_loss_segments(
     if ctc_chars > 0:
         ctc_loss = ctc_loss / ctc_chars
     return ctc_loss
-
 

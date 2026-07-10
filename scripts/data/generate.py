@@ -41,7 +41,7 @@ from src.encoding.vocab import build_script_vocab
 from src.data.rendering import (
     render_word, render_emoji, image_has_ink,
     resize_or_pad, filter_fonts_by_cmap, font_covers_text,
-    compose_line_baseline,
+    compose_line_baseline, visual_order_blocks,
 )
 from src.data.text_renderer import render_word_baseline, pick_weight
 from src.data.fonts import find_fonts_for_script, build_weighted_font_list
@@ -642,6 +642,8 @@ def _render_plan_line(plan, fonts_by_script, h, mw):
     if not blocks or not any(b[2] for b in blocks):
         return None
 
+    full_label = "".join(block[2] for block in blocks if block[2])
+    blocks = visual_order_blocks(blocks, text_index=2)
     composed = compose_line_baseline(blocks, h)
     if composed is None:
         return None
@@ -652,7 +654,6 @@ def _render_plan_line(plan, fonts_by_script, h, mw):
 
     group_labels = np.full(final_w, BLANK_ID, dtype=np.int32)
     segments = []
-    full_label = ""
     for text, gid, sid, x, wnat, _y in placed:
         if not text:
             continue
@@ -663,7 +664,6 @@ def _render_plan_line(plan, fonts_by_script, h, mw):
         group_labels[o:e] = gid
         segments.append({"group_id": gid, "script_id": sid,
                          "text": text, "width": e - o, "offset": o})
-        full_label += text
     if not segments:
         return None
     return line_img, full_label, group_labels, segments
@@ -743,11 +743,13 @@ def _render_plan_ransom(plan, fonts_by_script, h, mw, word_pools):
     if not blocks or total_w == 0 or not any(b[1] for b in blocks):
         return None
 
+    full_label = "".join(block[1] for block in blocks if block[1])
+    blocks = visual_order_blocks(blocks, text_index=1)
+
     # Compose: concatenate all blocks
     combined = Image.new("RGB", (total_w, h), (255, 255, 255))
     group_labels = np.full(total_w, BLANK_ID, dtype=np.int32)
     segments = []
-    full_label = ""
     offset = 0
 
     for block_img, text, gid, sid, bw in blocks:
@@ -759,7 +761,6 @@ def _render_plan_ransom(plan, fonts_by_script, h, mw, word_pools):
                     "group_id": gid, "script_id": sid,
                     "text": text, "width": bw, "offset": offset,
                 })
-                full_label += text
         offset += bw
 
     # Resize/pad to target dimensions

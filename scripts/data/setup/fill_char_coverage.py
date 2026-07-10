@@ -18,7 +18,11 @@ Usage:
 
 import argparse
 import random
+import sys
+import unicodedata
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 WORD_LIST_DIR = Path(__file__).parent.parent.parent / "training_data" / "word_lists"
 
@@ -312,24 +316,19 @@ def fill_korean() -> list[str]:
 # ---- Arabic / Hebrew ----
 
 def fill_arabic() -> list[str]:
-    """Add Arabic characters in word context."""
+    """Add encodable Arabic letters and marks in shaped word context."""
+    from src.encoding.config import FUSION_BASE_CHARS
+
     words = []
-    # Basic Arabic block — all characters
-    for cp in range(0x0600, 0x06FF):
-        c = chr(cp)
-        if c.isprintable() and not c.isspace():
-            # Wrap in alef + char + ba for context
+    for c in FUSION_BASE_CHARS["arabic"]:
+        if not 0x0600 <= ord(c) <= 0x06FF:
+            continue
+        category = unicodedata.category(c)
+        if category == "Lo":
+            # HarfBuzz derives positional glyph forms from these base letters.
             words.append("\u0627" + c + "\u0628")
-    # Arabic Supplement
-    for cp in range(0x0750, 0x077F):
-        c = chr(cp)
-        if c.isprintable() and not c.isspace():
-            words.append("\u0627" + c + "\u0628")
-    # Presentation forms (important for positional rendering)
-    for cp in range(0xFE70, 0xFEFF):
-        c = chr(cp)
-        if c.isprintable() and not c.isspace():
-            words.append(c + "\u0627")
+        elif category.startswith("M"):
+            words.append("\u0628" + c)
     return words
 
 

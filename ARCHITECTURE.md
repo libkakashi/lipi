@@ -114,7 +114,9 @@ Per-script aggregate: Linear(512→256)
 ```
 LayerNorm(256) → per-script Linear(256→vocab_size)
 
-CTC greedy decode: argmax → collapse repeats → remove blanks → token IDs → text
+CTC traversal: LTR scripts use frames left→right; Arabic/Hebrew reverse each
+segment's frame slice so time follows logical reading order.
+Greedy decode: argmax → collapse repeats → remove blanks → token IDs → text
 ```
 
 ---
@@ -149,7 +151,7 @@ CTC greedy decode: argmax → collapse repeats → remove blanks → token IDs �
 | Fusion | devanagari, bengali, gujarati, gurmukhi, odia, kannada, telugu, malayalam, tamil, sinhala, thai, lao, burmese, khmer | base chars + virama-pair conjuncts |
 | CJK | han | single-token frequent chars + ALT-slot visual similarity for rare chars |
 | Korean | korean | jamo decomposition (onset + vowel + coda) |
-| Arabic | arabic | positional forms (isolated/initial/medial/final) |
+| Arabic | arabic | base characters + frequent diacritic grapheme clusters; HarfBuzz shapes positional glyph forms |
 
 ASCII punctuation and digits are in every codec's vocab but labeled as latin in training data so LID-1 learns to route them to the latin expert.
 
