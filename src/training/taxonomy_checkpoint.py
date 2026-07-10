@@ -47,6 +47,12 @@ def _layout(group_script_names: list[list[str]]) -> tuple[
     names = set(locations)
     if HAN_DENSE in names and "emoji" in names:
         flat_ids = {name: i for i, name in enumerate(_HAN_EMOJI_SCRIPT_ORDER)}
+    elif HAN_DENSE in names and names == set(SCRIPT_TO_ID):
+        # Full-taxonomy checkpoints from the current era store experts at
+        # stable global IDs (han_dense last), not group/local flatten order.
+        # Script IDs never renumber — new scripts append — so today's
+        # SCRIPT_TO_ID stays valid for these names under future taxonomies.
+        flat_ids = dict(SCRIPT_TO_ID)
     else:
         flat_ids = {}
         flat = 0
