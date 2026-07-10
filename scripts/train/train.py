@@ -41,7 +41,7 @@ from src.taxonomy import (
 )
 from src.training.dataloader import (
     build_script_tokenizers, collate_moe, BucketBatchSampler,
-    compute_bucket_edges, LipiStreamingDataset,
+    compute_bucket_edges, LipiStreamingDataset, load_shard_metadata,
 )
 from src.training.losses import (
     compute_lid1_loss, compute_lid2_loss, compute_ctc_loss_segments,
@@ -257,23 +257,9 @@ def load_and_prepare_data(args, device):
     data_path = Path(args.data)
     print(f"\nLoading data from {data_path}/...")
 
-    # Load metadata
-    meta_path = data_path / "metadata.pt"
-    if not meta_path.exists():
-        # Check parent for metadata (MDS dirs are data_path/train, data_path/val)
-        meta_path = data_path.parent / "metadata.pt"
-    if meta_path.exists():
-        meta = torch.load(meta_path, weights_only=False)
-        if ("han" in meta.get("active_scripts", [])
-                and meta.get("han_split_version", 0) < HAN_SPLIT_VERSION):
-            raise RuntimeError(
-                "These shards predate the han_sparse/han_dense split. "
-                "Their Han word blocks have no per-run complexity labels; "
-                "regenerate the shards before training the split heads.")
-        if "emoji" in meta.get("active_scripts", []):
-            raise RuntimeError(
-                "These shards contain the removed Emoji script/group. "
-                "Regenerate them with the current 14-group taxonomy.")
+    # Load metadata; rejects shards generated under an older taxonomy
+    meta = load_shard_metadata(data_path)
+    if meta is not None:
         active_scripts = meta["active_scripts"]
     else:
         active_scripts = list(SCRIPT_TO_GROUP.keys())

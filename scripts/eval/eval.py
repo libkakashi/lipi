@@ -24,6 +24,7 @@ from src.training.checkpoint import normalize_model_state_keys
 from src.taxonomy import SCRIPT_TO_GROUP, NUM_GROUPS, GROUPS
 from src.training.dataloader import (
     build_script_tokenizers, collate_moe, LipiStreamingDataset,
+    load_shard_metadata,
 )
 from src.training.eval import evaluate
 from src.training.taxonomy_checkpoint import (
@@ -60,8 +61,9 @@ def main():
     group_tokenizers, group_script_vocab_sizes, group_script_names = build_script_tokenizers(
         all_scripts, active_groups)
 
-    # Load validation data
+    # Load validation data; rejects shards generated under an older taxonomy
     data_path = Path(args.data)
+    load_shard_metadata(data_path)
     val_dir = str(data_path / "val")
     val_dataset = LipiStreamingDataset(
         local=val_dir, active_scripts=all_scripts,

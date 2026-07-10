@@ -17,11 +17,51 @@ from torch.utils.data import Dataset, Sampler
 
 from streaming import Stream, StreamingDataset
 
-from src.taxonomy import SCRIPT_TO_GROUP, SCRIPT_TO_ID, GROUP_TO_ID, NUM_GROUPS
+from src.encoding.han_split import HAN_SPLIT_VERSION
+from src.taxonomy import (
+    SCRIPT_TO_GROUP, SCRIPT_TO_ID, GROUP_TO_ID, NUM_GROUPS, TAXONOMY_VERSION,
+)
 from src.data.augmentation import (
     AUGMENT_OPS, SCENARIO_CHAINS, X_TRANSFORM_OPS, RandAugmentOCR,
 )
 from src.encoding.decompose import encode_text, script_vocab_size
+
+
+# ---------------------------------------------------------------------------
+# Shard metadata
+# ---------------------------------------------------------------------------
+
+def load_shard_metadata(data_path: Path) -> dict | None:
+    """Load shard metadata and reject shards from an older taxonomy.
+
+    Shards store numeric script/group IDs, so any taxonomy renumbering
+    silently mislabels every sample generated before it. Metadata lives next
+    to the shard dir or one level up (MDS layouts use data_path/train,val).
+    Returns the metadata dict, or None when no metadata.pt exists.
+    """
+    meta_path = data_path / "metadata.pt"
+    if not meta_path.exists():
+        meta_path = data_path.parent / "metadata.pt"
+    if not meta_path.exists():
+        return None
+    meta = torch.load(meta_path, weights_only=False)
+    if ("han" in meta.get("active_scripts", [])
+            and meta.get("han_split_version", 0) < HAN_SPLIT_VERSION):
+        raise RuntimeError(
+            "These shards predate the han_sparse/han_dense split. "
+            "Their Han word blocks have no per-run complexity labels; "
+            "regenerate the shards before training the split heads.")
+    if "emoji" in meta.get("active_scripts", []):
+        raise RuntimeError(
+            "These shards contain the removed Emoji script/group. "
+            "Regenerate them with the current 14-group taxonomy.")
+    if meta.get("taxonomy_version", 1) < TAXONOMY_VERSION:
+        raise RuntimeError(
+            f"These shards use taxonomy v{meta.get('taxonomy_version', 1)} "
+            f"numeric script/group IDs; current is v{TAXONOMY_VERSION}. "
+            "IDs shifted when the taxonomy changed, so old shards would "
+            "silently mislabel scripts. Regenerate the shards.")
+    return meta
 
 
 # ---------------------------------------------------------------------------
