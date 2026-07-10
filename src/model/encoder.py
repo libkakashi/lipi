@@ -39,7 +39,7 @@ from src.model.blocks import (
     ConvStem, ConvNeXtBlock, BlurPool2d, LayerScale, SWABlock, MoELayer,
     GroupCTCModule, _patch_merge_h, _per_sample_key_lens, _dynamo_disable,
 )
-from src.taxonomy import NUM_GROUPS, SCRIPTS, SCRIPT_TO_ID
+from src.taxonomy import NUM_GROUPS
 
 
 class LipiMoEEncoder(nn.Module):
@@ -117,29 +117,23 @@ class LipiMoEEncoder(nn.Module):
             group_script_names = [[f"s{i}" for i in range(len(vs))]
                                   for vs in group_script_vocab_sizes]
 
-        # Build flat script index: (group, local_script) → flat_id
+        # Build flat script index: (group, local_script) → flat_id.
+        # Flat IDs are plain group/local flatten order; since taxonomy v3,
+        # SCRIPT_TO_ID follows the same order, so full-taxonomy models get
+        # the global taxonomy ID for free (tests pin the invariant).
         self.total_scripts = sum(len(vs) for vs in group_script_vocab_sizes)
         self._flat_script_id = {}  # (g, s) → flat
         self._flat_to_group_script = {}  # flat → (g, s)
         self._group_script_counts = [len(vs) for vs in group_script_vocab_sizes]
-        names = [name for group_names in group_script_names
-                 for name in group_names]
-        use_stable_global_ids = (len(names) == len(SCRIPTS)
-                                 and set(names) == set(SCRIPTS))
         flat = 0
         for g, vs in enumerate(group_script_vocab_sizes):
             for s in range(len(vs)):
-                # Full-taxonomy models use the global taxonomy ID. This keeps
-                # every pre-split expert fixed and appends han_dense last,
-                # even though it is local script 1 inside group 4.
-                flat_id = (SCRIPT_TO_ID[group_script_names[g][s]]
-                           if use_stable_global_ids else flat)
-                self._flat_script_id[(g, s)] = flat_id
-                self._flat_to_group_script[flat_id] = (g, s)
+                self._flat_script_id[(g, s)] = flat
+                self._flat_to_group_script[flat] = (g, s)
                 flat += 1
         # Grouped CTC dispatch consumes frames sorted ascending by flat id,
-        # so heads must be visited in that order — (g, s) insertion order is
-        # NOT ascending once a stable global id lands mid-group (han_dense).
+        # so heads must be visited in that order. Flatten order already is
+        # ascending; the sort is cheap insurance against future reordering.
         self._heads_in_flat_order = sorted(
             self._flat_script_id.items(), key=lambda item: item[1])
 

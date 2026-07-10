@@ -32,6 +32,9 @@ Population and rough coverage (in the ARCHITECTURE.md ordering):
 
 # --- Scripts (individual writing systems) ---
 
+# Script IDs follow group/local flatten order — SCRIPT_TO_ID[s] equals the
+# position of s when GROUP_SCRIPTS is flattened in GROUPS order. The encoder
+# and shards rely on this invariant (tests pin it); keep the two in sync.
 SCRIPTS = [
     # Group 1: Latin
     "latin",       # 0
@@ -43,43 +46,45 @@ SCRIPTS = [
     # Group 4: Hebrew
     "hebrew",      # 4
     # Group 5: Han (Hanzi / Kanji / Hanja), split by glyph complexity
-    "han_sparse",  # 5 (renamed from han; numeric ID intentionally preserved)
+    "han_sparse",  # 5
+    "han_dense",   # 6
     # Group 6: Kana (hiragana + katakana, Japanese syllabaries)
-    "kana",        # 6
+    "kana",        # 7
     # Group 7: Korean
-    "korean",      # 7
+    "korean",      # 8
     # Group 8: N+E Indian Brahmic
-    "devanagari",  # 8
-    "gurmukhi",    # 9
-    "gujarati",    # 10
-    "bengali",     # 11
-    "odia",        # 12
+    "devanagari",  # 9
+    "gurmukhi",    # 10
+    "gujarati",    # 11
+    "bengali",     # 12
+    "odia",        # 13
     # Group 9: Dravidian North (curvy, similar stroke patterns)
-    "kannada",     # 13
-    "telugu",      # 14
-    "sinhala",     # 15
+    "kannada",     # 14
+    "telugu",      # 15
+    "sinhala",     # 16
     # Group 10: Dravidian South (round, loopy)
-    "malayalam",   # 16
-    "tamil",       # 17
+    "malayalam",   # 17
+    "tamil",       # 18
     # Group 11: SE Asian
-    "thai",        # 18
-    "lao",         # 19
-    "burmese",     # 20
-    "khmer",       # 21
+    "thai",        # 19
+    "lao",         # 20
+    "burmese",     # 21
+    "khmer",       # 22
     # Group 12: Caucasus
-    "armenian",    # 22
-    "georgian",    # 23
+    "armenian",    # 23
+    "georgian",    # 24
     # Group 13: Ethiopic
-    "ethiopic",    # 24
+    "ethiopic",    # 25
     # Group 14: Tibetan
-    "tibetan",     # 25
-    # Dense Han stays last so all scripts before the removed Emoji keep IDs.
-    "han_dense",   # 26
+    "tibetan",     # 26
 ]
 
 SCRIPT_TO_ID = {name: i for i, name in enumerate(SCRIPTS)}
 NUM_SCRIPTS = len(SCRIPTS)
-TAXONOMY_VERSION = 2
+# v3: han_dense moved from appended slot 26 to 6 (natural flatten order).
+# Bumped whenever numeric script/group IDs shift; shards are stamped with it
+# and load_shard_metadata refuses mismatches.
+TAXONOMY_VERSION = 3
 
 # Names found in shards/checkpoints created before the Han complexity split.
 SCRIPT_ALIASES = {"han": "han_sparse"}
@@ -121,6 +126,7 @@ SCRIPT_TO_GROUP = {
     "arabic": "arabic",
     "hebrew": "hebrew",
     "han_sparse": "han",
+    "han_dense": "han",
     "kana": "kana",
     "korean": "korean",
     "devanagari": "ne_indic",
@@ -141,7 +147,6 @@ SCRIPT_TO_GROUP = {
     "georgian": "caucasus",
     "ethiopic": "ethiopic",
     "tibetan": "tibetan",
-    "han_dense": "han",
 }
 
 GROUP_SCRIPTS = {

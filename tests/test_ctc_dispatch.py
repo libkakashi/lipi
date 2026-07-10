@@ -28,11 +28,13 @@ def _make_model():
 
 
 def _make_full_taxonomy_model():
-    """Full-taxonomy model, so stable global script IDs are in effect.
+    """Full-taxonomy model — flat IDs must match global SCRIPT_TO_ID.
 
-    han_dense then holds flat id 26 at (group 4, local 1), which breaks the
-    ascending relationship between (g, s) iteration order and flat id — the
-    dispatch loops must sort by flat id or frames get another head's logits.
+    Guards the dispatch-order regression: when han_dense briefly held an
+    appended global ID (26) at (group 4, local 1), (g, s) iteration order
+    stopped being ascending in flat ID and frames got another head's
+    logits. Flat IDs are flatten-ordered again, but these tests keep the
+    dispatch honest against any future reordering.
     """
     names = [list(GROUP_SCRIPTS[group]) for group in GROUPS]
     vocabs = [[24 + 2 * s for s in range(len(scripts))] for scripts in names]

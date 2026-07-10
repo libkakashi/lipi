@@ -18,16 +18,6 @@ _SCRIPT_EXPERT_RE = re.compile(
 _CTC_RE = re.compile(r"^ctc_modules\.(\d+)\.heads\.(\d+)(\..+)$")
 _LID2_RE = re.compile(r"^lid2_heads\.(\d+)(\..+)$")
 
-# The global expert order used by checkpoints after the Han split but before
-# Emoji removal. Pre-Han checkpoints used ordinary group/local flatten order.
-_HAN_EMOJI_SCRIPT_ORDER = [
-    "latin", "cyrillic", "greek", "arabic", "hebrew", "han_sparse",
-    "kana", "korean", "devanagari", "gurmukhi", "gujarati", "bengali",
-    "odia", "kannada", "telugu", "sinhala", "malayalam", "tamil",
-    "thai", "lao", "burmese", "khmer", "emoji", "armenian",
-    "georgian", "ethiopic", "tibetan", "han_dense",
-]
-
 
 def _group_name(scripts: list[str]) -> str:
     first = canonical_script_name(scripts[0])
@@ -44,22 +34,17 @@ def _layout(group_script_names: list[list[str]]) -> tuple[
         for local_id, script in enumerate(scripts):
             locations[script] = (group_id, local_id)
 
-    names = set(locations)
-    if HAN_DENSE in names and "emoji" in names:
-        flat_ids = {name: i for i, name in enumerate(_HAN_EMOJI_SCRIPT_ORDER)}
-    elif HAN_DENSE in names and names == set(SCRIPT_TO_ID):
-        # Full-taxonomy checkpoints from the current era store experts at
-        # stable global IDs (han_dense last), not group/local flatten order.
-        # Script IDs never renumber — new scripts append — so today's
-        # SCRIPT_TO_ID stays valid for these names under future taxonomies.
-        flat_ids = dict(SCRIPT_TO_ID)
-    else:
-        flat_ids = {}
-        flat = 0
-        for scripts in group_script_names:
-            for script in scripts:
-                flat_ids[script] = flat
-                flat += 1
+    # Expert flat IDs are group/local flatten order in every era: pre-split
+    # checkpoints matched their SCRIPT_TO_ID by construction, and since
+    # taxonomy v3 the invariant is explicit (SCRIPT_TO_ID == flatten order).
+    # The only exception — han-split-with-emoji checkpoints, which appended
+    # han_dense after emoji — never existed: no training ran in that window.
+    flat_ids = {}
+    flat = 0
+    for scripts in group_script_names:
+        for script in scripts:
+            flat_ids[script] = flat
+            flat += 1
     return groups, locations, flat_ids
 
 

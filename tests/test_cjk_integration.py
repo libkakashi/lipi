@@ -302,12 +302,12 @@ class TestUnifiedAPI:
 
 class TestHanComplexitySplit:
 
-    def test_taxonomy_names_and_stable_ids(self):
+    def test_taxonomy_names_and_flatten_ids(self):
         from src.taxonomy import GROUP_SCRIPTS, SCRIPT_TO_ID
         assert GROUP_SCRIPTS["han"] == ["han_sparse", "han_dense"]
         assert SCRIPT_TO_ID["han_sparse"] == 5
-        assert SCRIPT_TO_ID["han_dense"] == 26
-        assert SCRIPT_TO_ID["kana"] == 6
+        assert SCRIPT_TO_ID["han_dense"] == 6
+        assert SCRIPT_TO_ID["kana"] == 7
 
     def test_visual_complexity_examples(self):
         from src.encoding.han_split import (
@@ -396,7 +396,7 @@ class TestHanComplexitySplit:
             "ctc_modules.0.heads.0.proj.bias": torch.zeros(sparse.vocab_size),
             "ctc_modules.0.heads.1.proj.weight": torch.zeros(dense.vocab_size, 2),
             "ctc_modules.0.heads.1.proj.bias": torch.zeros(dense.vocab_size),
-            "script_layers.0.routed_mlps.26.fc1.weight": torch.zeros(2, 2),
+            "script_layers.0.routed_mlps.6.fc1.weight": torch.zeros(2, 2),
         }
         changed = migrate_taxonomy_state(
             state,
@@ -414,6 +414,6 @@ class TestHanComplexitySplit:
             old_weight[old_token],
         )
         assert torch.equal(
-            state["script_layers.0.routed_mlps.26.fc1.weight"],
+            state["script_layers.0.routed_mlps.6.fc1.weight"],
             old_expert,
         )
