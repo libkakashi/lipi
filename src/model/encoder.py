@@ -222,13 +222,23 @@ class LipiMoEEncoder(nn.Module):
         # Second (and last) width stride happens here.
         self.blur_bc = BlurPool2d(convb_ch, swac_in_ch, stride=(2, 2))
 
-        # ── in_height=64: one extra fixed vertical pool → SWA-C still
+        # ── in_height=64: one extra learned vertical merge → SWA-C still
         # sees 4 rows. The conv frontend extracts stroke features at 2×
-        # detail; the low-pass compresses them into channels. Equal
-        # channels → Identity proj → zero learnable parameters, so
-        # 32px checkpoints remain fully loadable.
-        self.blur_cd = (BlurPool2d(swac_in_ch, swac_in_ch, stride=(2, 1))
-                        if in_height == 64 else None)
+        # detail; concatenating row pairs (lossless) and projecting lets
+        # the model LEARN which vertical detail survives the compression,
+        # unlike a fixed low-pass which discards high vertical frequencies
+        # unconditionally. Initialized as the row-pair average, so it
+        # starts as plain pooling and specializes from there (same
+        # convention as merge_cd / merge_d1).
+        if in_height == 64:
+            self.merge_hc = nn.Linear(2 * swac_in_ch, swac_in_ch)
+            with torch.no_grad():
+                eye = torch.eye(swac_in_ch)
+                self.merge_hc.weight.copy_(
+                    torch.cat([0.5 * eye, 0.5 * eye], dim=1))
+                self.merge_hc.bias.zero_()
+        else:
+            self.merge_hc = None
 
         # ── SWA-C entry projection: swac_in_ch → swac_dim ─────────────
         # Kept as a 1×1 conv (channel-last equivalent) so the SWA-C blocks
@@ -383,6 +393,14 @@ class LipiMoEEncoder(nn.Module):
         # as a no-op and grows only if useful; also makes warm-starting
         # from pre-self-cond checkpoints exact).
         self.self_cond_ls = LayerScale(dim, init_value=0.0)
+
+        # Fine-detail tap: raw ConvB stroke features injected into the
+        # script-stack input, so the recognition heads see near-raw stroke
+        # evidence alongside the contextualized deep path (same idiom as
+        # the LID-1 texture tap and the self-cond feedback). Zero-init
+        # gate → exact no-op at warm start, grows only if useful.
+        self.detail_tap = nn.Linear(convb_ch, dim)
+        self.detail_tap_ls = LayerScale(dim, init_value=0.0)
 
         # Per-script CTC heads
         self.ctc_modules = nn.ModuleList([
@@ -552,13 +570,14 @@ class LipiMoEEncoder(nn.Module):
         # BlurPool s(2,2) 128→192: (8, W/2) → (4, W/4)
         x = self.blur_bc(x)
 
-        # in_height=64: extra fixed vertical pool (8, W/4) → (4, W/4)
-        if self.blur_cd is not None:
-            x = self.blur_cd(x)
-
         # SWA-C: switch to channel-last for SWA. (B, C, H, W) → (B, H*W, C).
-        _, C, h, w = x.shape  # h=4, w=W/4
+        _, C, h, w = x.shape  # h=4 (or 8 at in_height=64), w=W/4
         x = x.permute(0, 2, 3, 1).reshape(B, h * w, C)
+
+        # in_height=64: learned vertical merge (8, W/4) → (4, W/4)
+        if self.merge_hc is not None:
+            x, h = _patch_merge_h(x, h, w, self.merge_hc)
+
         x = self.swac_in_proj(x)  # C → swac_dim
         for blk in self.swa_c:
             x = blk(x, h, w)
@@ -772,6 +791,10 @@ class LipiMoEEncoder(nn.Module):
             self.norm(x), flat_scripts, script_lens_cpu)
         x = x + self.self_cond_ls(
             self._ctc_feedback(inter_logits, flat_scripts, script_lens_cpu))
+
+        # Fine-detail tap: per-frame ConvB stroke features (the same tex
+        # tensor LID-1 reads) into the script stack, gated at zero.
+        x = x + self.detail_tap_ls(self.detail_tap(tex.to(x.dtype)))
 
         for layer in self.script_layers:
             x = layer(x, flat_scripts, script_lens_cpu, w)

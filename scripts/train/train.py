@@ -130,6 +130,14 @@ def parse_args():
                              "script_ids.npy sidecar (regenerated shards).")
     # Model
     parser.add_argument("--dim", type=int, default=384)
+    parser.add_argument("--convb-ch", type=int, default=128,
+                        help="ConvB stage width. At --height 64 the input "
+                             "information doubles; 160 gives the high-res "
+                             "conv stages bandwidth to carry it.")
+    parser.add_argument("--swac-in-ch", type=int, default=192,
+                        help="Channel width entering SWA-C (post blur_bc "
+                             "and the h64 merge). 256 pairs with "
+                             "--convb-ch 160 at --height 64.")
     parser.add_argument("--height", type=int, default=32, choices=(32, 64),
                         help="Input line height. 64 adds one fixed vertical "
                              "BlurPool before SWA-C (zero new params) so the "
@@ -390,6 +398,8 @@ def build_model(args, n_groups, group_script_vocab_sizes, group_script_names, de
     device_type = device.type
     model = LipiMoEEncoder(
         dim=args.dim,
+        convb_ch=args.convb_ch,
+        swac_in_ch=args.swac_in_ch,
         num_groups=n_groups,
         group_script_vocab_sizes=group_script_vocab_sizes,
         group_script_names=group_script_names,
@@ -495,10 +505,10 @@ def resume_from_checkpoint(args, model, optimizer, base_optimizer, scaler, sched
     if getattr(args, 'skip_backbone_load', False):
         backbone_prefixes = (
             "stem.", "convA.", "convB.", "blur_ab.", "blur_bc.",
-            "swac_in_proj.", "swa_c.", "swa_d.",
+            "merge_hc.", "swac_in_proj.", "swa_c.", "swa_d.",
             "merge_cd.", "merge_d1.",
             "group_head.", "group_h_pool.", "lid1_attn.", "lid1_merge.",
-            "lid2_heads.", "norm.",
+            "lid2_heads.", "norm.", "detail_tap",
         )
         dropped = [k for k in model_state if any(k.startswith(p) for p in backbone_prefixes)]
         for k in dropped:

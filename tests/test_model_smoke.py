@@ -44,9 +44,9 @@ def test_model_forward_pass():
 
 
 def test_in_height_64_same_output_geometry_and_weights():
-    """in_height=64 adds only a fixed (param-free) vertical pool: output
-    shapes match the 32px model at the same width, and a 32px checkpoint
-    loads into a 64px model with zero missing/unexpected keys."""
+    """in_height=64 adds only the learned vertical merge (avg-init):
+    output shapes match the 32px model at the same width, and a 32px
+    checkpoint loads into a 64px model with only merge_hc fresh."""
     from src.model.encoder import LipiMoEEncoder
 
     kwargs = dict(
@@ -61,9 +61,15 @@ def test_in_height_64_same_output_geometry_and_weights():
     torch.manual_seed(0)
     m64 = LipiMoEEncoder(in_height=64, **kwargs)
 
-    # Full bidirectional weight compatibility.
-    result = m64.load_state_dict(m32.state_dict(), strict=True)
-    assert not result.missing_keys and not result.unexpected_keys
+    # Everything except the new merge transfers.
+    result = m64.load_state_dict(m32.state_dict(), strict=False)
+    assert not result.unexpected_keys
+    assert set(result.missing_keys) == {"merge_hc.weight", "merge_hc.bias"}
+    # The merge starts as the row-pair average (avg-init convention).
+    C = m64.merge_hc.weight.shape[0]
+    assert torch.equal(m64.merge_hc.weight[:, :C], 0.5 * torch.eye(C))
+    assert torch.equal(m64.merge_hc.weight[:, C:], 0.5 * torch.eye(C))
+    assert torch.equal(m64.merge_hc.bias, torch.zeros(C))
 
     B, W = 2, 64
     T = W // 4
@@ -83,6 +89,37 @@ def test_in_height_64_same_output_geometry_and_weights():
         raise AssertionError("expected height-mismatch ValueError")
     except ValueError as e:
         assert "in_height" in str(e)
+
+
+def test_detail_tap_is_noop_at_init():
+    """The fine-detail tap is gated by a zero-init LayerScale: outputs are
+    bit-identical whatever the tap projection holds, so warm-starting a
+    checkpoint that predates the tap is exact."""
+    from src.model.encoder import LipiMoEEncoder
+
+    torch.manual_seed(0)
+    model = LipiMoEEncoder(
+        dim=128,
+        num_groups=2,
+        group_script_vocab_sizes=[[100], [80, 120]],
+        group_script_names=[["test1"], ["test2a", "test2b"]],
+        drop_path_rate=0.0,
+    )
+    model.eval()
+    B, W = 2, 64
+    T = W // 4
+    imgs = torch.randn(B, 3, 32, W)
+    gids = torch.zeros(B, T, dtype=torch.long)
+    sids = torch.zeros(B, T, dtype=torch.long)
+
+    with torch.no_grad():
+        out1 = model(imgs, group_ids=gids, script_ids=sids)
+        model.detail_tap.weight.normal_()  # scramble the projection
+        model.detail_tap.bias.normal_()
+        out2 = model(imgs, group_ids=gids, script_ids=sids)
+    assert torch.equal(out1["logits"], out2["logits"])
+    assert torch.equal(model.detail_tap_ls.gamma,
+                       torch.zeros_like(model.detail_tap_ls.gamma))
 
 
 def test_model_inference_mode():
