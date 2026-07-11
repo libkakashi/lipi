@@ -29,13 +29,22 @@ class ModelEMA:
         self.updates = 0
         self.shadow = {n: p.detach().clone().float()
                        for n, p in model.named_parameters()}
+        # Aligned flat lists for the per-step foreach update: the model has
+        # ~900 parameter tensors (tiny MoE expert weights), and one lerp_
+        # launch per tensor cost ~4-6 ms/step in kernel-launch overhead.
+        self._param_list = [p for _, p in model.named_parameters()]
+        self._shadow_list = [self.shadow[n]
+                             for n, _ in model.named_parameters()]
 
     @torch.no_grad()
     def update(self, model: nn.Module):
         self.updates += 1
         d = min(self.decay, (1 + self.updates) / (10 + self.updates))
-        for n, p in model.named_parameters():
-            self.shadow[n].lerp_(p.detach().float(), 1.0 - d)
+        if self._param_list and self._param_list[0].dtype == torch.float32:
+            torch._foreach_lerp_(self._shadow_list, self._param_list, 1.0 - d)
+        else:
+            for n, p in model.named_parameters():
+                self.shadow[n].lerp_(p.detach().float(), 1.0 - d)
 
     @contextmanager
     def average_parameters(self, model: nn.Module):
@@ -70,6 +79,8 @@ class ModelEMA:
             if cur is None or cur.shape != t.shape:
                 skipped.append(n)
                 continue
-            self.shadow[n] = t.to(device=cur.device, dtype=cur.dtype)
+            # copy_ (not rebind) keeps the foreach update's aligned list
+            # pointing at the live shadow tensors.
+            cur.copy_(t.to(device=cur.device, dtype=cur.dtype))
         if skipped:
             print(f"  [ema] skipped {len(skipped)} mismatched shadow entries")

@@ -56,6 +56,9 @@ except (ImportError, AttributeError):
         return fn
 
 
+_mask_bias_cache: dict = {}
+
+
 @_dynamo_disable
 def _pad_wrap_mask_bias(nW: int, win_h: int, win_w: int, wp: int,
                         w_real: int, shift_w: int, n_batch: int,
@@ -67,10 +70,18 @@ def _pad_wrap_mask_bias(nW: int, win_h: int, win_w: int, wp: int,
     rejects ordering comparisons on booleans ("A Boolean argument can only be
     used in Eq and Ne"), crashing compilation. The mask is a pure function of
     the integer window geometry — no dependence on q/k/v values and no
-    gradient — so running it in eager Python is exact and cheap (win_size ≤
-    256) and lets the rest of attention compile. Returns
+    gradient — so it is cached per geometry: static bucket shapes mean only
+    a handful of keys exist for the life of a run, and rebuilding cost ~10
+    kernel launches plus an up-to-19MB repeat per attention call. Returns
     (n_batch, 1, win_size, win_size).
     """
+    key = (nW, win_h, win_w, wp, w_real, shift_w, str(device), dtype)
+    cached = _mask_bias_cache.get(key)
+    if cached is not None:
+        # Cache holds the compact (nW, 1, S, S) form (~KBs per key); the
+        # batch repeat is one cheap kernel. Caching post-repeat tensors
+        # would pin tens of MB per bucket shape.
+        return cached.repeat(n_batch // nW, 1, 1, 1)
     win_size = win_h * win_w
     # Per rolled column: pad = pre-roll column >= w_real;
     # wrap = the last shift_w rolled positions overall.
@@ -89,9 +100,10 @@ def _pad_wrap_mask_bias(nW: int, win_h: int, win_w: int, wp: int,
                & (~pad_win[:, None, :] | pad_win[:, :, None]))
     mask_bias = torch.zeros(nW, win_size, win_size, device=device, dtype=dtype)
     mask_bias.masked_fill_(~allowed, -100.0)
+    compact = mask_bias.unsqueeze(1)  # (nW, 1, win_size, win_size)
+    _mask_bias_cache[key] = compact
     # Repeat across sample batches: (B*nH*nW, 1, win_size, win_size)
-    reps = n_batch // nW
-    return mask_bias.unsqueeze(1).repeat(reps, 1, 1, 1)
+    return compact.repeat(n_batch // nW, 1, 1, 1)
 
 
 class DropPath(nn.Module):
@@ -290,11 +302,14 @@ class WindowedAttention(nn.Module):
 
             return flex_attention(q, k, v, score_mod=score_mod)
 
-        # Fallback: SDPA with explicit additive mask (math backend).
+        # Fallback: SDPA with explicit additive mask. The gathered bias
+        # must be contiguous: SDPA's mem-efficient backend rejects masks
+        # whose last dim is strided (this permute leaves stride 6), which
+        # silently forced the math backend on every call.
         win_size = win_h * win_w
         rel_bias = rel_pos_bias[rel_pos_index.view(-1)]
         rel_bias = rel_bias.view(win_size, win_size, -1).permute(2, 0, 1)
-        rel_bias = rel_bias.unsqueeze(0).to(q.dtype)
+        rel_bias = rel_bias.contiguous().unsqueeze(0).to(q.dtype)
 
         if shift_w > 0 or pad_w > 0:
             # Constant additive mask built eagerly (see _pad_wrap_mask_bias);
@@ -423,23 +438,30 @@ class MoELayer(nn.Module):
         ef = expert_ids.reshape(N)
         out = torch.zeros(N, D, dtype=x.dtype, device=x.device)
 
-        # Positions of routed frames, grouped into contiguous per-expert runs.
+        # Positions of routed frames, grouped into contiguous per-expert
+        # runs. With CPU counts available, M is known without touching the
+        # GPU: sort all N keys (invalid frames get key=num_experts, landing
+        # past position M) instead of nonzero+argsort — nonzero forces a
+        # GPU→CPU sync per call, one per MoE layer per step.
         valid = (ef >= 0) & (ef < self.num_experts)
-        pos = valid.nonzero(as_tuple=True)[0]  # (M,) flat positions
-        if pos.numel() == 0:
-            return out.reshape(B, T, D)
-        order = torch.argsort(ef.index_select(0, pos))  # group by expert id
-        pos = pos.index_select(0, order)
-        xg = xf.index_select(0, pos)  # (M, D) gathered, grouped by expert
-
-        # Per-expert slice sizes. Prefer the caller's precomputed counts
-        # (no GPU→CPU sync); fall back to bincount otherwise.
         if expert_lens_cpu is not None:
             counts = [sum(expert_lens_cpu[b][e] for b in range(B))
                       for e in range(self.num_experts)]
+            M = sum(counts)
+            if M == 0:
+                return out.reshape(B, T, D)
+            key = torch.where(valid, ef, ef.new_full((), self.num_experts))
+            order = torch.argsort(key, stable=True)
+            pos = order[:M]
         else:
+            pos = valid.nonzero(as_tuple=True)[0]  # (M,) flat positions
+            if pos.numel() == 0:
+                return out.reshape(B, T, D)
+            order = torch.argsort(ef.index_select(0, pos))
+            pos = pos.index_select(0, order)
             counts = torch.bincount(
                 ef[valid], minlength=self.num_experts).tolist()
+        xg = xf.index_select(0, pos)  # (M, D) gathered, grouped by expert
 
         chunks = []
         s = 0

@@ -13,6 +13,7 @@ Provides:
 
 import functools
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -115,6 +116,7 @@ def compute_lid2_loss(
     frame_group_ids: Tensor,
     frame_script_ids: Tensor,
     label_smoothing: float = 0.1,
+    present_groups: set[int] | None = None,
 ) -> Tensor:
     """LID-2 per-frame script cross-entropy within multi-script groups.
 
@@ -123,18 +125,36 @@ def compute_lid2_loss(
 
     lid2_logits_per_group: {group_id_str: (B, T, num_scripts_in_group)}.
     frame_group_ids / frame_script_ids: (B, T) — pre-truncated to match T.
+    present_groups: CPU-side set of group ids present in the batch (from
+        build_frame_labels_from_segments). When given, absent groups skip
+        with zero GPU work; masking goes through ignore_index instead of
+        boolean indexing, so the whole loss is sync-free.
     """
     device = frame_group_ids.device
     total = torch.zeros(1, device=device)
     n = 0
     for g_str, lid2_logits in lid2_logits_per_group.items():
         g = int(g_str)
-        mask = (frame_group_ids == g)
-        if not mask.any():
-            continue
-        total = total + F.cross_entropy(
-            lid2_logits[mask], frame_script_ids[mask],
-            label_smoothing=label_smoothing)
+        if present_groups is not None:
+            if g not in present_groups:
+                continue
+        else:
+            mask = frame_group_ids == g
+            if not mask.any():
+                continue
+        # Frames of other groups become ignore_index — same mean-over-
+        # valid-frames semantics as boolean masking, no nonzero() sync.
+        # sum/clamp(count) instead of reduction="mean" so a group whose
+        # frames were all truncated away contributes 0, not NaN.
+        in_group = frame_group_ids == g
+        targets = torch.where(in_group, frame_script_ids,
+                              frame_script_ids.new_full((), -100))
+        ce_sum = F.cross_entropy(
+            lid2_logits.reshape(-1, lid2_logits.shape[-1]),
+            targets.reshape(-1),
+            ignore_index=-100, label_smoothing=label_smoothing,
+            reduction="sum")
+        total = total + ce_sum / in_group.sum().clamp(min=1)
         n += 1
     if n > 0:
         total = total / n
@@ -226,16 +246,27 @@ def compute_ctc_loss_segments(
 
     Segments with the same (group, script) are padded to max length and
     processed in a single F.ctc_loss call instead of one call per segment.
+
+    Convenience wrapper over build_ctc_loss_plan + apply_ctc_loss_plan;
+    when the same segments feed several logits tensors (final + interCTC),
+    build the plan once and apply it to each.
     """
     device = logits.device
-    B, T, _ = logits.shape
+    plan = build_ctc_loss_plan(
+        segments_batch, logits.shape[1], group_script_names,
+        group_script_vocabs, device)
+    return apply_ctc_loss_plan(logits, plan, device)
 
-    # Group valid segments by (group, script) for batched CTC
+
+def _build_buckets(segments_batch, T, group_script_names,
+                   group_script_vocabs):
+    """Group valid segments by (group, script, direction) for batched CTC."""
     buckets: dict[tuple[int, int, bool], list[dict]] = {}
     skipped_no_script = 0
     skipped_no_ids = 0
     skipped_too_long = 0
     total_segs = 0
+    B = len(segments_batch)
 
     for b in range(B):
         for seg in segments_batch[b]:
@@ -283,60 +314,64 @@ def compute_ctc_loss_segments(
                 "rtl": seg_rtl,
             })
 
-    ctc_loss = torch.zeros(1, device=device)
+    return buckets, (total_segs, skipped_no_script, skipped_no_ids,
+                     skipped_too_long)
+
+
+# Cap per-call tensor size to limit peak memory for big-vocab buckets
+# (e.g. the Han head at ~3800 with many segments at long max_T).
+MAX_BUCKET_ELEMS = 32 * 1024 * 1024  # 32M fp32 = 128MB per padded tensor
+
+
+def _plan_from_buckets(buckets, device, stats):
+    """Assemble the logits-independent CTC work plan.
+
+    All indexing math (chunk membership, gather indices including the RTL
+    reversal, targets) happens in NumPy; the result crosses to the GPU in
+    three batched pinned uploads instead of ~5 syncing copies per chunk.
+    Length tensors stay on CPU — F.ctc_loss round-trips CUDA length
+    tensors back to CPU internally, one D2H sync each per call.
+    """
+    total_segs, skipped_no_script, skipped_no_ids, skipped_too_long = stats
+    chunks = []           # (n_start, N, max_T, vs, lens_cpu, tlens_cpu, t_off)
+    b_parts, t_parts, target_parts = [], [], []
+    n_rows = 0            # rows accumulated across chunks
+    t_elems = 0           # flat t_idx elements accumulated
+    tgt_count = 0
     ctc_chars = 0
 
-    # Cap per-call tensor size to limit peak memory for big-vocab buckets
-    # (e.g. Han heads at ~2000 with many segments at long max_T).
-    MAX_BUCKET_ELEMS = 32 * 1024 * 1024  # 32M fp32 = 128MB per padded tensor
-
-    def _run_chunk(chunk_segs, max_T, vs):
-        """Run batched CTC on one chunk, return (loss, n_chars)."""
+    def _add_chunk(chunk_segs, max_T, vs):
+        nonlocal n_rows, t_elems, tgt_count, ctc_chars
         N = len(chunk_segs)
-        # One advanced-index gather for the whole chunk. The old per-segment
-        # slice-copy loop (`batched[:len, i] = logits[b, fs:fe, :vs]`) made
-        # autograd allocate + accumulate a full-size (B, T, max_vocab)
-        # gradient buffer per segment in backward — hundreds per step, which
-        # dominated the entire training step. One indexing op has one
-        # scatter-add backward. Steps past a segment's end re-read its own
-        # last frame: always in-bounds, ignored by CTC (t >= input_len),
-        # and their grad is exactly zero, so the result is identical.
-        b_idx = torch.tensor([sg["b"] for sg in chunk_segs], device=device)
-        f_start = torch.tensor([sg["frame_start"] for sg in chunk_segs],
-                               device=device)
-        input_lens = torch.tensor([sg["seg_len"] for sg in chunk_segs],
-                                  dtype=torch.long, device=device)
-        steps = torch.arange(max_T, device=device)
+        f_start = np.array([sg["frame_start"] for sg in chunk_segs],
+                           dtype=np.int64)
+        lens = np.array([sg["seg_len"] for sg in chunk_segs], dtype=np.int64)
+        steps = np.arange(max_T, dtype=np.int64)
+        last = f_start + lens - 1
+        # Steps past a segment's end re-read its own last frame: always
+        # in-bounds, ignored by CTC (t >= input_len), grad exactly zero.
         if chunk_segs[0]["rtl"]:
-            frame_last = f_start + input_lens - 1
-            t_idx = torch.maximum(frame_last[:, None] - steps[None, :],
-                                  f_start[:, None])
+            t_idx = np.maximum(last[:, None] - steps[None, :],
+                               f_start[:, None])
         else:
-            t_idx = torch.minimum(f_start[:, None] + steps[None, :],
-                                  (f_start + input_lens - 1)[:, None])
-        gathered = logits[b_idx[:, None], t_idx, :vs]  # (N, max_T, vs)
-
-        log_probs = gathered.permute(1, 0, 2).float().log_softmax(dim=-1)
-        target_lens = torch.tensor([len(sg["ids"]) for sg in chunk_segs],
-                                   dtype=torch.long, device=device)
-        concat_targets = [i for sg in chunk_segs for i in sg["ids"]]
-        targets = torch.tensor(concat_targets, dtype=torch.long, device=device)
-
-        if device.type == "mps":
-            offset = 0
-            loss = torch.zeros(1, device=device)
-            for i in range(N):
-                U = target_lens[i].item()
-                T_i = input_lens[i].item()
-                lp_i = log_probs[:T_i, i:i+1, :]
-                tgt_i = targets[offset:offset + U]
-                offset += U
-                loss = loss + _ctc_loss_pure(lp_i, tgt_i, blank=0)
-            return loss, len(concat_targets)
-        else:
-            loss = F.ctc_loss(log_probs, targets, input_lens, target_lens,
-                              blank=0, reduction="sum", zero_infinity=True)
-            return loss, len(concat_targets)
+            t_idx = np.minimum(f_start[:, None] + steps[None, :],
+                               last[:, None])
+        b_parts.append(np.array([sg["b"] for sg in chunk_segs],
+                                dtype=np.int64))
+        t_parts.append(t_idx.reshape(-1))
+        targets = [i for sg in chunk_segs for i in sg["ids"]]
+        target_parts.append(np.array(targets, dtype=np.int64))
+        chunks.append((
+            n_rows, N, max_T, vs,
+            torch.from_numpy(lens),
+            torch.tensor([len(sg["ids"]) for sg in chunk_segs],
+                         dtype=torch.long),
+            t_elems, tgt_count,
+        ))
+        n_rows += N
+        t_elems += N * max_T
+        tgt_count += len(targets)
+        ctc_chars += len(targets)
 
     for (g, s, _), segs in buckets.items():
         vs = segs[0]["vs"]
@@ -348,17 +383,13 @@ def compute_ctc_loss_segments(
             new_max_T = max(chunk_max_T, sg["seg_len"])
             new_elems = new_max_T * (len(chunk) + 1) * vs
             if chunk and new_elems > MAX_BUCKET_ELEMS:
-                loss, n = _run_chunk(chunk, chunk_max_T, vs)
-                ctc_loss = ctc_loss + loss
-                ctc_chars += n
+                _add_chunk(chunk, chunk_max_T, vs)
                 chunk = []
                 chunk_max_T = 0
             chunk.append(sg)
             chunk_max_T = max(chunk_max_T, sg["seg_len"])
         if chunk:
-            loss, n = _run_chunk(chunk, chunk_max_T, vs)
-            ctc_loss = ctc_loss + loss
-            ctc_chars += n
+            _add_chunk(chunk, chunk_max_T, vs)
 
     skip_total = skipped_no_script + skipped_no_ids + skipped_too_long
     if skip_total > total_segs * 0.05:
@@ -366,6 +397,70 @@ def compute_ctc_loss_segments(
               f"skipped: {skipped_no_script} no_script, {skipped_no_ids} no_ids, "
               f"{skipped_too_long} too_long", flush=True)
 
-    if ctc_chars > 0:
-        ctc_loss = ctc_loss / ctc_chars
+    if not chunks:
+        return None
+
+    def _upload(parts):
+        t = torch.from_numpy(np.concatenate(parts))
+        if device.type == "cuda":
+            t = t.pin_memory()
+        return t.to(device, non_blocking=True)
+
+    return {
+        "chunks": chunks,
+        "b_all": _upload(b_parts),
+        "t_all": _upload(t_parts),
+        "targets_all": _upload(target_parts),
+        "chars": ctc_chars,
+    }
+
+
+def build_ctc_loss_plan(
+    segments_batch: list[list[dict]],
+    T: int,
+    group_script_names: list[list[str]],
+    group_script_vocabs: list[list[int]],
+    device: torch.device,
+):
+    """Build the CTC plan once per step; apply it to any number of logits
+    tensors (final + intermediate CTC share it — the ~3000-segment Python
+    pass depends only on the segments, not the logits)."""
+    buckets, stats = _build_buckets(
+        segments_batch, T, group_script_names, group_script_vocabs)
+    return _plan_from_buckets(buckets, device, stats)
+
+
+def apply_ctc_loss_plan(logits, plan, device=None) -> Tensor:
+    """Gather + CTC for a prebuilt plan. Returns the per-char mean loss."""
+    device = logits.device if device is None else device
+    if plan is None:
+        return torch.zeros(1, device=device)
+
+    ctc_loss = torch.zeros(1, device=device)
+    b_all, t_all = plan["b_all"], plan["t_all"]
+    targets_all = plan["targets_all"]
+    for (row0, N, max_T, vs, input_lens, target_lens,
+         t_off, tgt_off) in plan["chunks"]:
+        b_idx = b_all[row0:row0 + N]
+        t_idx = t_all[t_off:t_off + N * max_T].view(N, max_T)
+        gathered = logits[b_idx[:, None], t_idx, :vs]  # (N, max_T, vs)
+        log_probs = gathered.permute(1, 0, 2).float().log_softmax(dim=-1)
+        targets = targets_all[tgt_off:tgt_off + int(target_lens.sum())]
+
+        if device.type == "mps":
+            offset = 0
+            for i in range(N):
+                U = int(target_lens[i])
+                T_i = int(input_lens[i])
+                lp_i = log_probs[:T_i, i:i + 1, :]
+                tgt_i = targets[offset:offset + U]
+                offset += U
+                ctc_loss = ctc_loss + _ctc_loss_pure(lp_i, tgt_i, blank=0)
+        else:
+            ctc_loss = ctc_loss + F.ctc_loss(
+                log_probs, targets, input_lens, target_lens,
+                blank=0, reduction="sum", zero_infinity=True)
+
+    if plan["chars"] > 0:
+        ctc_loss = ctc_loss / plan["chars"]
     return ctc_loss

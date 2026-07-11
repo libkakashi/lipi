@@ -188,7 +188,8 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
         # --- LID-2 per-frame accuracy ---
         T_est = imgs.shape[3] // 4
         segs = batch_segments if batch_segments is not None else [[] for _ in range(B)]
-        _, sl_frames = build_frame_labels_from_segments(segs, T_est, n_groups, device)
+        _, sl_frames, _ = build_frame_labels_from_segments(
+            segs, T_est, n_groups, device)
         sl_frames_gt = sl_frames[:, :T]
 
         for g_int, lid2_log in out.get("lid2_logits_per_group", {}).items():

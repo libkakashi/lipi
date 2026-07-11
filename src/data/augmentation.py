@@ -864,7 +864,9 @@ def textured_background(img: Image.Image) -> Image.Image:
 _BACKGROUND_DIR = None  # resolved lazily so tests can monkeypatch
 _background_files: list | None = None
 _background_cache: dict = {}  # path → np.ndarray, capped
-_BACKGROUND_CACHE_MAX = 32
+# Must cover the background bank: a smaller cap makes every photo_background
+# call a cache miss (fresh disk read + decode) inside __getitem__.
+_BACKGROUND_CACHE_MAX = 256
 
 
 def _load_background_files() -> list:

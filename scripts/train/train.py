@@ -17,6 +17,7 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import argparse
 import sys
+import threading
 import time
 from functools import partial
 from pathlib import Path
@@ -43,7 +44,8 @@ from src.training.dataloader import (
     compute_bucket_edges, LipiStreamingDataset, load_shard_metadata,
 )
 from src.training.losses import (
-    compute_lid1_loss, compute_lid2_loss, compute_ctc_loss_segments,
+    compute_lid1_loss, compute_lid2_loss,
+    build_ctc_loss_plan, apply_ctc_loss_plan,
     compute_consistency_loss,
 )
 from src.training.ema import ModelEMA
@@ -350,6 +352,8 @@ def load_and_prepare_data(args, device):
 
     val_loader = DataLoader(val_subset, batch_size=128, shuffle=True,
                             collate_fn=collate_moe,
+                            num_workers=4, persistent_workers=True,
+                            prefetch_factor=2,
                             pin_memory=(device_type == "cuda"))
 
     return {
@@ -400,6 +404,10 @@ def build_model(args, n_groups, group_script_vocab_sizes, group_script_names, de
 def build_optimizer_and_scheduler(args, model, device_type, steps_per_epoch):
     vram("before optimizer", device_type)
     expert_lr = args.expert_lr or args.lr
+    # fused AdamW: one multi-tensor kernel instead of ~900 per step (the
+    # model is mostly tiny MoE expert tensors). Numerically equivalent up
+    # to reduction order; CUDA only.
+    opt_kwargs = {"weight_decay": 0.01, "fused": device_type == "cuda"}
     if expert_lr != args.lr:
         shared_params = [p for n, p in model.named_parameters()
                          if not _is_expert_param(n)]
@@ -408,10 +416,11 @@ def build_optimizer_and_scheduler(args, model, device_type, steps_per_epoch):
         base_optimizer = torch.optim.AdamW([
             {"params": shared_params, "lr": args.lr},
             {"params": expert_params, "lr": expert_lr},
-        ], weight_decay=0.01)
+        ], **opt_kwargs)
         print(f"Optimizer: shared lr={args.lr}, expert lr={expert_lr}")
     else:
-        base_optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
+        base_optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr,
+                                           **opt_kwargs)
     vram("after optimizer init", device_type)
     optimizer = base_optimizer
 
@@ -586,14 +595,45 @@ def resume_from_checkpoint(args, model, optimizer, base_optimizer, scaler, sched
 # Checkpoint saving
 # ---------------------------------------------------------------------------
 
+_save_thread: threading.Thread | None = None
+
+
+def _to_cpu_tree(obj):
+    """Recursively snapshot tensors in a state structure to CPU."""
+    if isinstance(obj, torch.Tensor):
+        return obj.detach().cpu()
+    if isinstance(obj, dict):
+        return {k: _to_cpu_tree(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(_to_cpu_tree(v) for v in obj)
+    return obj
+
+
+def _write_checkpoint(payload, tmp_path, ckpt_path):
+    # Atomic write: a kill mid-save (preemption, wall-clock deadline) must
+    # never leave a truncated moe_epochN.pt for the next resume to load.
+    torch.save(payload, tmp_path)
+    tmp_path.replace(ckpt_path)
+    print(f"  Saved: {ckpt_path}", flush=True)
+
+
 def save_checkpoint(model, optimizer, scheduler, scaler, epoch, args, save_dir,
                     ema=None):
+    """Snapshot to CPU on the caller, write to disk on a background thread.
+
+    The write is the expensive part — ~2.8 GB serialized to a FUSE-backed
+    volume on Modal took 7-18 s of blocked training per save. The CPU
+    snapshot (~0.3 s of D2H) makes the payload immutable, so training can
+    continue while the thread streams it out. Single-flight: a new save
+    joins the previous one first, keeping ordering and bounding memory.
+    """
+    global _save_thread
     ckpt_path = save_dir / f"moe_epoch{epoch}.pt"
     model_to_save = getattr(model, "_orig_mod", model)
     payload = {
         "model": {k: v.cpu() for k, v in model_to_save.state_dict().items()},
         "model_config": model_to_save.config,
-        "optimizer": optimizer.state_dict(),
+        "optimizer": _to_cpu_tree(optimizer.state_dict()),
         "scheduler": scheduler.state_dict(),
         "scaler": scaler.state_dict(),
         "epoch": epoch,
@@ -602,13 +642,21 @@ def save_checkpoint(model, optimizer, scheduler, scaler, epoch, args, save_dir,
         "taxonomy_version": TAXONOMY_VERSION,
     }
     if ema is not None:
-        payload["ema"] = ema.state_dict()
-    # Atomic write: a kill mid-save (preemption, wall-clock deadline) must
-    # never leave a truncated moe_epochN.pt for the next resume to load.
+        payload["ema"] = ema.state_dict()  # already snapshots to CPU
+
+    if _save_thread is not None and _save_thread.is_alive():
+        _save_thread.join()
     tmp_path = ckpt_path.with_suffix(".pt.tmp")
-    torch.save(payload, tmp_path)
-    tmp_path.replace(ckpt_path)
-    print(f"  Saved: {ckpt_path}")
+    _save_thread = threading.Thread(
+        target=_write_checkpoint, args=(payload, tmp_path, ckpt_path),
+        daemon=False)
+    _save_thread.start()
+
+
+def wait_for_checkpoint_writes():
+    """Block until the in-flight checkpoint write (if any) has finished."""
+    if _save_thread is not None and _save_thread.is_alive():
+        _save_thread.join()
 
 
 
@@ -704,8 +752,9 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             gl_frames = group_labels_[:, ::4][:, :T_est]
             # Model routing + CTC segment ranges: derived from segments so
             # both see identical frame boundaries.
-            gl_for_model, sl_frames = build_frame_labels_from_segments(
-                segments_, T_est, NUM_GROUPS, device)
+            gl_for_model, sl_frames, present_groups = \
+                build_frame_labels_from_segments(
+                    segments_, T_est, NUM_GROUPS, device)
             _t = _pmark("route_labels", _t)
 
             out = model(imgs_, group_ids=gl_for_model, script_ids=sl_frames,
@@ -734,26 +783,28 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             lid1_loss = torch.zeros(1, device=device)
         _t = _pmark("lid1", _t)
 
-        # CTC loss: per-segment for all lines (handles both single and mixed script)
-        # Skip CTC loss computation entirely when its weight is 0
-        # (LID-only pretraining) — the Python-heavy per-segment loop is
-        # wasted work otherwise.
+        # CTC loss: per-segment for all lines (handles both single and mixed
+        # script). The bucket/index plan depends only on the segments, so it
+        # is built once and applied to both the final and intermediate
+        # logits. Skip entirely when the weight is 0 (LID-only pretraining).
         if ctc_weight != 0:
-            ctc_loss = compute_ctc_loss_segments(
-                out["logits"], segments_, out["lengths"],
-                group_script_names, group_script_vocabs)
+            ctc_plan = build_ctc_loss_plan(
+                segments_, out["logits"].shape[1],
+                group_script_names, group_script_vocabs, device)
+            ctc_loss = apply_ctc_loss_plan(out["logits"], ctc_plan, device)
         else:
+            ctc_plan = None
             ctc_loss = torch.zeros(1, device=device)
         _t = _pmark("ctc_loss", _t)
 
         # Intermediate CTC on the pre-script-stack features (same
-        # segments). The logits exist whenever CTC ran — self-conditioned
-        # feedback computes them unconditionally — but the aux loss is
-        # only paid for when weighted.
-        if inter_ctc_weight != 0 and "inter_logits" in out:
-            inter_ctc_loss = compute_ctc_loss_segments(
-                out["inter_logits"], segments_, out["lengths"],
-                group_script_names, group_script_vocabs)
+        # segments, same plan). The logits exist whenever CTC ran —
+        # self-conditioned feedback computes them unconditionally — but
+        # the aux loss is only paid for when weighted.
+        if inter_ctc_weight != 0 and ctc_plan is not None \
+                and "inter_logits" in out:
+            inter_ctc_loss = apply_ctc_loss_plan(
+                out["inter_logits"], ctc_plan, device)
         else:
             inter_ctc_loss = torch.zeros(1, device=device)
         _t = _pmark("inter_ctc_loss", _t)
@@ -763,7 +814,8 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         if lid2_weight != 0:
             lid2_loss = compute_lid2_loss(
                 out.get("lid2_logits_per_group", {}),
-                gl_for_model[:, :T], sl_frames[:, :T])
+                gl_for_model[:, :T], sl_frames[:, :T],
+                present_groups=present_groups)
         else:
             lid2_loss = torch.zeros(1, device=device)
         _t = _pmark("lid2", _t)
@@ -785,7 +837,8 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                 + lid2_weight * lid2_loss.float()
                 + consistency_weight * cons_loss.float())
 
-        loss = loss * scale
+        if scale != 1.0:
+            loss = loss * scale
         if grad_accum > 1:
             loss = loss / grad_accum
 
@@ -836,10 +889,8 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                              f"Regenerate data with current code.")
 
         imgs = imgs.to(device, non_blocking=True)
-        targets = targets.to(device, non_blocking=True)
-        tgt_lens = tgt_lens.to(device, non_blocking=True)
-        gids = gids.to(device, non_blocking=True)
-        sids = sids.to(device, non_blocking=True)
+        # targets/tgt_lens/gids/sids stay on CPU: the step consumes CTC
+        # targets and routing labels from `segments`, not these tensors.
         if group_labels is not None:
             group_labels = group_labels.to(device, non_blocking=True)
         if imgs2 is not None:
@@ -926,15 +977,19 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                             epoch, args, save_dir, ema=ema)
 
         if n_batches % log_interval == 0:
-            # Batch all the per-interval counters into one GPU→CPU transfer.
+            # Batch all the per-interval counters into one GPU→CPU transfer
+            # (including the grad norms — printing them directly would sync
+            # twice per interval).
             stats = torch.stack([
                 log_ctc.squeeze(), log_ictc.squeeze(), log_cons.squeeze(),
                 log_lid1.squeeze(), log_lid2.squeeze(), log_total.squeeze(),
                 log_lid1_correct.float(), log_lid1_total.float(),
                 log_lid2_correct.float(), log_lid2_total.float(),
+                shared_norm.detach().float(), expert_norm.detach().float(),
             ]).tolist()
             (avg_ctc, avg_ictc, avg_cons, avg_lid1, avg_lid2, avg_total,
-             lid1_c, lid1_t, lid2_c, lid2_t) = stats
+             lid1_c, lid1_t, lid2_c, lid2_t,
+             shared_norm_v, expert_norm_v) = stats
             avg_ctc /= log_count
             avg_ictc /= log_count
             avg_cons /= log_count
@@ -956,7 +1011,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
                 f"lid1 {avg_lid1:.4f}  lid2 {avg_lid2:.4f}  "
                 f"| acc {lid1_acc:5.1f}% {lid2_acc:5.1f}%  "
                 f"| {samples_per_sec:.0f} img/s  {ms_per_step:.0f}ms/step  "
-                f"gnorm {shared_norm:.1f}/{expert_norm:.1f}"
+                f"gnorm {shared_norm_v:.1f}/{expert_norm_v:.1f}"
             )
             log_time = time.time()
             log_ctc.zero_()
@@ -1184,6 +1239,7 @@ def main():
                 if isinstance(v, torch.Tensor):
                     state[k] = v.to(device)
 
+    wait_for_checkpoint_writes()
     print(f"\n{'=' * 60}")
     print("DONE")
     print(f"{'=' * 60}")

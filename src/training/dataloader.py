@@ -223,6 +223,12 @@ class LipiStreamingDataset(Dataset):
             for local_s, script in enumerate(members):
                 self._global_sid_to_local[SCRIPT_TO_ID[script]] = local_s
 
+        # LUT for the per-pixel group-label remap: one np.take instead of
+        # a masked-assign pass per group over every pixel row.
+        self._group_lut = np.full(NUM_GROUPS + 1, NUM_GROUPS, dtype=np.int64)
+        for gid_global, gid_local in self._global_to_local_group.items():
+            self._group_lut[gid_global] = gid_local
+
     def __len__(self):
         return len(self._ds)
 
@@ -264,9 +270,7 @@ class LipiStreamingDataset(Dataset):
         gl = sample["group_labels"].copy()
         if (xa, xb) != (1.0, 0.0):
             gl = shift_labels_x(gl, xa, xb, fill=NUM_GROUPS)
-        remapped = np.full_like(gl, NUM_GROUPS)  # default to blank
-        for gid_global, gid_local in self._global_to_local_group.items():
-            remapped[gl == gid_global] = gid_local
+        remapped = self._group_lut[np.clip(gl, 0, NUM_GROUPS)]
         group_labels = torch.from_numpy(remapped).to(torch.long)
 
         # Segments: per-word metadata for mixed-script CTC loss
@@ -395,8 +399,11 @@ class BucketBatchSampler(Sampler):
                 f"sample_weights length {len(w)} != widths length {len(self.widths)}"
             self.sample_weights = w / w.sum()
 
-        # Pre-build batches so __len__ is accurate
+        # Pre-build batches so __len__ is accurate. __iter__ reuses this
+        # first build (the weighted redraw over millions of samples costs
+        # seconds), then redraws for every later epoch.
         self._batches = self._build_batches(self._draw_indices())
+        self._fresh = True
 
     def _draw_indices(self):
         n = len(self.widths)
@@ -425,8 +432,12 @@ class BucketBatchSampler(Sampler):
         return batches
 
     def __iter__(self):
-        # Fresh shuffle (and weighted redraw) every epoch
-        self._batches = self._build_batches(self._draw_indices())
+        # Fresh shuffle (and weighted redraw) every epoch; the first epoch
+        # uses the batches already built in __init__.
+        if self._fresh:
+            self._fresh = False
+        else:
+            self._batches = self._build_batches(self._draw_indices())
         yield from self._batches
 
     def __len__(self):

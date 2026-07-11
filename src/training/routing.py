@@ -29,13 +29,16 @@ def build_frame_labels_from_segments(
             inter-segment / padding frames.
         sl_frames: (B, T) — local script_id within the frame's group, 0
             for blank frames.
+        present_groups: set of group_ids that appear in any segment —
+            free CPU-side knowledge that lets losses skip absent groups
+            without a GPU sync.
     """
     # Build on CPU as NumPy to avoid one GPU kernel launch per segment
     # (was ~10 segments × batch 192 → ~2000 tiny fill_ ops per batch).
-    # One host→device transfer for each tensor, non-blocking.
     B = len(segments_batch)
     gl_np = np.full((B, T), blank_group_id, dtype=np.int64)
     sl_np = np.zeros((B, T), dtype=np.int64)
+    present_groups: set[int] = set()
     for b in range(B):
         for seg in segments_batch[b]:
             fs = seg["offset"] // 4
@@ -44,6 +47,15 @@ def build_frame_labels_from_segments(
                 continue
             gl_np[b, fs:fe] = seg["group_id"]
             sl_np[b, fs:fe] = seg.get("script_id", 0)
-    gl_for_model = torch.from_numpy(gl_np).to(device, non_blocking=True)
-    sl_frames = torch.from_numpy(sl_np).to(device, non_blocking=True)
-    return gl_for_model, sl_frames
+            present_groups.add(seg["group_id"])
+    # Pin before the copy: non_blocking is a silent no-op on pageable
+    # memory, which stalled the CPU against the previous step's tail.
+    pin = device.type == "cuda"
+    gl_cpu = torch.from_numpy(gl_np)
+    sl_cpu = torch.from_numpy(sl_np)
+    if pin:
+        gl_cpu = gl_cpu.pin_memory()
+        sl_cpu = sl_cpu.pin_memory()
+    gl_for_model = gl_cpu.to(device, non_blocking=True)
+    sl_frames = sl_cpu.to(device, non_blocking=True)
+    return gl_for_model, sl_frames, present_groups

@@ -136,6 +136,16 @@ class LipiMoEEncoder(nn.Module):
         # ascending; the sort is cheap insurance against future reordering.
         self._heads_in_flat_order = sorted(
             self._flat_script_id.items(), key=lambda item: item[1])
+        # (group, local) → flat LUT for _get_flat_script_ids. Extra sentinel
+        # row (blank group) and column (out-of-range local) hold -1 so any
+        # id outside the real pairs routes to "unrouted", matching the old
+        # masked-write semantics.
+        max_local = max(len(vs) for vs in group_script_vocab_sizes)
+        lut = torch.full((len(group_script_vocab_sizes) + 1, max_local + 1),
+                         -1, dtype=torch.long)
+        for (g, s), f in self._flat_script_id.items():
+            lut[g, s] = f
+        self.register_buffer("_flat_id_lut", lut, persistent=False)
 
         # Which groups are multi-script
         self._multi_script_groups = {
@@ -400,26 +410,36 @@ class LipiMoEEncoder(nn.Module):
         # Per-flat-script frame counts (precomputed on CPU — no sync).
         counts = [sum(script_lens_cpu[b][f] for b in range(B))
                   for f in range(self.total_scripts)]
-        if sum(counts) > 0:
-            ff = flat_scripts.reshape(N)
-            pos = ((ff >= 0) & (ff < self.total_scripts)).nonzero(
-                as_tuple=True)[0]  # routed frames; must mirror counts' range
-            pos = pos.index_select(0, torch.argsort(ff.index_select(0, pos)))
+        M = sum(counts)
+        if M > 0:
+            pos = self._routed_positions(flat_scripts.reshape(N), M)
             xg = x.reshape(N, D).index_select(0, pos)  # grouped by script
 
-            outs = []
+            # Write each head's slice into one preallocated (M, max_vocab)
+            # buffer — avoids a per-script F.pad alloc plus the final cat.
+            yg = torch.zeros(M, max_vocab, device=x.device, dtype=logits.dtype)
             start = 0
             for (g, s), flat_id in self._heads_in_flat_order:
                 k = counts[flat_id]
                 if k == 0:
                     continue
                 head = self.ctc_modules[g].heads[s]
-                y = head(xg[start:start + k]).to(logits.dtype)  # (k, vs)
-                outs.append(F.pad(y, (0, max_vocab - head.vocab_size)))
+                yg[start:start + k, :head.vocab_size] = \
+                    head(xg[start:start + k]).to(logits.dtype)
                 start += k
-            logits = logits.index_copy(
-                0, pos, torch.cat(outs) if len(outs) > 1 else outs[0])
+            logits = logits.index_copy(0, pos, yg)
         return logits.reshape(B, T, max_vocab)
+
+    def _routed_positions(self, ff: Tensor, M: int) -> Tensor:
+        """Flat positions of routed frames, grouped by flat script id.
+
+        M (the routed-frame count) is known from CPU-side counts, so
+        invalid frames are sorted past position M instead of being
+        selected with nonzero() — which forces a GPU→CPU sync per call.
+        """
+        key = torch.where((ff >= 0) & (ff < self.total_scripts),
+                          ff, ff.new_full((), self.total_scripts))
+        return torch.argsort(key, stable=True)[:M]
 
     @_dynamo_disable
     def _ctc_feedback(self, inter_logits: Tensor, flat_scripts: Tensor,
@@ -447,11 +467,9 @@ class LipiMoEEncoder(nn.Module):
 
         counts = [sum(script_lens_cpu[b][f] for b in range(B))
                   for f in range(self.total_scripts)]
-        if sum(counts) > 0:
-            ff = flat_scripts.reshape(N)
-            pos = ((ff >= 0) & (ff < self.total_scripts)).nonzero(
-                as_tuple=True)[0]
-            pos = pos.index_select(0, torch.argsort(ff.index_select(0, pos)))
+        M = sum(counts)
+        if M > 0:
+            pos = self._routed_positions(flat_scripts.reshape(N), M)
             lg = inter_logits.reshape(N, V).index_select(0, pos)  # (M, V)
 
             outs = []
@@ -473,12 +491,15 @@ class LipiMoEEncoder(nn.Module):
     def _get_flat_script_ids(self, group_ids, script_ids):
         """Convert (group_id, local_script_id) pairs to flat script indices.
         Blank/whitespace frames (group_id == blank_group_id) get flat_id = -1.
+
+        One LUT gather instead of a masked write per (group, script) pair
+        (~26 pairs × 3 kernels each per call, twice per step).
         """
-        flat = torch.full_like(group_ids, -1)
-        for (g, s), f in self._flat_script_id.items():
-            mask = (group_ids == g) & (script_ids == s)
-            flat[mask] = f
-        return flat
+        lut = self._flat_id_lut
+        g = group_ids.clamp(0, lut.shape[0] - 1)
+        s = script_ids.clamp(0, lut.shape[1] - 1)
+        return torch.where(group_ids >= 0, lut[g, s],
+                           group_ids.new_full((), -1))
 
     def _run_backbone(self, images: Tensor) -> tuple[Tensor, Tensor, int, int]:
         """Run stem → ConvA → BlurPool → ConvB → BlurPool → proj → SWA-C
@@ -650,8 +671,6 @@ class LipiMoEEncoder(nn.Module):
 
         # Determine per-frame script assignments
         # frame_scripts: (B, T) — local script_id within each frame's group
-        frame_scripts = torch.zeros(B, w, dtype=torch.long, device=x.device)
-
         if script_ids is not None:
             # Training: ground truth
             if script_ids.dim() == 1:
@@ -663,6 +682,8 @@ class LipiMoEEncoder(nn.Module):
                 frame_scripts >= 0, frame_scripts,
                 torch.zeros_like(frame_scripts))
         else:
+            frame_scripts = torch.zeros(B, w, dtype=torch.long,
+                                        device=x.device)
             # Inference: predict from LID-2 for multi-script groups.
             # Reuse the Python-side group counts computed above to skip
             # empty groups without a sync.
