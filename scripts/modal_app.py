@@ -257,10 +257,18 @@ def generate(out: str = "shards-v5", args: str = "", shards: int = 1,
     out_dir = f"{_DATA}/{out}"
 
     if shards > 1 and shard_index < 0:
-        print(f"Fanning out to {shards} generation containers...")
+        # Coordinator works shard 0 itself instead of idling on a full
+        # 48-CPU reservation while the children render.
+        print(f"Fanning out to {shards} generation containers "
+              f"(this one takes shard 0)...")
         handles = [generate.spawn(out=out, args=args, shards=shards,
                                   shard_index=i)
-                   for i in range(shards)]
+                   for i in range(1, shards)]
+        cmd = [sys.executable, "scripts/data/generate.py", "--out", out_dir,
+               *argv, "--chunk-shard", f"0:{shards}", "--no-finalize"]
+        print("Running:", shlex.join(cmd))
+        subprocess.run(cmd, cwd=_REPO, env=_child_env(), check=True)
+        data_vol.commit()
         for h in handles:
             h.get()  # propagate any shard failure
         # See sibling containers' committed chunks, then finalize.
