@@ -160,6 +160,9 @@ def load_word_list(script: str) -> list[str]:
             for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
                 w = unicodedata.normalize("NFC", line.strip())
                 if (2 <= len(w) <= 15 and not w[0].isdigit()
+                        # Scrape artifacts starting with a combining mark
+                        # render as dotted-circle placeholders — unlearnable.
+                        and unicodedata.category(w[0]) not in ("Mn", "Mc", "Me")
                         and not contains_emoji(w)
                         and _rtl_word_is_encodable(w, script)):
                     words.append(w)
