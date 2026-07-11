@@ -102,12 +102,18 @@ class LipiMoEEncoder(nn.Module):
         num_groups: int = NUM_GROUPS,
         group_script_vocab_sizes: list[list[int]] | None = None,
         group_script_names: list[list[str]] | None = None,
+        in_height: int = 32,
         **unused_kwargs,  # swallow stale kwargs from old checkpoints
     ):
         super().__init__()
         # Silently drop any unknown kwargs — old checkpoint configs may still
         # carry names like num_group_local_blocks / num_super_groups / etc.
         del unused_kwargs
+        if in_height not in (32, 64):
+            raise ValueError(
+                f"in_height must be 32 or 64, got {in_height} — the trunk's "
+                "stride/window geometry only tiles at those heights.")
+        self.in_height = in_height
         self.num_groups = num_groups
         self.blank_group_id = num_groups
 
@@ -177,6 +183,7 @@ class LipiMoEEncoder(nn.Module):
             "num_groups": num_groups,
             "group_script_vocab_sizes": group_script_vocab_sizes,
             "group_script_names": group_script_names,
+            "in_height": in_height,
         }
 
         # Drop-path schedule: linear ramp from 0 → drop_path_rate across
@@ -214,6 +221,14 @@ class LipiMoEEncoder(nn.Module):
         # ── BlurPool s(2,2): 128→192 at (8, W/2) → (4, W/4) ──────────
         # Second (and last) width stride happens here.
         self.blur_bc = BlurPool2d(convb_ch, swac_in_ch, stride=(2, 2))
+
+        # ── in_height=64: one extra fixed vertical pool → SWA-C still
+        # sees 4 rows. The conv frontend extracts stroke features at 2×
+        # detail; the low-pass compresses them into channels. Equal
+        # channels → Identity proj → zero learnable parameters, so
+        # 32px checkpoints remain fully loadable.
+        self.blur_cd = (BlurPool2d(swac_in_ch, swac_in_ch, stride=(2, 1))
+                        if in_height == 64 else None)
 
         # ── SWA-C entry projection: swac_in_ch → swac_dim ─────────────
         # Kept as a 1×1 conv (channel-last equivalent) so the SWA-C blocks
@@ -537,6 +552,10 @@ class LipiMoEEncoder(nn.Module):
         # BlurPool s(2,2) 128→192: (8, W/2) → (4, W/4)
         x = self.blur_bc(x)
 
+        # in_height=64: extra fixed vertical pool (8, W/4) → (4, W/4)
+        if self.blur_cd is not None:
+            x = self.blur_cd(x)
+
         # SWA-C: switch to channel-last for SWA. (B, C, H, W) → (B, H*W, C).
         _, C, h, w = x.shape  # h=4, w=W/4
         x = x.permute(0, 2, 3, 1).reshape(B, h * w, C)
@@ -586,6 +605,11 @@ class LipiMoEEncoder(nn.Module):
         to keep memory flat).
         """
         B = images.shape[0]
+        if images.shape[2] != self.in_height:
+            raise ValueError(
+                f"Input height {images.shape[2]} != model in_height "
+                f"{self.in_height} — the data and model heights must match "
+                "(regenerate shards or rebuild the model).")
 
         x, tex, h, w = self._run_backbone(images)
         # x here is post-SWA-D at (h=2, w=W/4). w is the final T.

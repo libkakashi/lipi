@@ -140,14 +140,15 @@ def detect_words(page_images: list[Image.Image]):
     return all_crops
 
 
-def prepare_crop(crop_img: Image.Image) -> torch.Tensor:
-    """Resize crop to height=32 preserving aspect ratio, convert to RGB tensor."""
+def prepare_crop(crop_img: Image.Image,
+                 height: int = IMG_HEIGHT) -> torch.Tensor:
+    """Resize crop to the model height preserving aspect ratio."""
     w, h = crop_img.size
-    new_w = max(4, int(w * IMG_HEIGHT / h))
+    new_w = max(4, int(w * height / h))
     # Width must be multiple of 4 (two 2x downsamples)
     new_w = (new_w + 3) // 4 * 4
-    resized = crop_img.resize((new_w, IMG_HEIGHT), Image.BILINEAR)
-    return rgb_to_input(resized)  # (3, 32, new_w)
+    resized = crop_img.resize((new_w, height), Image.BILINEAR)
+    return rgb_to_input(resized)  # (3, height, new_w)
 
 
 def ctc_decode(logits: torch.Tensor, vocab_size: int) -> list[int]:
@@ -414,8 +415,10 @@ def recognize_crops(model, crops: list[dict], script_names: list[list[str]],
     results = [None] * len(crops)
     total_model_time = 0.0
 
-    # Prepare all tensors upfront
-    prepared = [(i, prepare_crop(c["image"])) for i, c in enumerate(crops)]
+    # Prepare all tensors upfront, at the model's native line height
+    height = getattr(model, "in_height", IMG_HEIGHT)
+    prepared = [(i, prepare_crop(c["image"], height))
+                for i, c in enumerate(crops)]
 
     # Sort by width for efficient batching (less padding waste)
     prepared.sort(key=lambda x: x[1].shape[2])

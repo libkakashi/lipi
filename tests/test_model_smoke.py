@@ -43,6 +43,48 @@ def test_model_forward_pass():
     assert out["lid2_logits_per_group"][1].shape == (B, T, 2)
 
 
+def test_in_height_64_same_output_geometry_and_weights():
+    """in_height=64 adds only a fixed (param-free) vertical pool: output
+    shapes match the 32px model at the same width, and a 32px checkpoint
+    loads into a 64px model with zero missing/unexpected keys."""
+    from src.model.encoder import LipiMoEEncoder
+
+    kwargs = dict(
+        dim=128,
+        num_groups=2,
+        group_script_vocab_sizes=[[100], [80, 120]],
+        group_script_names=[["test1"], ["test2a", "test2b"]],
+        drop_path_rate=0.0,
+    )
+    torch.manual_seed(0)
+    m32 = LipiMoEEncoder(in_height=32, **kwargs)
+    torch.manual_seed(0)
+    m64 = LipiMoEEncoder(in_height=64, **kwargs)
+
+    # Full bidirectional weight compatibility.
+    result = m64.load_state_dict(m32.state_dict(), strict=True)
+    assert not result.missing_keys and not result.unexpected_keys
+
+    B, W = 2, 64
+    T = W // 4
+    group_ids = torch.tensor([[0] * T, [1] * T])
+    script_ids = torch.tensor([[0] * T, [0] * T])
+    m64.eval()
+    with torch.no_grad():
+        out = m64(torch.randn(B, 3, 64, W),
+                  group_ids=group_ids, script_ids=script_ids)
+    assert out["lengths"][0].item() == T
+    assert out["group_logits"].shape == (B, T, 3)
+
+    # Feeding the wrong height must fail loudly, not silently mis-shape.
+    try:
+        m64(torch.randn(B, 3, 32, W), group_ids=group_ids,
+            script_ids=script_ids)
+        raise AssertionError("expected height-mismatch ValueError")
+    except ValueError as e:
+        assert "in_height" in str(e)
+
+
 def test_model_inference_mode():
     """Test inference (no ground truth routing)."""
     from src.model.encoder import LipiMoEEncoder

@@ -130,6 +130,12 @@ def parse_args():
                              "script_ids.npy sidecar (regenerated shards).")
     # Model
     parser.add_argument("--dim", type=int, default=384)
+    parser.add_argument("--height", type=int, default=32, choices=(32, 64),
+                        help="Input line height. 64 adds one fixed vertical "
+                             "BlurPool before SWA-C (zero new params) so the "
+                             "conv frontend extracts features at 2x detail "
+                             "while everything downstream is unchanged. "
+                             "Shards must be generated at the same height.")
     parser.add_argument("--no-compile", action="store_true")
     parser.add_argument("--ema-decay", type=float, default=0.999,
                         help="Weight EMA decay per optimizer step; eval and "
@@ -261,6 +267,12 @@ def load_and_prepare_data(args, device):
     # Load metadata; rejects shards generated under an older taxonomy
     meta = load_shard_metadata(data_path)
     if meta is not None:
+        shard_height = meta.get("height", 32)
+        if shard_height != args.height:
+            raise RuntimeError(
+                f"Shards were rendered at height {shard_height} but "
+                f"--height is {args.height}. Heights must match — "
+                "regenerate the shards or change --height.")
         active_scripts = meta["active_scripts"]
     else:
         active_scripts = list(SCRIPT_TO_GROUP.keys())
@@ -381,6 +393,7 @@ def build_model(args, n_groups, group_script_vocab_sizes, group_script_names, de
         num_groups=n_groups,
         group_script_vocab_sizes=group_script_vocab_sizes,
         group_script_names=group_script_names,
+        in_height=args.height,
     ).to(device)
 
     vram("after model to device (fp32)", device_type)
