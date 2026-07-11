@@ -76,7 +76,8 @@ def _probe_step(model, B: int, W: int,
     amp_dtype = (torch.bfloat16 if torch.cuda.is_bf16_supported()
                  else torch.float16)
 
-    imgs = torch.randint(0, 256, (B, 3, 32, W), device=device,
+    height = getattr(model, "in_height", 32)
+    imgs = torch.randint(0, 256, (B, 3, height, W), device=device,
                          dtype=torch.uint8)
     counts = torch.tensor([max(len(vs), 1) for vs in group_script_vocabs],
                           device=device)
