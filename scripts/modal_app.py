@@ -238,17 +238,45 @@ def _commit_loop(stop: threading.Event, interval_s: int = 300):
     volumes=_VOLUMES,
     retries=modal.Retries(max_retries=2, initial_delay=10.0),
 )
-def generate(out: str = "shards-v5", args: str = ""):
-    """Render shards on a 48-core box, writing to the lipi-data volume.
+def generate(out: str = "shards-v5", args: str = "", shards: int = 1,
+             shard_index: int = -1):
+    """Render shards on 48-core boxes, writing to the lipi-data volume.
+
+    shards=N fans generation out across N containers: chunk numbering is
+    deterministic and chunks are idempotent, so each container takes the
+    chunks where idx % N == its index (--chunk-shard) and skips sidecar
+    assembly (--no-finalize); the coordinator waits for all of them, then
+    runs one finalize pass (all chunks exist → assembly + metadata only).
+    Wall-clock divides by ~N for the render phase.
 
     Retries resume: generate.py skips chunks that already exist in --out.
     """
     _prepare_repo()
     argv = shlex.split(args)
-    _forbid(argv, "--out")
+    _forbid(argv, "--out", "--chunk-shard", "--no-finalize")
     out_dir = f"{_DATA}/{out}"
+
+    if shards > 1 and shard_index < 0:
+        print(f"Fanning out to {shards} generation containers...")
+        handles = [generate.spawn(out=out, args=args, shards=shards,
+                                  shard_index=i)
+                   for i in range(shards)]
+        for h in handles:
+            h.get()  # propagate any shard failure
+        # See sibling containers' committed chunks, then finalize.
+        data_vol.reload()
+        cmd = [sys.executable, "scripts/data/generate.py", "--out", out_dir,
+               *argv]
+        print("Finalizing:", shlex.join(cmd))
+        subprocess.run(cmd, cwd=_REPO, env=_child_env(), check=True)
+        data_vol.commit()
+        listing = ", ".join(sorted(p.name for p in Path(out_dir).iterdir()))
+        return f"shards at lipi-data:/{out}: {listing}"
+
     cmd = [sys.executable, "scripts/data/generate.py", "--out", out_dir,
            *argv]
+    if shard_index >= 0:
+        cmd += ["--chunk-shard", f"{shard_index}:{shards}", "--no-finalize"]
     print("Running:", shlex.join(cmd))
     subprocess.run(cmd, cwd=_REPO, env=_child_env(), check=True)
     data_vol.commit()

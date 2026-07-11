@@ -897,9 +897,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--char-reps", type=int, default=3)
     parser.add_argument("--out", type=str, default="data/shards")
     parser.add_argument("--workers", type=int, default=48)
+    parser.add_argument("--chunk-shard", type=str, default="0:1",
+                        help="'i:n' — process only chunks where "
+                             "chunk_idx %% n == i. Chunk numbering is "
+                             "deterministic, so n containers with disjoint "
+                             "i cover the dataset exactly once (chunks are "
+                             "idempotent). Use with --no-finalize; run a "
+                             "final pass without these flags to assemble "
+                             "sidecars and metadata.")
+    parser.add_argument("--no-finalize", action="store_true",
+                        help="Skip sidecar/metadata assembly (for sharded "
+                             "generation workers; the coordinator runs the "
+                             "finalize pass once all shards are done).")
     args = parser.parse_args()
 
     # Validate numeric args
+    try:
+        shard_i, shard_n = map(int, args.chunk_shard.split(":"))
+        assert 0 <= shard_i < shard_n
+    except (ValueError, AssertionError):
+        parser.error("--chunk-shard must be 'i:n' with 0 <= i < n")
+    args.shard_i, args.shard_n = shard_i, shard_n
     if args.height <= 0:
         parser.error("--height must be > 0")
     if args.max_width <= 0:
@@ -1121,7 +1139,9 @@ def build_line_chunks(tasks, script_fonts, word_lists, valid_scripts, args,
             remaining = style_target
             while remaining > 0:
                 batch = min(chunk_size, remaining)
-                if chunk_dir_exists(str(Path(train_dir) / f"chunk_{chunk_idx:04d}")):
+                if chunk_idx % args.shard_n != args.shard_i:
+                    pass  # another shard's chunk (numbering stays global)
+                elif chunk_dir_exists(str(Path(train_dir) / f"chunk_{chunk_idx:04d}")):
                     skipped += batch
                 else:
                     # Lightweight chunk: just script, count, style name, and paths
@@ -1157,7 +1177,9 @@ def build_char_chunks(valid_scripts, script_fonts, args, shard_dir, start_chunk_
         chunk_size = max(200, len(chars) // max(1, args.workers // len(valid_scripts)))
         for ci in range(0, len(chars), chunk_size):
             char_subset = chars[ci:ci + chunk_size]
-            if chunk_dir_exists(str(Path(train_dir) / f"chunk_{chunk_idx:04d}")):
+            if (chunk_idx % args.shard_n != args.shard_i
+                    or chunk_dir_exists(
+                        str(Path(train_dir) / f"chunk_{chunk_idx:04d}"))):
                 chunk_idx += 1
                 continue
             char_chunks.append((script, char_subset, reps, fonts,
@@ -1569,6 +1591,11 @@ def main():
                                 args.workers, "char")
         else:
             print("  All char chunks exist.")
+
+    if args.no_finalize:
+        print("\n--no-finalize: skipping sidecar/metadata assembly "
+              "(coordinator finalizes once all shards are done).")
+        return
 
     # Assemble top-level sidecars from per-chunk files, in sorted chunk
     # order (= dataset stream order). Covers resumed chunks too.

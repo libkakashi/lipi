@@ -179,16 +179,21 @@ def load_word_list(script: str) -> list[str]:
 
 
 def load_all_word_lists(scripts: list[str]) -> dict[str, list[str]]:
-    """Load word lists for all given scripts.
+    """Load word lists for all given scripts, in parallel.
+
+    Loading is filter-heavy (NFC-normalize + encodability checks over
+    millions of lines — ~10s for the largest scripts), and the per-script
+    loads are independent, so the full-taxonomy load drops from minutes to
+    the cost of the largest single script.
 
     Returns:
         {script_name: [words]}. Scripts with no words get empty list.
     """
-    result = {}
-    for script in scripts:
-        words = load_word_list(script)
-        if words:
-            result[script] = words
-        else:
-            result[script] = []
-    return result
+    if len(scripts) <= 1:
+        return {s: load_word_list(s) for s in scripts}
+    import os
+    from concurrent.futures import ProcessPoolExecutor
+    workers = min(len(scripts), os.cpu_count() or 4)
+    with ProcessPoolExecutor(max_workers=workers) as ex:
+        loaded = list(ex.map(load_word_list, scripts))
+    return dict(zip(scripts, loaded))
