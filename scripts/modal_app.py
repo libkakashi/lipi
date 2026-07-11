@@ -300,6 +300,9 @@ def generate(out: str = "shards-v5", args: str = "", shards: int = 1,
     # workers busy so the H100 stays compute-bound. Cheap relative to the GPU.
     cpu=32.0,
     memory=96 * 1024,
+    # Shards stage to container-local NVMe; 64px at 60K/script is ~360GB,
+    # which exceeds the default ephemeral disk.
+    ephemeral_disk=600 * 1024,  # MiB → ~586 GiB
     timeout=24 * 3600,
     volumes=_VOLUMES,
     retries=modal.Retries(max_retries=3, initial_delay=60.0),
