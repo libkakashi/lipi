@@ -155,6 +155,24 @@ def apply_style_proportions(spec: str):
         s["proportion"] /= total
 
 
+def parse_boost_spec(spec: str, flag: str) -> dict[str, float]:
+    """Parse 'name=mult,...' into a dict of positive float multipliers."""
+    out: dict[str, float] = {}
+    for part in spec.split(","):
+        name, sep, val = part.partition("=")
+        name = name.strip()
+        if not sep or not name:
+            raise SystemExit(f"{flag}: bad entry {part!r} (want name=mult)")
+        try:
+            mult = float(val)
+        except ValueError:
+            raise SystemExit(f"{flag}: bad value in {part!r}")
+        if mult <= 0:
+            raise SystemExit(f"{flag}: multiplier must be > 0 in {part!r}")
+        out[name] = mult
+    return out
+
+
 def filter_fonts_by_style(fonts: list[str], style: str) -> list[str]:
     """Filter font list by style. Falls back to full list if too few matches.
 
@@ -893,6 +911,17 @@ def parse_args() -> argparse.Namespace:
                              "domain (document-heavy → raise printed).")
     parser.add_argument("--mixed-ratio", type=float, default=0.6,
                         help="Fraction of lines that are mixed-script (default: 0.6)")
+    parser.add_argument("--script-boost", type=str, default=None,
+                        help="Per-script sample multiplier, e.g. "
+                             "'arabic=2,han=1.3,georgian=0.5'. Applied on "
+                             "top of --vocab-proportional / --balance-groups "
+                             "targets. Use to spend budget on the scripts "
+                             "the model is weakest on.")
+    parser.add_argument("--font-boost", type=str, default=None,
+                        help="Font-weight multiplier by filename substring "
+                             "(case-insensitive), e.g. 'nastaliq=3,ruqaa=6'. "
+                             "Scales a matching font's share of its "
+                             "script's font picks.")
     parser.add_argument("--include-chars", action="store_true")
     parser.add_argument("--char-reps", type=int, default=3)
     parser.add_argument("--out", type=str, default="data/shards")
@@ -935,6 +964,17 @@ def parse_args() -> argparse.Namespace:
             parser.error(f"Unknown script(s): {', '.join(unknown)}. "
                          f"Valid: {', '.join(sorted(SCRIPTS))}")
 
+    args.script_boosts = (parse_boost_spec(args.script_boost, "--script-boost")
+                          if args.script_boost else {})
+    unknown = [s for s in args.script_boosts if s not in SCRIPTS]
+    if unknown:
+        parser.error(f"--script-boost: unknown script(s): {', '.join(unknown)}. "
+                     f"Valid: {', '.join(sorted(SCRIPTS))}")
+    args.font_boosts = ({k.lower(): v for k, v in
+                         parse_boost_spec(args.font_boost,
+                                          "--font-boost").items()}
+                        if args.font_boost else {})
+
     return args
 
 
@@ -942,7 +982,7 @@ def parse_args() -> argparse.Namespace:
 # Font discovery
 # ---------------------------------------------------------------------------
 
-def discover_fonts(active_scripts, word_lists):
+def discover_fonts(active_scripts, word_lists, font_boosts=None):
     """Discover fonts for each script. Returns (script_fonts, valid_scripts)."""
     print("Discovering fonts...")
     script_fonts = {}
@@ -953,7 +993,7 @@ def discover_fonts(active_scripts, word_lists):
             continue
         fonts = find_fonts_for_script(script)
         sample = word_lists[script][0]
-        weighted = build_weighted_font_list(fonts, sample)
+        weighted = build_weighted_font_list(fonts, sample, boosts=font_boosts)
         if weighted:
             script_fonts[script] = weighted
             valid_scripts.append(script)
@@ -1513,7 +1553,8 @@ def main():
     print("Loading word lists...")
     word_lists = load_all_word_lists(active_scripts)
 
-    script_fonts, valid_scripts = discover_fonts(active_scripts, word_lists)
+    script_fonts, valid_scripts = discover_fonts(active_scripts, word_lists,
+                                                 args.font_boosts)
 
     line_scripts = list(valid_scripts)
 
@@ -1528,10 +1569,11 @@ def main():
         tasks = []
         for script in line_scripts:
             scale = math.sqrt(script_vocabs[script] / min_vocab)
-            target = int(args.samples_per_script * scale)
+            boost = args.script_boosts.get(script, 1.0)
+            target = int(args.samples_per_script * scale * boost)
             tasks.append((script, target))
             print(f"  {script:<15s} vocab={script_vocabs[script]:>5d}  "
-                  f"scale={scale:.2f}x  samples={target}")
+                  f"scale={scale:.2f}x  boost={boost:.2f}x  samples={target}")
     else:
         tasks = []
         for script in line_scripts:
@@ -1541,6 +1583,7 @@ def main():
                 target = args.samples_per_script // len(scripts_in_group)
             else:
                 target = args.samples_per_script
+            target = int(target * args.script_boosts.get(script, 1.0))
             tasks.append((script, target))
 
     shard_dir = Path(args.out)

@@ -68,11 +68,16 @@ def find_fonts_for_script(script: str) -> list[str]:
 def build_weighted_font_list(
     fonts: list[str],
     sample_text: str,
+    boosts: dict[str, float] | None = None,
 ) -> list[str]:
     """Build a weighted font list for training diversity.
 
     Weights: 70% clean/regular, 20% handwriting, 10% display.
     Validates each font can actually render the sample text.
+
+    boosts maps a lowercase filename substring to a weight multiplier
+    (result floored at 1 copy) — used to up-weight styles the model is
+    weakest on (e.g. Nastaliq) without touching the registry.
     """
     valid = [f for f in fonts if font_can_render(f, sample_text)]
     if not valid:
@@ -92,10 +97,16 @@ def build_weighted_font_list(
             else:
                 cat = "sans"
         if cat == "handwriting":
-            weighted.extend([f] * 2)  # 20% weight
+            base = 2  # 20% weight
         elif cat == "display":
-            weighted.extend([f] * 1)  # 10% weight
+            base = 1  # 10% weight
         else:
-            weighted.extend([f] * 7)  # 70% weight
+            base = 7  # 70% weight
+        mult = 1.0
+        if boosts:
+            for sub, m in boosts.items():
+                if sub in fname.lower():
+                    mult *= m
+        weighted.extend([f] * max(1, round(base * mult)))
 
     return weighted
