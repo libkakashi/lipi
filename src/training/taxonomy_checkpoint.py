@@ -154,4 +154,25 @@ def migrate_taxonomy_state(
         state[key] = result
         changed += 1
 
+    # RoutedReadout queries: one row per flat script id + a trailing
+    # default row for blank/unrouted frames — remapped like script experts.
+    key = "routed_collapse.queries"
+    source = source_state.get(key)
+    target = current_state.get(key)
+    if (source is not None and target is not None
+            and source.shape[1:] == target.shape[1:]):
+        result = target.clone()
+        n_new = target.shape[0] - 1
+        for new_script, new_flat_id in SCRIPT_TO_ID.items():
+            if new_flat_id >= n_new:
+                continue
+            source_script = _source_script(new_script, old_locations)
+            old_flat_id = (old_flat_ids.get(source_script)
+                           if source_script else None)
+            if old_flat_id is not None and old_flat_id < source.shape[0] - 1:
+                result[new_flat_id].copy_(source[old_flat_id])
+        result[n_new].copy_(source[source.shape[0] - 1])  # default row
+        state[key] = result
+        changed += 1
+
     return changed

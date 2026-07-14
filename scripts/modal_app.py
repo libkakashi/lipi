@@ -77,6 +77,10 @@ image = (
         "libraqm-dev", "libharfbuzz-dev", "libfribidi-dev",
         "libfreetype6-dev", "libjpeg-dev", "zlib1g-dev",
         "libfontconfig1-dev", "pkg-config",
+        # Source-built Pillow only decodes what it links: without these,
+        # compressed TIFF / JPEG2000 / WebP inputs (BDRC scans etc.) fail
+        # as UnidentifiedImageError during real-data ingestion.
+        "libtiff-dev", "libopenjp2-7-dev", "libwebp-dev",
     )
     .pip_install(
         "torch==2.11.0",
@@ -113,6 +117,11 @@ image = (
 assets_vol = modal.Volume.from_name("lipi-assets", create_if_missing=True)
 data_vol = modal.Volume.from_name("lipi-data", create_if_missing=True)
 runs_vol = modal.Volume.from_name("lipi-runs", create_if_missing=True)
+
+# Real-data ingestion pulls from the HF hub; the training image doesn't
+# need those deps, so keep them in a derived layer.
+prep_image = image.pip_install("datasets>=3.0.0", "hf_transfer>=0.1.6",
+                               "requests>=2.31.0")
 _VOLUMES = {_ASSETS: assets_vol, _DATA: data_vol, _RUNS: runs_vol}
 
 _CKPT_RE = re.compile(r"moe_epoch(\d+)\.pt$")
@@ -175,6 +184,86 @@ def _latest_checkpoint(save_dir: Path):
 
 
 def _stage_data(name: str, copy_local: bool) -> Path:
+    """Stage one shard set, or mix several ("synth-v8,real-v1").
+
+    Multi-name staging symlinks every train/val chunk dir into one mix
+    root, rebuilds the root sidecars from per-chunk sidecars (same sorted
+    order LipiStreamingDataset streams in), and unions active_scripts in
+    metadata — no shard bytes are duplicated.
+    """
+    names = [n.strip() for n in name.split(",") if n.strip()]
+    if len(names) == 1:
+        return _stage_one(names[0], copy_local)
+    if not copy_local:
+        raise RuntimeError("mixing datasets requires copy_local=True")
+    staged = [_stage_one(n, True) for n in names]
+    return _merge_staged(staged, "mix+" + "+".join(names))
+
+
+def _merge_staged(roots: list[Path], tag: str) -> Path:
+    import numpy as np
+    import torch
+
+    dst = Path("/tmp/lipi-shards", tag)
+    if (dst / ".stage_complete").exists():
+        return dst
+    if dst.exists():
+        shutil.rmtree(dst)
+
+    metas = []
+    for r in roots:
+        mp = r / "metadata.pt"
+        if not mp.exists():
+            raise RuntimeError(f"{r} has no metadata.pt — finalize it first")
+        metas.append(torch.load(mp, weights_only=False))
+    for key in ("height", "taxonomy_version"):
+        vals = {m.get(key) for m in metas}
+        if len(vals) != 1:
+            raise RuntimeError(f"can't mix shard sets with different {key}: "
+                               f"{[m.get(key) for m in metas]}")
+
+    for split in ("train", "val"):
+        split_dst = dst / split
+        split_dst.mkdir(parents=True, exist_ok=True)
+        for i, r in enumerate(roots):
+            for chunk in sorted((r / split).glob("chunk_*")):
+                if not (chunk / "widths.npy").exists():
+                    raise RuntimeError(
+                        f"{chunk} lacks per-chunk sidecars — regenerate "
+                        f"with current generate.py / prepare.py")
+                link = split_dst / f"chunk_m{i}_{chunk.name[6:]}"
+                link.symlink_to(chunk)
+        for name in ("widths.npy", "script_ids.npy"):
+            parts = [np.load(str(c / name))
+                     for c in sorted(split_dst.glob("chunk_*"))]
+            arr = (np.concatenate(parts).astype(np.int32)
+                   if parts else np.zeros(0, dtype=np.int32))
+            np.save(str(split_dst / name), arr)
+
+    # Union scripts across sets, preserving taxonomy order.
+    sys.path.insert(0, _REPO)
+    from src.taxonomy import SCRIPT_TO_GROUP, SCRIPTS
+    active = set()
+    for m in metas:
+        active.update(m.get("active_scripts", []))
+    scripts = [s for s in SCRIPTS if s in active]
+    groups, seen = [], set()
+    for s in scripts:
+        g = SCRIPT_TO_GROUP[s]
+        if g not in seen:
+            groups.append(g)
+            seen.add(g)
+    meta = dict(metas[0])
+    meta["active_scripts"] = scripts
+    meta["active_groups"] = groups
+    torch.save(meta, dst / "metadata.pt")
+
+    (dst / ".stage_complete").touch()
+    print(f"Mixed {len(roots)} shard sets at {dst}")
+    return dst
+
+
+def _stage_one(name: str, copy_local: bool) -> Path:
     """Copy shards from the volume to container-local disk, in parallel.
 
     StreamingDataset does per-sample random reads; local NVMe serves those
@@ -293,6 +382,60 @@ def generate(out: str = "shards-v5", args: str = "", shards: int = 1,
 
 
 @app.function(
+    image=prep_image,
+    cpu=8.0,
+    memory=32 * 1024,
+    # Sources stream from the HF hub (no full-dataset staging), so the
+    # default container disk is enough; explicit ephemeral_disk can't go
+    # below 512 GiB on Modal, which would be pure over-provisioning here.
+    timeout=24 * 3600,
+    volumes=_VOLUMES,
+    retries=modal.Retries(max_retries=2, initial_delay=10.0),
+)
+def prepare_real(source: str = "", out: str = "real-v1", args: str = "",
+                 hf_token: str = "", finalize: bool = False,
+                 verify: bool = False):
+    """Ingest real OCR datasets into MDS chunks on the lipi-data volume.
+
+    Usage:
+        modal run scripts/modal_app.py::prepare_real \
+            --source hhd_ethiopic,norhand_v3 --out real-v1
+        modal run scripts/modal_app.py::prepare_real --out real-v1 --finalize
+
+    Sources are registered in scripts/data/real/sources.py. Chunk writes
+    are idempotent (re-runs wipe and rewrite that source's chunks), so
+    Modal retries are safe. Run --finalize once after the last source.
+    Train on the mix with: ::train --data "shards-v8,real-v1".
+    """
+    _prepare_repo()
+    argv = shlex.split(args)
+    _forbid(argv, "--out", "--source", "--finalize", "--verify")
+
+    env = _child_env()
+    env["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+    env["HF_HOME"] = "/tmp/hf-cache"
+    if hf_token:
+        env["HF_TOKEN"] = hf_token
+
+    cmd = [sys.executable, "scripts/data/real/prepare.py",
+           "--out", f"{_DATA}/{out}", *argv]
+    if finalize:
+        cmd.append("--finalize")
+    elif verify:
+        cmd.append("--verify")
+    elif source:
+        cmd += ["--source", source]
+    else:
+        raise RuntimeError("pass --source, --finalize, or --verify")
+    print("Running:", shlex.join(cmd))
+    subprocess.run(cmd, cwd=_REPO, env=env, check=True)
+    data_vol.commit()
+    listing = ", ".join(sorted(p.name for p in Path(f"{_DATA}/{out}",
+                                                    "train").glob("chunk_*")))
+    return f"real chunks at lipi-data:/{out}: {listing or '(none yet)'}"
+
+
+@app.function(
     image=image,
     gpu=_GPU,
     # On-the-fly augmentation is CPU-heavy per sample; with too few cores the
@@ -300,9 +443,13 @@ def generate(out: str = "shards-v5", args: str = "", shards: int = 1,
     # workers busy so the H100 stays compute-bound. Cheap relative to the GPU.
     cpu=32.0,
     memory=96 * 1024,
-    # Shards stage to container-local NVMe; 64px at 60K/script measured
-    # 633 GB, which exceeds the default ephemeral disk.
-    ephemeral_disk=800 * 1024,  # MiB → ~781 GiB
+    # Shards stage to container-local NVMe. real-v1 alone measured 692 GB; a
+    # synth+real MIX (shards-v9 585 GB + real-v1 692 GB ≈ 1.28 TB) needs
+    # ~1400 GiB. But an oversized disk request forces scarcer instance types
+    # that queue/preempt more (a 1400 GiB real-only run stuck 50+ min in
+    # staging). Scale per run via LIPI_DISK_GIB: default 1000 fits a single
+    # real set; export LIPI_DISK_GIB=1400 for a mix.
+    ephemeral_disk=int(os.environ.get("LIPI_DISK_GIB", "1000")) * 1024,
     timeout=24 * 3600,
     volumes=_VOLUMES,
     retries=modal.Retries(max_retries=3, initial_delay=60.0),

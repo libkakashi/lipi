@@ -509,14 +509,17 @@ def recognize_crops(model, crops: list[dict], script_names: list[list[str]],
         all_group_ids = output["group_ids"]       # (B, T)
         all_frame_scripts = output["frame_scripts"]  # (B, T)
 
+        emit_pf = getattr(model, "emit_per_frame", 1)
         for b, idx in enumerate(indices):
             # Ceil-div: flooring would drop up to 3px of the right edge —
             # the first logical character of an RTL crop.
             valid_t = -(-tensors[b].shape[2] // model.time_downsample)
+            # Logits run at emit_per_frame slots per frame; expand the
+            # per-frame routing to slot granularity so runs stay aligned.
             group_id, script_name, text, conf, runs = _decode_one(
-                all_logits[b, :valid_t],
-                all_group_ids[b, :valid_t],
-                all_frame_scripts[b, :valid_t],
+                all_logits[b, :valid_t * emit_pf],
+                all_group_ids[b, :valid_t].repeat_interleave(emit_pf),
+                all_frame_scripts[b, :valid_t].repeat_interleave(emit_pf),
                 script_names)
 
             corrected = False

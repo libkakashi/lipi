@@ -28,8 +28,8 @@ try:
     # dynamic=True so variable W doesn't recompile, and bump the recompile
     # limit because each distinct (window_h, window_w, shift) combination
     # specializes the compiled function. We have ~8 unique attention shapes
-    # across the model (stem SWA 8×16, 2×16, experts 1×16, 1×64) × shift
-    # on/off = up to 16 variants.
+    # across the model (SWA-C 8×16, SWA-D 2×64, group experts 2×16/2×64,
+    # script experts 1×16/1×64) × shift on/off = up to 16 variants.
     _dynamo_cfg.recompile_limit = max(getattr(_dynamo_cfg, "recompile_limit", 8), 32)
     flex_attention = torch.compile(_raw_flex_attention, dynamic=True)
     _HAS_FLEX_ATTENTION = True
@@ -361,14 +361,16 @@ class MoELayer(nn.Module):
     def __init__(self, dim: int, num_heads: int, num_experts: int,
                  window_w: int = 16, shift: bool = False,
                  routed_mlp_ratio: int = 4, shared_mlp_ratio: int = 2,
-                 drop_path: float = 0.0, layer_scale_init: float = 1e-4):
+                 drop_path: float = 0.0, layer_scale_init: float = 1e-4,
+                 window_h: int = 1):
         super().__init__()
         self.num_experts = num_experts
+        self.window_h = window_h
 
         # Shared attention branch (one set of weights for the whole layer).
         self.norm1 = nn.LayerNorm(dim)
         self.attn = WindowedAttention(
-            dim, num_heads, window_h=1, window_w=window_w, shift=shift)
+            dim, num_heads, window_h=window_h, window_w=window_w, shift=shift)
         self.ls1 = LayerScale(dim, layer_scale_init)
 
         # Routed + shared MLP branch.
@@ -389,23 +391,26 @@ class MoELayer(nn.Module):
             nn.init.zeros_(mlp.fc2.bias)
 
     def forward(self, x: Tensor, expert_ids: Tensor,
-                expert_lens_cpu: list | None, T: int) -> Tensor:
+                expert_lens_cpu: list | None, w: int, h: int = 1) -> Tensor:
         """Run one MoE layer on the full frame sequence.
 
         Args:
-            x:               (B, T, dim) frame features.
-            expert_ids:      (B, T) per-frame expert id. Values outside
+            x:               (B, h*w, dim) frame features, h-major layout
+                             (row 0's columns, then row 1's, ...).
+            expert_ids:      (B, h*w) per-frame expert id. Values outside
                              [0, num_experts) route no MLP for that frame
-                             (blank / unrouted frames).
+                             (blank / unrouted frames). At h>1 the caller
+                             repeats the per-column ids across rows.
             expert_lens_cpu: (B, num_experts) precomputed Python list of
                              frame counts, used to skip empty experts
                              without a GPU→CPU sync. If None, all experts
                              are attempted (uses mask.any() instead).
-            T:               sequence length (== x.shape[1]).
+            w:               columns (frames) per row.
+            h:               rows (must match self.window_h tiling).
         """
-        # Shared attention on the full sequence (h=1).
+        # Shared attention on the full sequence at (h, w).
         normed = self.norm1(x)
-        attn_out = self.attn(normed, 1, T)
+        attn_out = self.attn(normed, h, w)
         x = x + self.drop_path(self.ls1(attn_out.to(x.dtype)))
 
         # MLP branch: routed + shared, summed then LayerScaled together.
@@ -493,34 +498,196 @@ def _patch_merge_h(x: Tensor, h: int, w: int, proj: nn.Linear) -> tuple[Tensor, 
     return proj(x), h // 2
 
 
+class AttentionReadout(nn.Module):
+    """Collapse h rows per column to n_q rows via learned-query attention.
+
+    Replaces the fixed pairwise linear merges: n_q learned queries (shared
+    across columns) attend over the h rows of their own column. Keys carry
+    a learned row embedding so vertical *position* — not just content —
+    survives the collapse; horizontal context is SWA's job upstream, so
+    keys stay per-column and the attention is h-way per output row (cheap).
+
+    Init keeps the trunk's plain-pooling-at-step-0 convention: queries are
+    small (scores ≈ 0 → uniform attention = row mean), v_proj and each
+    query's out_proj start at identity (zero-padded when out_dim > in_dim),
+    so step-0 output rows are the row-mean projected into the first
+    in_dim channels — exactly the old avg-init merge. Per-query out
+    projections break the symmetry between output rows as training starts.
+    """
+
+    def __init__(self, in_dim: int, out_dim: int, n_rows: int,
+                 n_queries: int = 2, num_heads: int = 4):
+        super().__init__()
+        self.n_rows = n_rows
+        self.n_queries = n_queries
+        self.num_heads = num_heads
+        self.head_dim = in_dim // num_heads
+        self.scale = self.head_dim ** -0.5
+
+        self.norm = nn.LayerNorm(in_dim)
+        self.queries = nn.Parameter(torch.empty(n_queries, in_dim))
+        nn.init.trunc_normal_(self.queries, std=0.02)
+        self.row_emb = nn.Parameter(torch.zeros(n_rows, in_dim))
+        nn.init.trunc_normal_(self.row_emb, std=0.02)
+        self.k_proj = nn.Linear(in_dim, in_dim)
+        self.v_proj = nn.Linear(in_dim, in_dim)
+        self.out_projs = nn.ModuleList(
+            [nn.Linear(in_dim, out_dim) for _ in range(n_queries)])
+        with torch.no_grad():
+            self.v_proj.weight.copy_(torch.eye(in_dim))
+            self.v_proj.bias.zero_()
+            d = min(in_dim, out_dim)
+            for proj in self.out_projs:
+                proj.weight.zero_()
+                proj.weight[:d, :d] = torch.eye(d)
+                proj.bias.zero_()
+
+    def forward(self, x: Tensor, h: int, w: int) -> Tensor:
+        """(B, h*w, C_in) h-major → (B, n_q*w, C_out) h-major."""
+        B, _, C = x.shape
+        nh, hd = self.num_heads, self.head_dim
+        keys = self.norm(x).reshape(B, h, w, C) + self.row_emb[:, None, :]
+        keys = keys.permute(0, 2, 1, 3)                    # (B, w, h, C)
+        k = self.k_proj(keys).reshape(B, w, h, nh, hd)
+        v = self.v_proj(keys).reshape(B, w, h, nh, hd)
+        q = self.queries.reshape(self.n_queries, nh, hd)
+        # scores: (B, w, nh, n_q, h)
+        scores = torch.einsum("qnd,bwhnd->bwnqh", q.to(k.dtype), k) * self.scale
+        attn = scores.softmax(dim=-1)
+        out = torch.einsum("bwnqh,bwhnd->bwqnd", attn, v)
+        out = out.reshape(B, w, self.n_queries, C)
+        rows = [self.out_projs[i](out[:, :, i]) for i in range(self.n_queries)]
+        return torch.stack(rows, dim=1).reshape(B, self.n_queries * w, -1)
+
+
+class RoutedReadout(nn.Module):
+    """Collapse h rows to one frame with per-route learned queries.
+
+    The final vertical collapse, routed by flat script id: each script owns
+    a query that decides how its frames weight the rows (a Thai frame can
+    weight the tone-mark tier, Latin can stay near-uniform). Ids outside
+    [0, num_ids) — blank / unrouted frames — use a shared default query.
+
+    Same init convention as AttentionReadout: uniform attention + identity
+    v/out at step 0 ≡ the old avg-init merge_d1 (mean of rows).
+    """
+
+    def __init__(self, dim: int, num_ids: int, num_heads: int = 6):
+        super().__init__()
+        self.num_ids = num_ids
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.scale = self.head_dim ** -0.5
+
+        self.norm = nn.LayerNorm(dim)
+        self.queries = nn.Parameter(torch.empty(num_ids + 1, dim))
+        nn.init.trunc_normal_(self.queries, std=0.02)
+        self.row_emb = nn.Parameter(torch.zeros(8, dim))  # supports h<=8
+        nn.init.trunc_normal_(self.row_emb, std=0.02)
+        self.k_proj = nn.Linear(dim, dim)
+        self.v_proj = nn.Linear(dim, dim)
+        self.out_proj = nn.Linear(dim, dim)
+        with torch.no_grad():
+            self.v_proj.weight.copy_(torch.eye(dim))
+            self.v_proj.bias.zero_()
+            self.out_proj.weight.copy_(torch.eye(dim))
+            self.out_proj.bias.zero_()
+
+    def forward(self, x: Tensor, route_ids: Tensor, h: int, w: int) -> Tensor:
+        """(B, h*w, D) h-major + (B, w) ids → (B, w, D)."""
+        B, _, D = x.shape
+        nh, hd = self.num_heads, self.head_dim
+        safe = torch.where((route_ids >= 0) & (route_ids < self.num_ids),
+                           route_ids, route_ids.new_full((), self.num_ids))
+        q = self.queries[safe].reshape(B, w, nh, hd)       # (B, w, nh, hd)
+        keys = self.norm(x).reshape(B, h, w, D) + self.row_emb[:h, None, :]
+        keys = keys.permute(0, 2, 1, 3)                    # (B, w, h, D)
+        k = self.k_proj(keys).reshape(B, w, h, nh, hd)
+        v = self.v_proj(keys).reshape(B, w, h, nh, hd)
+        scores = torch.einsum("bwnd,bwhnd->bwnh", q.to(k.dtype), k) * self.scale
+        attn = scores.softmax(dim=-1)
+        out = torch.einsum("bwnh,bwhnd->bwnd", attn, v).reshape(B, w, D)
+        return self.out_proj(out)
+
+
+class ReLook(nn.Module):
+    """Cross-attention from the h=1 stream back into the h=8 stroke grid.
+
+    The retrieval safety net over the whole vertical ladder: a routed
+    script-stack frame — which by now knows what script it's reading —
+    queries the raw-ish post-SWA-C rows of its own column. Keys carry row
+    embeddings (the grid's vertical position must be addressable). Output
+    projection is zero-init, so the re-look is an exact no-op at step 0
+    and grows only if useful (same idiom as lid1_attn / self-cond gate).
+    Caller adds the residual.
+    """
+
+    def __init__(self, dim: int, kv_dim: int, n_rows: int,
+                 num_heads: int = 6):
+        super().__init__()
+        self.n_rows = n_rows
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.scale = self.head_dim ** -0.5
+
+        self.norm_q = nn.LayerNorm(dim)
+        self.norm_kv = nn.LayerNorm(kv_dim)
+        self.row_emb = nn.Parameter(torch.zeros(n_rows, kv_dim))
+        nn.init.trunc_normal_(self.row_emb, std=0.02)
+        self.q_proj = nn.Linear(dim, dim)
+        self.k_proj = nn.Linear(kv_dim, dim)
+        self.v_proj = nn.Linear(kv_dim, dim)
+        self.out_proj = nn.Linear(dim, dim)
+        nn.init.zeros_(self.out_proj.weight)
+        nn.init.zeros_(self.out_proj.bias)
+
+    def forward(self, x: Tensor, grid: Tensor, h: int, w: int) -> Tensor:
+        """x (B, w, D) queries; grid (B, h*w, C_kv) h-major keys/values."""
+        B, _, D = x.shape
+        nh, hd = self.num_heads, self.head_dim
+        q = self.q_proj(self.norm_q(x)).reshape(B, w, nh, hd)
+        keys = self.norm_kv(grid).reshape(B, h, w, -1) + self.row_emb[:h, None, :]
+        keys = keys.permute(0, 2, 1, 3)                    # (B, w, h, C_kv)
+        k = self.k_proj(keys).reshape(B, w, h, nh, hd)
+        v = self.v_proj(keys).reshape(B, w, h, nh, hd)
+        scores = torch.einsum("bwnd,bwhnd->bwnh", q, k) * self.scale
+        attn = scores.softmax(dim=-1)
+        out = torch.einsum("bwnh,bwhnd->bwnd", attn, v).reshape(B, w, D)
+        return self.out_proj(out)
+
+
 class ConvStem(nn.Module):
-    """Two-conv plain stem: (B, 3, 32, W) → (B, 96, 16, W/2).
+    """Lossless stem: (B, 3, H, W) → (B, 96, H/2, W/2).
 
-    Spatial feature extraction in 2 convs (channels 3 → 64 → 96):
-        Conv 1: 3  → 64,  stride (2, 2), 3×3 kernel  →  H 32→16, W→W/2
-        Conv 2: 64 → 96,  stride (1, 1), 3×3 kernel  →  H 16, W/2 (no downsample)
-
-    3×3 kernels keep RF tight for clean routing boundaries. The bulk of
-    the vertical / horizontal downsampling happens later via BlurPool
-    inside the ConvNeXt stage — the stem just prepares 96-ch features at
-    the base spatial resolution ConvA operates on.
+    PixelUnshuffle packs each 2×2 pixel block into channels (3 → 12) —
+    zero information discarded at the first downsample — then two
+    stride-1 3×3 convs (12 → 64 → 96). The old stride-2 conv was the one
+    fixed lossy sampler left in the trunk, and the first thing to touch
+    the top octave (hairline strokes, i'jam dots, thin matras) that 64px
+    input exists to capture; here the conv *learns* whatever low-pass it
+    needs instead of aliasing before features exist.
     """
 
     def __init__(self, in_ch: int = 3, mid_ch: int = 64, out_ch: int = 96):
         super().__init__()
+        self.unshuffle = nn.PixelUnshuffle(2)
         self.net = nn.Sequential(
-            nn.Conv2d(in_ch, mid_ch, kernel_size=3, stride=(2, 2),
+            nn.Conv2d(in_ch * 4, mid_ch, kernel_size=3, stride=1,
                       padding=1, bias=False),
             nn.GroupNorm(1, mid_ch),
             nn.GELU(),
-            nn.Conv2d(mid_ch, out_ch, kernel_size=3, stride=(1, 1),
+            nn.Conv2d(mid_ch, out_ch, kernel_size=3, stride=1,
                       padding=1, bias=False),
             nn.GroupNorm(1, out_ch),
             nn.GELU(),
         )
 
     def forward(self, x: Tensor) -> Tensor:
-        return self.net(x)
+        # PixelUnshuffle needs even spatial dims; heights are 32/64 by
+        # construction, widths come from bucketed batches but guard anyway.
+        if x.shape[-1] % 2:
+            x = F.pad(x, (0, 1))
+        return self.net(self.unshuffle(x))
 
 
 class ConvNeXtBlock(nn.Module):
@@ -622,30 +789,46 @@ class SWABlock(nn.Module):
 
 
 class CTCHead(nn.Module):
-    def __init__(self, enc_dim: int, vocab_size: int):
+    """Per-script CTC head emitting `emit_per_frame` tokens per frame.
+
+    One Linear(dim → E·vocab); the encoder reshapes (…, E, vocab) and
+    interleaves sub-positions along time, so frame t owns emission slots
+    E·t … E·t+E-1. Two slots per frame give adjacent same-token pairs
+    (Arabic teeth, jamo within one block) room for their blank separator —
+    at E=1 those segments fail CTC's length check and silently drop out
+    of the loss (`skipped_too_long`).
+    """
+
+    def __init__(self, enc_dim: int, vocab_size: int,
+                 emit_per_frame: int = 1):
         super().__init__()
         self.vocab_size = vocab_size
-        self.proj = nn.Linear(enc_dim, vocab_size)
+        self.emit_per_frame = emit_per_frame
+        self.proj = nn.Linear(enc_dim, emit_per_frame * vocab_size)
         # Init near-uniform so CTC starts at random baseline, not worse
         nn.init.normal_(self.proj.weight, std=0.01)
         nn.init.zeros_(self.proj.bias)
 
     def forward(self, features: Tensor) -> Tensor:
-        return self.proj(features)
+        """(..., dim) → (..., emit_per_frame, vocab)."""
+        out = self.proj(features)
+        return out.reshape(*out.shape[:-1], self.emit_per_frame,
+                           self.vocab_size)
 
 
 class GroupCTCModule(nn.Module):
     """Per-group CTC heads — one per script in the group."""
 
     def __init__(self, enc_dim: int, script_vocab_sizes: list[int],
-                 script_names: list[str]):
+                 script_names: list[str], emit_per_frame: int = 1):
         super().__init__()
         self.n_scripts = len(script_vocab_sizes)
         self.script_names = script_names
         self.max_vocab = max(script_vocab_sizes)
+        self.emit_per_frame = emit_per_frame
 
         self.heads = nn.ModuleList([
-            CTCHead(enc_dim, vs) for vs in script_vocab_sizes
+            CTCHead(enc_dim, vs, emit_per_frame) for vs in script_vocab_sizes
         ])
 
     def forward(self, features: Tensor, script_ids: Tensor
@@ -657,16 +840,20 @@ class GroupCTCModule(nn.Module):
             script_ids: (N,) — per-sample script assignment
 
         Returns:
-            logits: (N, T, max_vocab) — zero-padded
+            logits: (N, T*emit_per_frame, max_vocab) — zero-padded,
+                sub-positions interleaved along time
             script_ids: (N,) — as provided
         """
         N, T, C = features.shape
-        logits = torch.zeros(N, T, self.max_vocab,
+        E = self.emit_per_frame
+        logits = torch.zeros(N, T * E, self.max_vocab,
                              device=features.device, dtype=features.dtype)
         for s in script_ids.unique().tolist():
             mask = (script_ids == s)
             if s < len(self.heads):
-                head_out = self.heads[s](features[mask]).to(logits.dtype)
+                head_out = self.heads[s](features[mask])  # (n, T, E, V)
+                head_out = head_out.reshape(
+                    head_out.shape[0], T * E, -1).to(logits.dtype)
                 logits[mask, :, :head_out.shape[-1]] = head_out
         return logits, script_ids
 

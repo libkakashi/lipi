@@ -505,10 +505,10 @@ def resume_from_checkpoint(args, model, optimizer, base_optimizer, scaler, sched
     if getattr(args, 'skip_backbone_load', False):
         backbone_prefixes = (
             "stem.", "convA.", "convB.", "blur_ab.", "blur_bc.",
-            "merge_hc.", "swac_in_proj.", "swa_c.", "swa_d.",
-            "merge_cd.", "merge_d1.",
+            "swac_in_proj.", "swa_c.", "readout_cd.", "swa_d.",
+            "routed_collapse.", "relook.",
             "group_head.", "group_h_pool.", "lid1_attn.", "lid1_merge.",
-            "lid2_heads.", "norm.", "detail_tap",
+            "lid2_heads.", "norm.",
         )
         dropped = [k for k in model_state if any(k.startswith(p) for p in backbone_prefixes)]
         for k in dropped:
@@ -813,7 +813,8 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
         if ctc_weight != 0:
             ctc_plan = build_ctc_loss_plan(
                 segments_, out["logits"].shape[1],
-                group_script_names, group_script_vocabs, device)
+                group_script_names, group_script_vocabs, device,
+                emit_per_frame=LipiMoEEncoder.emit_per_frame)
             ctc_loss = apply_ctc_loss_plan(out["logits"], ctc_plan, device)
         else:
             ctc_plan = None
@@ -1096,8 +1097,8 @@ def main():
         if "backbone" in components:
             unfreeze_prefixes.extend([
                 "stem.", "convA.", "convB.", "blur_ab.", "blur_bc.",
-                "swac_in_proj.", "swa_c.", "swa_d.",
-                "merge_cd.", "merge_d1.", "norm."])
+                "swac_in_proj.", "swa_c.", "readout_cd.", "swa_d.",
+                "routed_collapse.", "relook.", "norm."])
 
         frozen = 0
         trainable = 0

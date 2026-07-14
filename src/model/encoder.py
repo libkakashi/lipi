@@ -1,26 +1,33 @@
 """
-Lipi v5 MoE Vision Encoder (from scratch — no pretrained backbone).
+Lipi v6 MoE Vision Encoder (from scratch — no pretrained backbone).
 
-Backbone (2× width downsample overall, so T = W/4):
+Backbone (2× width downsample overall, so T = W/4; heights for the 64px
+config, 32px runs the same graph at half the row counts):
 
-    Input: (B, 3, 32, W)
-    -> ConvStem:  conv3×3 s(2,2) 3→64 → conv3×3 s(1,1) 64→96   (16, W/2, 96)
-    -> ConvA:     3× ConvNeXt (dw7×7 + pw MLP), ch 96          (16, W/2, 96)
-    -> BlurPool s(2,1), 96→128                                 ( 8, W/2, 128)
-    -> ConvB:     3× ConvNeXt, ch 128                          ( 8, W/2, 128)
-    -> BlurPool s(2,2), 128→192  (second width stride)         ( 4, W/4, 192)
-    -> proj 192→256
-    -> SWA-C:     3× SWA block, dim 256, window 4×32           ( 4, W/4, 256)
-    -> merge h=4→2, Linear(512→384)                            ( 2, W/4, 384)
+    Input: (B, 3, 64, W)
+    -> ConvStem:  PixelUnshuffle(2) → 2× conv3×3 s1, 12→64→96  (32, W/2, 96)
+       (lossless first octave — no fixed low-pass touches raw pixels)
+    -> ConvA:     3× ConvNeXt (dw7×7 + pw MLP), ch 96          (32, W/2, 96)
+    -> BlurPool s(2,1), 96→160                                 (16, W/2, 160)
+    -> ConvB:     3× ConvNeXt, ch 160                          (16, W/2, 160)
+       (texture tap: 4 vertical bands × 2 width sub-positions → LID + heads)
+    -> BlurPool s(2,2), 160→256  (second width stride)         ( 8, W/4, 256)
+    -> proj 256→256
+    -> SWA-C:     3× SWA block, dim 256, window 8×16           ( 8, W/4, 256)
+       (kept as the re-look grid)
+    -> AttentionReadout 8→2 rows, 256→384 (learned queries,
+       row embeddings; ≈ mean-pool at step 0)                  ( 2, W/4, 384)
     -> SWA-D:     3× SWA block, dim 384, window 2×64           ( 2, W/4, 384)
-    -> LID-1 branch: lid1_merge(2 rows + ConvB texture tap), lid1_attn
+    -> LID-1 branch: lid1_merge(2 rows + texture tap), lid1_attn
        (w=32), group_head
-    -> merge h=2→1, Linear(768→384)                            ( 1, W/4, 384)
-    -> Group MoE stack: N × (shared attn + 14 routed MLPs + shared MLP)
-       (LID-2 heads tap the stack one block before the end)
+    -> Group MoE stack at h=2: N × (shared attn + 14 routed MLPs +
+       shared MLP); LID-2 heads tap one block before the end
+    -> RoutedReadout 2→1: per-script queries collapse the rows at the
+       LID-2 boundary — the first script-conditioned vertical decision
     -> intermediate CTC + self-conditioning feedback (tied head weights)
-    -> Script MoE stack: N × (shared attn + 27 routed MLPs + shared MLP)
-    -> Per-script CTC heads (T = W/4)
+    -> Script MoE stack: N × (shared attn + 27 routed MLPs + shared MLP),
+       with a ReLook back into the SWA-C grid after the first layer
+    -> Per-script CTC heads, 2 tokens per frame (output length 2·W/4)
 
 MoE layers (DeepSeek-style): each layer runs one windowed attention on the
 full unpacked frame sequence, then splits into a routed-MLP branch
@@ -37,13 +44,14 @@ from torch import Tensor
 
 from src.model.blocks import (
     ConvStem, ConvNeXtBlock, BlurPool2d, LayerScale, SWABlock, MoELayer,
-    GroupCTCModule, _patch_merge_h, _per_sample_key_lens, _dynamo_disable,
+    GroupCTCModule, AttentionReadout, RoutedReadout, ReLook,
+    _per_sample_key_lens, _dynamo_disable,
 )
 from src.taxonomy import NUM_GROUPS
 
 
 class LipiMoEEncoder(nn.Module):
-    """Lipi v5: ConvStem + ConvNeXt(A,B) + SWA-C/D + LID-1 + MoE stacks.
+    """Lipi v6: ConvStem + ConvNeXt(A,B) + SWA-C/D + LID-1 + MoE stacks.
 
     Two-level expert routing:
       1. LID-1 classifies each frame into a script group (14 + blank).
@@ -53,28 +61,34 @@ class LipiMoEEncoder(nn.Module):
          LID-1 has its own capacity for script-family discrimination
          without forcing the CTC feature path into a family/character
          compromise.
-      2. Group MoE stack: N stacked MoELayers with 14 routed MLPs each.
-         Every frame passes through the same attention; its MLP is
+      2. Group MoE stack at h=2: N stacked MoELayers with 14 routed MLPs
+         each. Every frame passes through the same attention; its MLP is
          picked by group_id, and a shared MLP always runs alongside.
+         Rows stay separate so no script-agnostic layer ever makes an
+         irreversible vertical decision.
       3. LID-2 classifies each frame into a script within its group
          (multi-script groups only; single-script groups skip it).
-         Its heads tap the group stack one block before the end — two
-         expert blocks of family-specialized processing feed the
-         fine-grained call, and the last group block plus the script
-         stack run after the decision. The heads also read the same
-         ConvB texture tap as LID-1 (stroke-level cues for the
+         Its heads tap the group stack one block before the end and read
+         both rows plus the ConvB texture tap (stroke-level cues for the
          within-group confusable pairs).
-      4. Script MoE stack: N stacked MoELayers with 27 routed MLPs each,
-         routed by flat script id.
-      5. Per-script CTC heads decode characters.
+      4. RoutedReadout collapses the two rows into one frame with the
+         routed script's own learned query — the vertical collapse
+         happens exactly where script identity becomes known.
+      5. Script MoE stack: N stacked MoELayers with 27 routed MLPs each,
+         routed by flat script id, with a ReLook after the first layer
+         that retrieves raw stroke rows from the SWA-C grid.
+      6. Per-script CTC heads decode characters at 2 tokens per frame.
 
     Time downsampling: overall W is downsampled by 4× (stem s=2 then
-    BlurPool s=2 on width) so the output length is T = W/4.  This is
-    exposed as the `time_downsample` class attribute so callers can
-    compute frame offsets without hard-coding the factor.
+    BlurPool s=2 on width) so there are T = W/4 frames; each frame emits
+    `emit_per_frame` CTC tokens, so logits/lengths run at T·emit_per_frame.
+    Both are class attributes so callers can compute frame offsets and
+    emission lengths without hard-coding factors.
     """
 
-    time_downsample = 4  # imgs W / time_downsample = T (output frames)
+    time_downsample = 4  # imgs W / time_downsample = T (frames)
+    emit_per_frame = 2   # CTC emission slots per frame (logits len = 2T)
+    tex_bands = 4        # vertical bands in the ConvB texture tap
 
     def __init__(
         self,
@@ -89,7 +103,7 @@ class LipiMoEEncoder(nn.Module):
         num_swa_c_blocks: int = 3,
         num_swa_d_blocks: int = 3,
         num_group_layers: int = 3,
-        num_script_layers: int = 3,
+        num_script_layers: int = 4,
         swa_c_window_w: int = 32,
         swa_d_window_w: int = 64,
         local_window_w: int = 16,
@@ -109,10 +123,16 @@ class LipiMoEEncoder(nn.Module):
         # Silently drop any unknown kwargs — old checkpoint configs may still
         # carry names like num_group_local_blocks / num_super_groups / etc.
         del unused_kwargs
-        if in_height not in (32, 64):
+        # The trunk's vertical path is: stem /2 → blur_ab /2 → blur_bc /2 =
+        # /8 total, giving h_c = in_height//8 rows at SWA-C, then an
+        # AttentionReadout (learned queries) collapses h_c → 2 for any h_c.
+        # So the only real constraint is in_height % 8 == 0 (and each strided
+        # stage input even, which follows). 48 (h_c=6) tiles fine; the old
+        # {32, 64} guard was conservative.
+        if in_height % 8 != 0 or in_height < 16:
             raise ValueError(
-                f"in_height must be 32 or 64, got {in_height} — the trunk's "
-                "stride/window geometry only tiles at those heights.")
+                f"in_height must be a multiple of 8 (≥16), got {in_height} — "
+                "the stem+2 BlurPools downsample by 8 to the SWA-C grid.")
         self.in_height = in_height
         self.num_groups = num_groups
         self.blank_group_id = num_groups
@@ -218,54 +238,42 @@ class LipiMoEEncoder(nn.Module):
             for _ in range(num_convB_blocks)
         ])
 
-        # ── BlurPool s(2,2): 128→192 at (8, W/2) → (4, W/4) ──────────
+        # ── BlurPool s(2,2): 160→256 at (16, W/2) → (8, W/4) ─────────
         # Second (and last) width stride happens here.
         self.blur_bc = BlurPool2d(convb_ch, swac_in_ch, stride=(2, 2))
 
-        # ── in_height=64: one extra learned vertical merge → SWA-C still
-        # sees 4 rows. The conv frontend extracts stroke features at 2×
-        # detail; concatenating row pairs (lossless) and projecting lets
-        # the model LEARN which vertical detail survives the compression,
-        # unlike a fixed low-pass which discards high vertical frequencies
-        # unconditionally. Initialized as the row-pair average, so it
-        # starts as plain pooling and specializes from there (same
-        # convention as merge_cd / merge_d1).
-        if in_height == 64:
-            self.merge_hc = nn.Linear(2 * swac_in_ch, swac_in_ch)
-            with torch.no_grad():
-                eye = torch.eye(swac_in_ch)
-                self.merge_hc.weight.copy_(
-                    torch.cat([0.5 * eye, 0.5 * eye], dim=1))
-                self.merge_hc.bias.zero_()
-        else:
-            self.merge_hc = None
+        # Rows on the SWA-C grid: 8 at in_height=64, 4 at 32. The grid is
+        # kept alive after SWA-C as the ReLook's key/value source.
+        self.h_c = in_height // 8
 
         # ── SWA-C entry projection: swac_in_ch → swac_dim ─────────────
         # Kept as a 1×1 conv (channel-last equivalent) so the SWA-C blocks
         # can run at swac_dim even though BlurPool outputs swac_in_ch.
         self.swac_in_proj = nn.Linear(swac_in_ch, swac_dim)
 
-        # ── SWA-C: 3× SWA @ swac_dim at (4, W/4), window 4×32 ─────────
+        # ── SWA-C: 3× SWA @ swac_dim on the full (h_c, W/4) grid ─────
+        # Window area stays 128 tokens across heights: 8×16 at 64px,
+        # 4×32 at 32px. The finest post-stride grid gets real processing
+        # before any vertical compression — there is no naked resolution
+        # level in the trunk.
+        swa_c_win_w = swa_c_window_w * 4 // self.h_c
         self.swa_c = nn.ModuleList([
             SWABlock(dim=swac_dim, num_heads=max(swac_dim // 64, 1),
-                     window_h=4, window_w=swa_c_window_w, shift=(i % 2 == 1),
+                     window_h=self.h_c, window_w=swa_c_win_w,
+                     shift=(i % 2 == 1),
                      mlp_ratio=shared_mlp_ratio, drop_path=next(dp_iter),
                      layer_scale_init=1e-4)
             for i in range(num_swa_c_blocks)
         ])
 
-        # ── merge h=4→2, dim swac_dim*2 → dim ────────────────────────
-        # Concatenates pairs of adjacent rows into a single row and
-        # projects to the SWA-D dim. Init averages the two rows into the
-        # first swac_dim output channels; extra output channels start at 0.
-        self.merge_cd = nn.Linear(swac_dim * 2, dim)
-        with torch.no_grad():
-            self.merge_cd.weight.zero_()
-            d_copy = min(swac_dim, dim)
-            self.merge_cd.weight[:d_copy, :d_copy] = 0.5 * torch.eye(d_copy)
-            self.merge_cd.weight[:d_copy, swac_dim:swac_dim + d_copy] = \
-                0.5 * torch.eye(d_copy)
-            self.merge_cd.bias.zero_()
+        # ── AttentionReadout h_c→2 rows, swac_dim → dim ───────────────
+        # Learned queries + row embeddings replace the fixed pairwise
+        # linear merges: the collapse is content-adaptive (it can find
+        # the text band under baseline wander) and starts as plain row
+        # mean-pooling (near-uniform attention + identity v/out init).
+        self.readout_cd = AttentionReadout(
+            swac_dim, dim, n_rows=self.h_c, n_queries=2,
+            num_heads=max(swac_dim // 64, 1))
 
         # ── SWA-D: 3× SWA @ dim at (2, W/4), window 2×64 ─────────────
         self.swa_d = nn.ModuleList([
@@ -276,39 +284,30 @@ class LipiMoEEncoder(nn.Module):
             for i in range(num_swa_d_blocks)
         ])
 
-        # ── merge h=2→1, dim*2 → dim (CTC path only) ──────────────────
-        # Init as average of the two rows so features pass through at
-        # step 0.
-        self.merge_d1 = nn.Linear(dim * 2, dim)
-        with torch.no_grad():
-            self.merge_d1.weight.zero_()
-            self.merge_d1.weight[:, :dim] = 0.5 * torch.eye(dim)
-            self.merge_d1.weight[:, dim:] = 0.5 * torch.eye(dim)
-            self.merge_d1.bias.zero_()
-
         # Each MoE layer consumes one entry from the drop-path schedule.
         # Same order as construction below: group layers first, then script.
         group_dps = [next(dp_iter) for _ in range(num_group_layers)]
         script_dps = [next(dp_iter) for _ in range(num_script_layers)]
 
         # ── LID-1: per-frame group classification ─────────────────────
-        # Branches off SWA-D output (at h=2) before merge_d1, plus a
-        # texture tap from ConvB. Script ID is texture-like (vertical ink
-        # profile, stroke curvature/loop statistics) — cues that are
-        # strongest in early conv features and that the CTC-shaped deep
-        # trunk is under no pressure to preserve. lid1_merge fuses
-        # [row0, row1, ConvB texture] → dim: a learned h-merge private to
-        # the LID branch (merge_d1 stays CTC-gradient-only) that keeps
-        # the vertical profile a plain h-mean would average away.
-        # Init: the two row blocks average the rows — exactly the old
-        # h-mean, so step-0 behavior is unchanged — and the ConvB block
-        # is zero, so the texture tap is a no-op that grows only if
-        # useful. Then a dedicated lid1_attn block (window w=32) for
-        # LID-1's own horizontal-context capacity, and a small MLP head.
-        # lid1_attn keeps LayerScale at 1.0: its identity-at-init comes
-        # from the zero-init projections below, and a near-zero
-        # LayerScale on top would suppress its gradients ~1e4x.
-        self.lid1_merge = nn.Linear(dim * 2 + convb_ch, dim)
+        # Branches off SWA-D output (at h=2), plus a texture tap from
+        # ConvB. Script ID is texture-like (vertical ink profile, stroke
+        # curvature/loop statistics) — cues that are strongest in early
+        # conv features and that the CTC-shaped deep trunk is under no
+        # pressure to preserve. The tap keeps 4 vertical bands × 2 width
+        # sub-positions per frame (a plain h-mean would average away the
+        # vertical profile the tap exists to carry; the width pair holds
+        # sub-frame stroke order for the 2-token emission slots).
+        # lid1_merge fuses [row0, row1, tex] → dim. Init: the two row
+        # blocks average the rows and the tex block is zero, so the tap
+        # starts silent and grows only if useful. Then a dedicated
+        # lid1_attn block (window w=32) for LID-1's own horizontal-context
+        # capacity, and a small MLP head. lid1_attn keeps LayerScale at
+        # 1.0: its identity-at-init comes from the zero-init projections
+        # below, and a near-zero LayerScale on top would suppress its
+        # gradients ~1e4x.
+        self.tex_dim = 2 * self.tex_bands * convb_ch
+        self.lid1_merge = nn.Linear(dim * 2 + self.tex_dim, dim)
         with torch.no_grad():
             self.lid1_merge.weight.zero_()
             self.lid1_merge.weight[:, :dim] = 0.5 * torch.eye(dim)
@@ -331,15 +330,17 @@ class LipiMoEEncoder(nn.Module):
             nn.Linear(dim // 2, num_groups + 1),
         )
 
-        # ── Group MoE stack (routed by group_id) ──────────────────────
+        # ── Group MoE stack at h=2 (routed by group_id) ───────────────
         # N stacked MoELayers, alternating local/wide window widths and
         # shifts. Each layer: shared attention + 14 routed MLPs (one per
-        # group) + shared MLP (always on).
+        # group) + shared MLP (always on). Runs on both rows (window_h=2,
+        # per-column ids repeated across rows) so vertical structure
+        # survives until script identity is known.
         self.group_layers = nn.ModuleList([
             MoELayer(
                 dim=dim, num_heads=max(dim // 64, 1), num_experts=num_groups,
                 window_w=(local_window_w if i % 2 == 0 else wide_window_w),
-                shift=(i % 2 == 1),
+                shift=(i % 2 == 1), window_h=2,
                 routed_mlp_ratio=mlp_ratio,
                 shared_mlp_ratio=moe_shared_mlp_ratio,
                 drop_path=group_dps[i],
@@ -349,28 +350,35 @@ class LipiMoEEncoder(nn.Module):
         ])
 
         # ── LID-2: per-frame script classification (multi-script groups)
-        # Heads read [group-stack tap ‖ ConvB texture] — the within-group
-        # calls (telugu/kannada, malayalam/tamil, NE-Indic) ride on
-        # stroke-level cues that the CTC-shaped deep features are under
-        # no pressure to keep, so the same texture tap that feeds LID-1
-        # feeds these heads. Texture columns zero-init: the tap starts
-        # silent and grows only if useful.
+        # Heads read [both group-stack rows ‖ ConvB texture] — the
+        # within-group calls (telugu/kannada, malayalam/tamil, NE-Indic)
+        # ride on vertical-position and stroke-level cues that the
+        # CTC-shaped deep features are under no pressure to keep.
+        # Texture columns zero-init: the tap starts silent and grows
+        # only if useful.
         self.lid2_heads = nn.ModuleDict()
         for g in range(num_groups):
             n_scripts = len(group_script_vocab_sizes[g])
             if n_scripts > 1:
                 head = nn.Sequential(
-                    nn.Linear(dim + convb_ch, dim // 2),
+                    nn.Linear(dim * 2 + self.tex_dim, dim // 2),
                     nn.GELU(),
                     nn.Linear(dim // 2, n_scripts),
                 )
                 with torch.no_grad():
-                    head[0].weight[:, dim:].zero_()
+                    head[0].weight[:, dim * 2:].zero_()
                 self.lid2_heads[str(g)] = head
+
+        # ── RoutedReadout: script-conditioned collapse h=2 → 1 ────────
+        # The final vertical decision, made by the routed script's own
+        # query at the LID-2 boundary. Blank/unrouted frames use the
+        # shared default query. Starts as the row mean (≡ old merge_d1).
+        self.routed_collapse = RoutedReadout(
+            dim, self.total_scripts, num_heads=max(dim // 64, 1))
 
         # ── Script MoE stack (routed by flat script_id) ───────────────
         # Same shape as group_layers but with total_scripts routed MLPs
-        # per layer (27 for the full taxonomy).
+        # per layer (27 for the full taxonomy), at h=1 post-collapse.
         self.script_layers = nn.ModuleList([
             MoELayer(
                 dim=dim, num_heads=max(dim // 64, 1),
@@ -385,29 +393,29 @@ class LipiMoEEncoder(nn.Module):
             for i in range(num_script_layers)
         ])
 
+        # ReLook: after the first script layer, each (routed) frame
+        # cross-attends back into its column's SWA-C rows — a second look
+        # at near-raw stroke evidence taken after the model knows what
+        # script it's reading. Zero-init output proj → exact no-op at
+        # step 0.
+        self.relook = ReLook(dim, swac_dim, n_rows=self.h_c,
+                             num_heads=max(dim // 64, 1))
+
         # Output
         self.enc_out_dim = dim
         self.norm = nn.LayerNorm(dim)
 
         # Self-conditioned CTC feedback gate (zero-init: feedback starts
-        # as a no-op and grows only if useful; also makes warm-starting
-        # from pre-self-cond checkpoints exact).
+        # as a no-op and grows only if useful).
         self.self_cond_ls = LayerScale(dim, init_value=0.0)
 
-        # Fine-detail tap: raw ConvB stroke features injected into the
-        # script-stack input, so the recognition heads see near-raw stroke
-        # evidence alongside the contextualized deep path (same idiom as
-        # the LID-1 texture tap and the self-cond feedback). Zero-init
-        # gate → exact no-op at warm start, grows only if useful.
-        self.detail_tap = nn.Linear(convb_ch, dim)
-        self.detail_tap_ls = LayerScale(dim, init_value=0.0)
-
-        # Per-script CTC heads
+        # Per-script CTC heads (emit_per_frame tokens per frame each)
         self.ctc_modules = nn.ModuleList([
             GroupCTCModule(
                 enc_dim=dim,
                 script_vocab_sizes=group_script_vocab_sizes[g],
                 script_names=group_script_names[g],
+                emit_per_frame=self.emit_per_frame,
             )
             for g in range(num_groups)
         ])
@@ -426,7 +434,7 @@ class LipiMoEEncoder(nn.Module):
         keeping them eager lets the trunk + MoE compile once and stay
         compiled. Autograd still flows through this region.
 
-        CTC heads are position-wise Linear(dim → vocab), so frame order
+        CTC heads are position-wise Linear(dim → E·vocab), so frame order
         within a script is irrelevant: gather all routed frames once
         (grouped by flat script id), run each head on its contiguous
         slice, and scatter back with a single index_copy. The old
@@ -434,11 +442,15 @@ class LipiMoEEncoder(nn.Module):
         full-size (B*T, max_vocab) masked_fill in backward once per
         script — 27 giant-tensor ops per call dominated the training
         step. index_copy's backward is one index_select.
+
+        Returns (B, T·emit_per_frame, max_vocab): each frame's E emission
+        slots are interleaved along time (frame t owns slots E·t…E·t+E-1).
         """
         B, T, D = x.shape
+        E = self.emit_per_frame
         max_vocab = max(m.max_vocab for m in self.ctc_modules)
         N = B * T
-        logits = torch.zeros(N, max_vocab, device=x.device, dtype=x.dtype)
+        logits = torch.zeros(N, E, max_vocab, device=x.device, dtype=x.dtype)
 
         # Per-flat-script frame counts (precomputed on CPU — no sync).
         counts = [sum(script_lens_cpu[b][f] for b in range(B))
@@ -448,20 +460,21 @@ class LipiMoEEncoder(nn.Module):
             pos = self._routed_positions(flat_scripts.reshape(N), M)
             xg = x.reshape(N, D).index_select(0, pos)  # grouped by script
 
-            # Write each head's slice into one preallocated (M, max_vocab)
-            # buffer — avoids a per-script F.pad alloc plus the final cat.
-            yg = torch.zeros(M, max_vocab, device=x.device, dtype=logits.dtype)
+            # Write each head's slice into one preallocated buffer —
+            # avoids a per-script F.pad alloc plus the final cat.
+            yg = torch.zeros(M, E, max_vocab,
+                             device=x.device, dtype=logits.dtype)
             start = 0
             for (g, s), flat_id in self._heads_in_flat_order:
                 k = counts[flat_id]
                 if k == 0:
                     continue
                 head = self.ctc_modules[g].heads[s]
-                yg[start:start + k, :head.vocab_size] = \
+                yg[start:start + k, :, :head.vocab_size] = \
                     head(xg[start:start + k]).to(logits.dtype)
                 start += k
             logits = logits.index_copy(0, pos, yg)
-        return logits.reshape(B, T, max_vocab)
+        return logits.reshape(B, T * E, max_vocab)
 
     def _routed_positions(self, ff: Tensor, M: int) -> Tensor:
         """Flat positions of routed frames, grouped by flat script id.
@@ -483,17 +496,21 @@ class LipiMoEEncoder(nn.Module):
         dispatch with distinct vocab shapes). The graph breaks here, before
         the script stack; the trunk and both MoE stacks still compile.
 
-        Tied weights: each script's CTC head is Linear(dim → vocab) with
-        weight (vocab, dim), so posterior @ weight maps the per-frame
-        token distribution back to dim — per-script, zero new parameters.
-        Blank/unrouted frames get zero feedback.
+        Tied weights: each script's CTC head is Linear(dim → E·vocab)
+        with weight (E·vocab, dim); viewing it (E, vocab, dim) and summing
+        each emission slot's posterior through its own weight block maps
+        the per-frame token distributions back to dim — position-aware
+        feedback, per-script, zero new parameters. Blank/unrouted frames
+        get zero feedback.
 
         Same grouped gather/scatter as _ctc_logits: one index_select of
         the routed rows, per-script compact softmax + matmul on contiguous
         slices, one index_copy back — instead of 27 full-size masked
         gathers/scatters whose backward dominated the step.
         """
-        B, T, V = inter_logits.shape
+        B, TE, V = inter_logits.shape
+        E = self.emit_per_frame
+        T = TE // E
         N = B * T
         fb = torch.zeros(N, self.enc_out_dim,
                          device=inter_logits.device, dtype=inter_logits.dtype)
@@ -503,7 +520,7 @@ class LipiMoEEncoder(nn.Module):
         M = sum(counts)
         if M > 0:
             pos = self._routed_positions(flat_scripts.reshape(N), M)
-            lg = inter_logits.reshape(N, V).index_select(0, pos)  # (M, V)
+            lg = inter_logits.reshape(N, E, V).index_select(0, pos)
 
             outs = []
             start = 0
@@ -513,9 +530,10 @@ class LipiMoEEncoder(nn.Module):
                     continue
                 head = self.ctc_modules[g].heads[s]
                 vs = head.vocab_size
-                post = lg[start:start + k, :vs].softmax(dim=-1)  # (k, vs)
+                post = lg[start:start + k, :, :vs].softmax(dim=-1)  # (k,E,vs)
+                w = head.proj.weight.view(E, vs, -1).to(post.dtype)
                 outs.append(
-                    (post @ head.proj.weight.to(post.dtype)).to(fb.dtype))
+                    torch.einsum("kev,evd->kd", post, w).to(fb.dtype))
                 start += k
             fb = fb.index_copy(
                 0, pos, torch.cat(outs) if len(outs) > 1 else outs[0])
@@ -534,62 +552,68 @@ class LipiMoEEncoder(nn.Module):
         return torch.where(group_ids >= 0, lut[g, s],
                            group_ids.new_full((), -1))
 
-    def _run_backbone(self, images: Tensor) -> tuple[Tensor, Tensor, int, int]:
+    def _run_backbone(
+            self, images: Tensor) -> tuple[Tensor, Tensor, Tensor, int, int]:
         """Run stem → ConvA → BlurPool → ConvB → BlurPool → proj → SWA-C
-        → merge → SWA-D. Returns (x, tex, h, w) with x of shape
-        (B, h*w, dim), h=2, w=T = W/4. The h=2 tensor feeds both the
-        LID-1 branch and the final merge_d1 → CTC path. tex is
-        (B, w, convb_ch): ConvB stroke-texture features pooled to the
-        final frame grid for the LID-1 texture tap.
+        → AttentionReadout → SWA-D. Returns (x, tex, grid, h, w):
+          x:    (B, 2*w, dim) h-major, h=2, w=T = W/4 — feeds the LID-1
+                branch and the group stack.
+          tex:  (B, w, tex_dim) ConvB stroke texture, 4 vertical bands ×
+                2 width sub-positions per frame (sub-position-major).
+          grid: (B, h_c*w, swac_dim) the post-SWA-C rows, kept alive as
+                the ReLook key/value source.
         """
         B = images.shape[0]
         x = images.float() / 255.0 if images.dtype == torch.uint8 else images
 
-        # Stem: (B, 3, 32, W) → (B, stem_out_ch, 16, W/2)
+        # Stem (lossless): (B, 3, H, W) → (B, stem_out_ch, H/2, W/2)
         x = self.stem(x)
 
-        # ConvA: 3× ConvNeXt in NCHW at (16, W/2)
+        # ConvA: 3× ConvNeXt in NCHW at (H/2, W/2)
         for blk in self.convA:
             x = blk(x)
 
-        # BlurPool s(2,1) 96→128: (16, W/2) → (8, W/2)
+        # BlurPool s(2,1): (H/2, W/2) → (H/4, W/2)
         x = self.blur_ab(x)
 
-        # ConvB: 3× ConvNeXt at (8, W/2)
+        # ConvB: 3× ConvNeXt at (H/4, W/2)
         for blk in self.convB:
             x = blk(x)
 
-        # LID-1 texture tap: ConvB features pooled to the final frame
-        # grid — h-mean over the 8 rows, width avg-pooled 2×. ceil_mode
-        # matches blur_bc's stride-2 conv (k3, p1) width arithmetic
-        # (both give ceil(w/2)), so tex width == T for any input width.
-        tex = x.mean(dim=2)  # (B, convb_ch, W/2)
-        tex = F.avg_pool1d(tex, kernel_size=2, stride=2, ceil_mode=True)
-        tex = tex.transpose(1, 2)  # (B, W/4, convb_ch)
+        # Texture tap: pool ConvB rows into tex_bands vertical bands and
+        # pair adjacent columns (the two width sub-positions of each
+        # output frame) — vertical position and sub-frame stroke order
+        # both survive, unlike the old h-mean + width average. Column
+        # pairing matches blur_bc's stride-2 width arithmetic (ceil(Wc/2))
+        # via replicate-pad when Wc is odd.
+        Bc, Cc, hb, Wc = x.shape
+        tex = F.avg_pool2d(x, kernel_size=(hb // self.tex_bands, 1))
+        if Wc % 2:
+            tex = F.pad(tex, (0, 1), mode="replicate")
+        tex = tex.reshape(Bc, Cc, self.tex_bands, -1, 2)   # (B,C,4,T,2)
+        tex = tex.permute(0, 3, 4, 2, 1).reshape(Bc, -1, self.tex_dim)
 
-        # BlurPool s(2,2) 128→192: (8, W/2) → (4, W/4)
+        # BlurPool s(2,2): (H/4, W/2) → (h_c, W/4)
         x = self.blur_bc(x)
 
-        # SWA-C: switch to channel-last for SWA. (B, C, H, W) → (B, H*W, C).
-        _, C, h, w = x.shape  # h=4 (or 8 at in_height=64), w=W/4
+        # SWA-C: switch to channel-last. (B, C, h_c, w) → (B, h_c*w, C).
+        _, C, h, w = x.shape  # h = h_c (8 at 64px, 4 at 32px), w = W/4
         x = x.permute(0, 2, 3, 1).reshape(B, h * w, C)
-
-        # in_height=64: learned vertical merge (8, W/4) → (4, W/4)
-        if self.merge_hc is not None:
-            x, h = _patch_merge_h(x, h, w, self.merge_hc)
 
         x = self.swac_in_proj(x)  # C → swac_dim
         for blk in self.swa_c:
             x = blk(x, h, w)
+        grid = x  # ReLook keys/values: the finest post-stride rows
 
-        # merge h=4→2, swac_dim*2 → dim
-        x, h = _patch_merge_h(x, h, w, self.merge_cd)  # h=4→2
+        # AttentionReadout: (h_c, w) → (2, w), swac_dim → dim
+        x = self.readout_cd(x, h, w)
+        h = 2
 
         # SWA-D at (2, W/4), dim
         for blk in self.swa_d:
             x = blk(x, h, w)
 
-        return x, tex, h, w
+        return x, tex, grid, h, w
 
     def forward(
         self,
@@ -630,23 +654,19 @@ class LipiMoEEncoder(nn.Module):
                 f"{self.in_height} — the data and model heights must match "
                 "(regenerate shards or rebuild the model).")
 
-        x, tex, h, w = self._run_backbone(images)
+        x, tex, grid, h, w = self._run_backbone(images)
         # x here is post-SWA-D at (h=2, w=W/4). w is the final T.
         d = x.shape[-1]
 
         # LID-1 branch: lid1_merge fuses the two SWA-D rows (learned
         # h-merge, avg-init — see __init__) with the ConvB texture tap,
-        # then lid1_attn (window w=32) and the classifier. Uses the
-        # pre-merge_d1 tensor so merge_d1 only ever sees CTC gradient.
-        # Row layout matches _patch_merge_h: [row0 chans, row1 chans].
+        # then lid1_attn (window w=32) and the classifier.
+        # Row layout: h-major, so [row0 chans, row1 chans] per column.
         x_rows = x.reshape(B, h, w, d).permute(0, 2, 1, 3).reshape(B, w, h * d)
         x_for_group = self.lid1_merge(
             torch.cat([x_rows, tex.to(x_rows.dtype)], dim=-1))
         x_for_group = self.lid1_attn(x_for_group, 1, w)
         group_logits = self.group_head(x_for_group)  # (B, w, num_groups+1)
-
-        # Patch-merge 2 → 1, dim*2 → dim (CTC path only).
-        x, h = _patch_merge_h(x, h, w, self.merge_d1)
 
         # Determine per-frame group assignments
         if group_ids is not None:
@@ -675,18 +695,22 @@ class LipiMoEEncoder(nn.Module):
             x = x.detach()
 
         # =====================================================================
-        # STAGE 1: Group MoE stack.
-        # Each MoELayer runs shared attention on the full sequence, then
-        # applies per-frame routed MLPs (indexed by frame_groups) plus a
-        # shared MLP. Blank frames (group_id >= num_groups) still get
-        # attention + shared MLP; only the routed MLP is skipped.
+        # STAGE 1: Group MoE stack at h=2.
+        # Each MoELayer runs shared attention on both rows, then applies
+        # per-frame routed MLPs (indexed by frame_groups, repeated across
+        # rows) plus a shared MLP. Blank frames (group_id >= num_groups)
+        # still get attention + shared MLP; only the routed MLP is skipped.
         # =====================================================================
 
-        # One upfront sync: per-sample per-group frame counts. Reused
+        # Per-column ids repeated across both rows (h-major layout).
+        groups_h2 = torch.cat([frame_groups, frame_groups], dim=1)
+
+        # One upfront sync: per-sample per-group frame counts (at h=2
+        # granularity — every count is 2× the column count). Reused
         # across every group layer so the sync-free expert skip in
         # MoELayer._routed_mlp costs zero per-layer.
         group_lens_cpu = _per_sample_key_lens(
-            frame_groups, self.num_groups).tolist()
+            groups_h2, self.num_groups).tolist()
 
         # LID-2 taps the group stack one block before the end: two expert
         # blocks of family-specialized processing feed the fine-grained
@@ -696,7 +720,7 @@ class LipiMoEEncoder(nn.Module):
         lid2_tap = max(len(self.group_layers) - 2, 0)
         x_lid2 = x
         for i, layer in enumerate(self.group_layers):
-            x = layer(x, frame_groups, group_lens_cpu, w)
+            x = layer(x, groups_h2, group_lens_cpu, w, h=2)
             if i == lid2_tap:
                 x_lid2 = x
 
@@ -704,9 +728,11 @@ class LipiMoEEncoder(nn.Module):
         # LID-2: per-frame script classification
         # =====================================================================
 
-        # Collect LID-2 logits for multi-script groups. Heads read the
-        # group-stack tap concat the ConvB texture tap (see __init__).
-        x_lid2_in = torch.cat([x_lid2, tex.to(x_lid2.dtype)], dim=-1)
+        # Collect LID-2 logits for multi-script groups. Heads read both
+        # rows of the group-stack tap concat the ConvB texture tap.
+        x_lid2_rows = x_lid2.reshape(B, 2, w, d).permute(
+            0, 2, 1, 3).reshape(B, w, 2 * d)
+        x_lid2_in = torch.cat([x_lid2_rows, tex.to(x_lid2_rows.dtype)], dim=-1)
         lid2_logits_per_group = {}  # g → (B, T, n_scripts)
         for g_str, head in self.lid2_heads.items():
             g = int(g_str)
@@ -758,12 +784,13 @@ class LipiMoEEncoder(nn.Module):
         # is False (e.g. ctc_weight=0 pretraining). Script experts have
         # no gradient path to any active loss in that case.
         if not compute_ctc:
-            T = w
+            T_e = w * self.emit_per_frame
             max_vocab = max(m.max_vocab for m in self.ctc_modules)
             return {
-                "logits": torch.zeros(B, T, max_vocab,
+                "logits": torch.zeros(B, T_e, max_vocab,
                                       device=x.device, dtype=x.dtype),
-                "lengths": torch.full((B,), T, dtype=torch.long, device=x.device),
+                "lengths": torch.full((B,), T_e, dtype=torch.long,
+                                      device=x.device),
                 "group_logits": group_logits,
                 "group_ids": frame_groups,
                 "lid2_logits_per_group": lid2_logits_per_group,
@@ -772,7 +799,16 @@ class LipiMoEEncoder(nn.Module):
             }
 
         # =====================================================================
-        # STAGE 2: Script MoE stack.
+        # RoutedReadout: script-conditioned vertical collapse h=2 → 1.
+        # The rows survive every script-agnostic stage; the collapse
+        # happens here, where the routed script's own query decides how
+        # its frames weight the rows. Blank/unrouted frames use the
+        # shared default query (≈ row mean at init either way).
+        # =====================================================================
+        x = self.routed_collapse(x, flat_scripts, 2, w)
+
+        # =====================================================================
+        # STAGE 2: Script MoE stack (h=1).
         # Same shape as Stage 1, routed by flat script id. Frames whose
         # flat_scripts == -1 (blank / unrouted) skip only the routed MLP.
         # =====================================================================
@@ -792,23 +828,24 @@ class LipiMoEEncoder(nn.Module):
         x = x + self.self_cond_ls(
             self._ctc_feedback(inter_logits, flat_scripts, script_lens_cpu))
 
-        # Fine-detail tap: per-frame ConvB stroke features (the same tex
-        # tensor LID-1 reads) into the script stack, gated at zero.
-        x = x + self.detail_tap_ls(self.detail_tap(tex.to(x.dtype)))
-
-        for layer in self.script_layers:
+        for i, layer in enumerate(self.script_layers):
             x = layer(x, flat_scripts, script_lens_cpu, w)
+            if i == 0:
+                # ReLook: routed frames take a second look at the raw
+                # stroke rows of their own column in the SWA-C grid —
+                # retrieval after routing, zero-init (no-op at step 0).
+                x = x + self.relook(x, grid.to(x.dtype), self.h_c, w)
 
         # =====================================================================
-        # CTC heads (per-frame routing via boolean mask — no packing)
+        # CTC heads (per-frame routing via grouped gather/scatter)
         # =====================================================================
 
         x = self.norm(x)
-        T = x.shape[1]
 
         logits = self._ctc_logits(x, flat_scripts, script_lens_cpu)
 
-        lengths = torch.full((B,), T, dtype=torch.long, device=x.device)
+        lengths = torch.full((B,), w * self.emit_per_frame,
+                             dtype=torch.long, device=x.device)
 
         out = {
             "logits": logits,

@@ -68,6 +68,26 @@ class TestConsistencyLoss:
         assert loss.item() > 0  # LID term still active
         assert loss.item() != loss_full.item()
 
+    def test_emission_slot_logits(self):
+        """CTC logits at 2 emission slots per frame (v6 encoder) against
+        frame-granularity flat_scripts — the mask must expand to slot
+        granularity instead of crashing (regression: smoke run batch 0,
+        mask (B, T) indexing logits (B, 2T, V))."""
+        _, _, g1, g2, flat, gl, aligned = _inputs(identical=True)
+        torch.manual_seed(3)
+        l1 = torch.randn(B, 2 * T, MAX_VOCAB)
+        # Identical views at 2T → CTC term zero; LID term zero
+        loss = compute_consistency_loss(l1, l1.clone(), g1, g2.copy_(g1),
+                                        flat, gl, aligned, VOCABS)
+        assert loss.item() < 1e-6
+        # Different views at 2T → positive, and both slots participate:
+        # poisoning only odd slots (frame's 2nd emission) must move it.
+        l2 = l1.clone()
+        l2[:, 1::2, :8] += 3.0
+        loss_odd = compute_consistency_loss(l1, l2, g1, g1.clone(),
+                                            flat, gl, aligned, VOCABS)
+        assert loss_odd.item() > 0.01
+
 
 class TestTwoViewCollate:
 

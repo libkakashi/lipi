@@ -62,24 +62,28 @@ def _mixed_script_routing(model, T=24):
 
 
 def _ref_ctc_logits(model, x, flat_scripts, script_lens_cpu):
-    """Old implementation: per-script boolean-mask scatter."""
+    """Reference implementation: per-script boolean-mask scatter."""
     B, T, _ = x.shape
+    E = model.emit_per_frame
     max_vocab = max(m.max_vocab for m in model.ctc_modules)
-    logits = torch.zeros(B, T, max_vocab, device=x.device, dtype=x.dtype)
+    logits = torch.zeros(B, T, E, max_vocab, device=x.device, dtype=x.dtype)
     for (g, s), flat_id in model._flat_script_id.items():
         if not any(script_lens_cpu[b][flat_id] > 0 for b in range(B)):
             continue
         mask = (flat_scripts == flat_id)
         head = model.ctc_modules[g].heads[s]
         vs = head.vocab_size
-        head_out = head(x[mask]).to(logits.dtype)
+        head_out = head(x[mask]).to(logits.dtype)  # (k, E, vs)
         logits[mask] = F.pad(head_out, (0, max_vocab - vs))
-    return logits
+    return logits.reshape(B, T * E, max_vocab)
 
 
 def _ref_ctc_feedback(model, inter_logits, flat_scripts, script_lens_cpu):
-    """Old implementation: per-script boolean-mask gather + scatter."""
-    B, T, _ = inter_logits.shape
+    """Reference implementation: per-script boolean-mask gather + scatter."""
+    B, TE, _ = inter_logits.shape
+    E = model.emit_per_frame
+    T = TE // E
+    il = inter_logits.reshape(B, T, E, -1)
     fb = torch.zeros(B, T, model.enc_out_dim,
                      device=inter_logits.device, dtype=inter_logits.dtype)
     for (g, s), flat_id in model._flat_script_id.items():
@@ -88,8 +92,9 @@ def _ref_ctc_feedback(model, inter_logits, flat_scripts, script_lens_cpu):
         mask = (flat_scripts == flat_id)
         head = model.ctc_modules[g].heads[s]
         vs = head.vocab_size
-        post = inter_logits[mask][:, :vs].softmax(dim=-1)
-        fb[mask] = (post @ head.proj.weight.to(post.dtype)).to(fb.dtype)
+        post = il[mask][:, :, :vs].softmax(dim=-1)  # (k, E, vs)
+        w = head.proj.weight.view(E, vs, -1).to(post.dtype)
+        fb[mask] = torch.einsum("kev,evd->kd", post, w).to(fb.dtype)
     return fb
 
 
@@ -111,8 +116,9 @@ def test_ctc_logits_matches_reference():
     ref = _ref_ctc_logits(model, x, flat, lens)
     got = model._ctc_logits(x, flat, lens)
     assert torch.allclose(got, ref, atol=1e-6), (got - ref).abs().max().item()
-    # Blank frames stay exactly zero
-    assert torch.equal(got[flat == -1], torch.zeros_like(got[flat == -1]))
+    # Blank frames stay exactly zero (check both emission slots)
+    got_f = got.reshape(B, T, model.emit_per_frame, -1)
+    assert torch.equal(got_f[flat == -1], torch.zeros_like(got_f[flat == -1]))
 
 
 def test_ctc_logits_gradients_match():
@@ -121,7 +127,8 @@ def test_ctc_logits_gradients_match():
     flat, lens = _routing(model, B, T, seed=3)
     torch.manual_seed(4)
     x0 = torch.randn(B, T, 128)
-    upstream = torch.randn(B, T, max(m.max_vocab for m in model.ctc_modules))
+    upstream = torch.randn(B, T * model.emit_per_frame,
+                           max(m.max_vocab for m in model.ctc_modules))
 
     def run(fn):
         model.zero_grad(set_to_none=True)
@@ -143,7 +150,7 @@ def test_ctc_feedback_matches_reference():
     flat, lens = _routing(model, B, T, seed=5)
     max_vocab = max(m.max_vocab for m in model.ctc_modules)
     torch.manual_seed(6)
-    il0 = torch.randn(B, T, max_vocab)
+    il0 = torch.randn(B, T * model.emit_per_frame, max_vocab)
     upstream = torch.randn(B, T, model.enc_out_dim)
 
     def run(fn):
@@ -178,7 +185,8 @@ def test_ctc_feedback_stable_global_id_dispatch():
     flat, lens = _mixed_script_routing(model)
     max_vocab = max(m.max_vocab for m in model.ctc_modules)
     torch.manual_seed(9)
-    inter = torch.randn(*flat.shape, max_vocab)
+    inter = torch.randn(flat.shape[0], flat.shape[1] * model.emit_per_frame,
+                        max_vocab)
 
     ref = _ref_ctc_feedback(model, inter, flat, lens)
     got = model._ctc_feedback(inter, flat, lens)

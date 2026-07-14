@@ -33,9 +33,11 @@ def test_model_forward_pass():
     assert "lid2_logits_per_group" in out
     assert "frame_scripts" in out
     assert out["logits"].shape[0] == B
+    # 2 emission slots per frame: logits + lengths run at 2T
+    assert out["logits"].shape[1] == T * model.emit_per_frame
     assert out["lengths"].shape[0] == B
-    assert out["lengths"][0].item() == T
-    # group_logits: (B, T, num_groups+1) with blank
+    assert out["lengths"][0].item() == T * model.emit_per_frame
+    # group_logits stay at frame granularity: (B, T, num_groups+1)
     assert out["group_logits"].shape == (B, T, 3)
     # LID-2 only for multi-script group (group 1)
     assert 1 in out["lid2_logits_per_group"]
@@ -43,10 +45,10 @@ def test_model_forward_pass():
     assert out["lid2_logits_per_group"][1].shape == (B, T, 2)
 
 
-def test_in_height_64_same_output_geometry_and_weights():
-    """in_height=64 adds only the learned vertical merge (avg-init):
-    output shapes match the 32px model at the same width, and a 32px
-    checkpoint loads into a 64px model with only merge_hc fresh."""
+def test_in_height_64_output_geometry():
+    """The 64px trunk (h_c=8 SWA-C grid) produces the same output
+    geometry as the 32px trunk at equal width: T frames, 2T emissions,
+    LID at T. Wrong input height fails loudly."""
     from src.model.encoder import LipiMoEEncoder
 
     kwargs = dict(
@@ -56,20 +58,9 @@ def test_in_height_64_same_output_geometry_and_weights():
         group_script_names=[["test1"], ["test2a", "test2b"]],
         drop_path_rate=0.0,
     )
-    torch.manual_seed(0)
-    m32 = LipiMoEEncoder(in_height=32, **kwargs)
-    torch.manual_seed(0)
     m64 = LipiMoEEncoder(in_height=64, **kwargs)
-
-    # Everything except the new merge transfers.
-    result = m64.load_state_dict(m32.state_dict(), strict=False)
-    assert not result.unexpected_keys
-    assert set(result.missing_keys) == {"merge_hc.weight", "merge_hc.bias"}
-    # The merge starts as the row-pair average (avg-init convention).
-    C = m64.merge_hc.weight.shape[0]
-    assert torch.equal(m64.merge_hc.weight[:, :C], 0.5 * torch.eye(C))
-    assert torch.equal(m64.merge_hc.weight[:, C:], 0.5 * torch.eye(C))
-    assert torch.equal(m64.merge_hc.bias, torch.zeros(C))
+    assert m64.h_c == 8
+    assert m64.swa_c[0].attn.window_h == 8
 
     B, W = 2, 64
     T = W // 4
@@ -79,7 +70,8 @@ def test_in_height_64_same_output_geometry_and_weights():
     with torch.no_grad():
         out = m64(torch.randn(B, 3, 64, W),
                   group_ids=group_ids, script_ids=script_ids)
-    assert out["lengths"][0].item() == T
+    assert out["lengths"][0].item() == T * m64.emit_per_frame
+    assert out["logits"].shape[1] == T * m64.emit_per_frame
     assert out["group_logits"].shape == (B, T, 3)
 
     # Feeding the wrong height must fail loudly, not silently mis-shape.
@@ -91,10 +83,10 @@ def test_in_height_64_same_output_geometry_and_weights():
         assert "in_height" in str(e)
 
 
-def test_detail_tap_is_noop_at_init():
-    """The fine-detail tap is gated by a zero-init LayerScale: outputs are
-    bit-identical whatever the tap projection holds, so warm-starting a
-    checkpoint that predates the tap is exact."""
+def test_relook_is_noop_at_init():
+    """The ReLook's output projection is zero-init: outputs are
+    bit-identical whatever its q/k/v projections and row embeddings
+    hold, so the retrieval path starts silent and grows only if useful."""
     from src.model.encoder import LipiMoEEncoder
 
     torch.manual_seed(0)
@@ -114,12 +106,51 @@ def test_detail_tap_is_noop_at_init():
 
     with torch.no_grad():
         out1 = model(imgs, group_ids=gids, script_ids=sids)
-        model.detail_tap.weight.normal_()  # scramble the projection
-        model.detail_tap.bias.normal_()
+        model.relook.q_proj.weight.normal_()   # scramble everything
+        model.relook.k_proj.weight.normal_()   # except out_proj
+        model.relook.v_proj.weight.normal_()
+        model.relook.row_emb.normal_()
         out2 = model(imgs, group_ids=gids, script_ids=sids)
     assert torch.equal(out1["logits"], out2["logits"])
-    assert torch.equal(model.detail_tap_ls.gamma,
-                       torch.zeros_like(model.detail_tap_ls.gamma))
+    assert torch.equal(model.relook.out_proj.weight,
+                       torch.zeros_like(model.relook.out_proj.weight))
+
+
+def test_readouts_start_as_row_mean():
+    """Both attention collapses degrade to plain row mean-pooling when
+    their queries/row embeddings are zero (uniform attention + identity
+    v/out projections) — the trunk's pooling-at-step-0 convention. With
+    the real trunc-normal init they sit within noise of that mean."""
+    from src.model.blocks import AttentionReadout, RoutedReadout
+
+    torch.manual_seed(0)
+    B, h, w, C = 2, 8, 6, 32
+
+    ro = AttentionReadout(C, 48, n_rows=h, n_queries=2, num_heads=2).eval()
+    with torch.no_grad():
+        ro.queries.zero_()
+        ro.row_emb.zero_()
+        x = torch.randn(B, h * w, C)
+        out = ro(x, h, w)  # (B, 2*w, 48)
+        mean = ro.norm(x).reshape(B, h, w, C).mean(dim=1)  # (B, w, C)
+    out_rows = out.reshape(B, 2, w, 48)
+    for q in range(2):
+        assert torch.allclose(out_rows[:, q, :, :C], mean, atol=1e-5)
+        assert torch.allclose(out_rows[:, q, :, C:],
+                              torch.zeros(B, w, 48 - C), atol=1e-6)
+
+    rc = RoutedReadout(C, num_ids=5, num_heads=2).eval()
+    with torch.no_grad():
+        rc.queries.zero_()
+        rc.row_emb.zero_()
+        x = torch.randn(B, 2 * w, C)
+        ids_a = torch.zeros(B, w, dtype=torch.long)
+        ids_b = torch.full((B, w), -1, dtype=torch.long)  # blank/default
+        out_a = rc(x, ids_a, 2, w)
+        out_b = rc(x, ids_b, 2, w)
+        mean = rc.norm(x).reshape(B, 2, w, C).mean(dim=1)
+    assert torch.allclose(out_a, mean, atol=1e-5)
+    assert torch.allclose(out_b, mean, atol=1e-5)  # id-independent at init
 
 
 def test_model_inference_mode():

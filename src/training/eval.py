@@ -35,8 +35,11 @@ def _edit_distance(a: str, b: str) -> int:
 
 
 def _batched_ctc_val_loss(logits, segments_batch, group_script_names,
-                          group_script_vocab_sizes, device):
-    """Compute batched CTC val loss without per-segment kernel launches."""
+                          group_script_vocab_sizes, device,
+                          emit_per_frame=1):
+    """Compute batched CTC val loss without per-segment kernel launches.
+
+    Frame ranges are in emission slots (see losses._build_buckets)."""
     B, T, _ = logits.shape
     buckets: dict[tuple[int, int], list] = {}
 
@@ -53,8 +56,9 @@ def _batched_ctc_val_loss(logits, segments_batch, group_script_names,
             if not script_name:
                 continue
 
-            frame_start = seg["offset"] // 4
-            frame_end = min((seg["offset"] + seg["width"] + 3) // 4, T)
+            frame_start = seg["offset"] * emit_per_frame // 4
+            frame_end = min(
+                ((seg["offset"] + seg["width"]) * emit_per_frame + 3) // 4, T)
             seg_len = frame_end - frame_start
             if seg_len < 1:
                 continue
@@ -113,6 +117,9 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
              group_script_vocab_sizes=None, max_batches=50):
     model.eval()
     n_groups = len(group_tokenizers)
+    # Emission slots per frame (2 for the v6 encoder; compiled wrappers
+    # proxy class attributes). All logits-axis segment math scales by it.
+    emit_pf = getattr(model, "emit_per_frame", 1)
 
     # Val loss
     val_ctc_loss = 0.0
@@ -170,7 +177,7 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
         if batch_segments is not None and group_script_vocab_sizes:
             ctc_l, ctc_c = _batched_ctc_val_loss(
                 out["logits"], batch_segments, group_script_names,
-                group_script_vocab_sizes, device)
+                group_script_vocab_sizes, device, emit_per_frame=emit_pf)
             val_ctc_loss += ctc_l
             val_ctc_chars += ctc_c
 
@@ -230,7 +237,8 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
                 img_segs = batch_segments[i]
             else:
                 img_segs = [{"group_id": true_g, "script_id": local_sid,
-                             "text": label, "width": T_logits * 4, "offset": 0}]
+                             "text": label,
+                             "width": T_logits * 4 // emit_pf, "offset": 0}]
 
             for seg in img_segs:
                 seg_text = seg["text"]
@@ -241,8 +249,10 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
                 if not ref_s:
                     continue
 
-                frame_start = seg["offset"] // 4
-                frame_end = min((seg["offset"] + seg["width"] + 3) // 4, T_logits)
+                frame_start = seg["offset"] * emit_pf // 4
+                frame_end = min(
+                    ((seg["offset"] + seg["width"]) * emit_pf + 3) // 4,
+                    T_logits)
                 if frame_end <= frame_start:
                     continue
 

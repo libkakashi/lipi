@@ -92,7 +92,8 @@ def main():
         "swac_in_proj + swa_c (3 blocks)":
             [model.swac_in_proj, model.swa_c],
         "swa_d (3 blocks)": model.swa_d,
-        "merge_cd / merge_d1": [model.merge_cd, model.merge_d1],
+        "readout_cd / routed_collapse / relook":
+            [model.readout_cd, model.routed_collapse, model.relook],
         "lid1_merge + lid1_attn + group_head":
             [model.lid1_merge, model.lid1_attn, model.group_head],
         "group MoE stack (N × shared_attn + 14 routed MLPs + shared MLP)":

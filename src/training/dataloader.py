@@ -258,9 +258,13 @@ class LipiStreamingDataset(Dataset):
         global_sid = sample["script_id"]                    # int
         global_gid = sample["group_id"]                     # int
 
-        # Remap to local IDs (default to 0 — per-image IDs are always in active set)
-        local_gid = self._global_to_local_group[global_gid]
-        local_sid = self._global_sid_to_local[global_sid]
+        # Remap to local IDs. Blank-primary samples (digit/punct-only
+        # lines get group_id == NUM_GROUPS from the generator) map to the
+        # blank group — same convention as the per-segment remap below;
+        # their CTC supervision rides on the segments, the per-image id
+        # is routing/eval metadata.
+        local_gid = self._global_to_local_group.get(global_gid, NUM_GROUPS)
+        local_sid = self._global_sid_to_local.get(global_sid, 0)
 
         tids = torch.from_numpy(sample["target_ids"].copy())  # (L,) int64
         tlen = torch.tensor(sample["target_len"], dtype=torch.long)

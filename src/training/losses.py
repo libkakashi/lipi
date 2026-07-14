@@ -212,6 +212,11 @@ def compute_consistency_loss(
     if logits1 is not None and logits2 is not None:
         flat_vocabs = [vs for vs_list in group_script_vocabs for vs in vs_list]
         fs = torch.where(a_mask, flat_scripts, torch.full_like(flat_scripts, -1))
+        # CTC logits run at emit_per_frame slots per frame (2T for the v6
+        # encoder) while flat_scripts stays at frame granularity — expand
+        # the mask so both of a frame's emission slots are compared.
+        E = logits1.shape[1] // flat_scripts.shape[1]
+        fs_slots = fs.repeat_interleave(E, dim=1) if E > 1 else fs
         # One sync for all per-script counts
         counts = torch.zeros(len(flat_vocabs), dtype=torch.long, device=device)
         valid = fs >= 0
@@ -221,7 +226,7 @@ def compute_consistency_loss(
         for fid, n in enumerate(counts):
             if n == 0:
                 continue
-            m = (fs == fid)
+            m = (fs_slots == fid)
             vs = flat_vocabs[fid]
             total = total + _sym_kl(logits1[m][:, :vs], logits2[m][:, :vs])
             n_terms += 1
@@ -237,6 +242,7 @@ def compute_ctc_loss_segments(
     enc_lengths: Tensor,
     group_script_names: list[list[str]],
     group_script_vocabs: list[list[int]],
+    emit_per_frame: int = 1,
 ) -> Tensor:
     """Per-segment CTC loss, batched by (group, script) for speed.
 
@@ -254,13 +260,22 @@ def compute_ctc_loss_segments(
     device = logits.device
     plan = build_ctc_loss_plan(
         segments_batch, logits.shape[1], group_script_names,
-        group_script_vocabs, device)
+        group_script_vocabs, device, emit_per_frame=emit_per_frame)
     return apply_ctc_loss_plan(logits, plan, device)
 
 
 def _build_buckets(segments_batch, T, group_script_names,
-                   group_script_vocabs):
-    """Group valid segments by (group, script, direction) for batched CTC."""
+                   group_script_vocabs, emit_per_frame=1):
+    """Group valid segments by (group, script, direction) for batched CTC.
+
+    T and the produced frame ranges are in *emission slots*: with
+    emit_per_frame=E the model emits E CTC tokens per W/4 frame, so a
+    segment spanning pixels [off, off+w) owns slots
+    [off·E/4, ceil((off+w)·E/4)). At E=2 this doubles every segment's
+    emission room — dense segments (Arabic tooth runs, jamo fallbacks)
+    that failed the len(ids)+repeats feasibility check at E=1 and were
+    silently dropped from the loss become trainable.
+    """
     buckets: dict[tuple[int, int, bool], list[dict]] = {}
     skipped_no_script = 0
     skipped_no_ids = 0
@@ -280,8 +295,9 @@ def _build_buckets(segments_batch, T, group_script_names,
             if not text or width_px == 0:
                 continue
 
-            frame_start = offset_px // 4
-            frame_end = min((offset_px + width_px + 3) // 4, T)
+            frame_start = offset_px * emit_per_frame // 4
+            frame_end = min(
+                ((offset_px + width_px) * emit_per_frame + 3) // 4, T)
             seg_len = frame_end - frame_start
             if seg_len < 1:
                 continue
@@ -421,12 +437,14 @@ def build_ctc_loss_plan(
     group_script_names: list[list[str]],
     group_script_vocabs: list[list[int]],
     device: torch.device,
+    emit_per_frame: int = 1,
 ):
     """Build the CTC plan once per step; apply it to any number of logits
     tensors (final + intermediate CTC share it — the ~3000-segment Python
     pass depends only on the segments, not the logits)."""
     buckets, stats = _build_buckets(
-        segments_batch, T, group_script_names, group_script_vocabs)
+        segments_batch, T, group_script_names, group_script_vocabs,
+        emit_per_frame)
     return _plan_from_buckets(buckets, device, stats)
 
 

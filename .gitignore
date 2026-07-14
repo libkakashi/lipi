@@ -73,3 +73,4 @@ render_check*/
 
 # Generated datasets/shards at repo root (anchored so it doesn't match src/data/)
 /data/
+.env
