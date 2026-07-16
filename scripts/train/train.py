@@ -96,6 +96,12 @@ def parse_args():
     parser.add_argument("--scripts", type=str, default="all")
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--fresh-lr", action="store_true",
+                        help="On resume, reset LR to --lr/--expert-lr and "
+                             "re-anneal (deliberate warm restart). Default: "
+                             "continue from the checkpoint's LR, so chained "
+                             "segments (Modal 22.5h soft deadline) don't "
+                             "sawtooth back to peak every resume.")
     parser.add_argument("--grad-accum", type=int, default=1)
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--save-dir", type=str, default="checkpoints/moe")
@@ -138,12 +144,13 @@ def parse_args():
                         help="Channel width entering SWA-C (post blur_bc "
                              "and the h64 merge). 256 pairs with "
                              "--convb-ch 160 at --height 64.")
-    parser.add_argument("--height", type=int, default=32, choices=(32, 64),
-                        help="Input line height. 64 adds one fixed vertical "
-                             "BlurPool before SWA-C (zero new params) so the "
-                             "conv frontend extracts features at 2x detail "
-                             "while everything downstream is unchanged. "
-                             "Shards must be generated at the same height.")
+    parser.add_argument("--height", type=int, default=48, choices=(32, 48, 64),
+                        help="Input line height (multiple of 8). Sets the "
+                             "SWA-C grid to height//8 rows; taller heights let "
+                             "the conv frontend extract vertical detail (helps "
+                             "stacking scripts) at higher cost. 48 is the "
+                             "production default (Tesseract/PaddleOCR/Calamari "
+                             "convention). Shards must match this height.")
     parser.add_argument("--no-compile", action="store_true")
     parser.add_argument("--ema-decay", type=float, default=0.999,
                         help="Weight EMA decay per optimizer step; eval and "
@@ -331,18 +338,36 @@ def load_and_prepare_data(args, device):
     print(f"  Train: {len(train_dataset)}, Val (full): {len(val_dataset)}"
           f"{'  [train-time aug p=%.2f]' % args.train_aug_p if args.train_aug else ''}")
 
-    # Subsample val to 500 per script for fast, balanced eval
+    # Subsample val to 500 per script for fast, balanced eval.
+    # RANDOM per script (seeded), not first-N: shards are written
+    # source-ordered (real sources alphabetically, then synth), so first-N
+    # silently evaluated a single source/domain per script. Uses the
+    # script_ids.npy sidecar (same order as the dataset) to avoid reading
+    # every val sample; falls back to iteration if the sidecar is missing.
+    import random as _random
     from collections import Counter
     max_per_script = 500
+    _sids_path = Path(val_dir) / "script_ids.npy"
+    if _sids_path.exists():
+        _val_sids = np.load(str(_sids_path))
+    else:
+        _val_sids = np.array([int(val_dataset._ds[i]["script_id"])
+                              for i in range(len(val_dataset))])
+    _rng = _random.Random(0)
     script_counts = Counter()
     val_indices = []
-    for i in range(len(val_dataset)):
-        sid = int(val_dataset._ds[i]["script_id"])
-        if script_counts[sid] < max_per_script:
-            val_indices.append(i)
-            script_counts[sid] += 1
+    for sid in np.unique(_val_sids):
+        idxs = np.nonzero(_val_sids == sid)[0].tolist()
+        take = _rng.sample(idxs, min(max_per_script, len(idxs)))
+        val_indices.extend(take)
+        script_counts[int(sid)] = len(take)
+    # One seeded shuffle, then shuffle=False in the loader: with
+    # max_batches capping the eval, every epoch scores the SAME subset —
+    # per-epoch deltas are model signal, not resampling noise.
+    _rng.shuffle(val_indices)
     val_subset = torch.utils.data.Subset(val_dataset, val_indices)
-    print(f"  Val (subsampled): {len(val_subset)} ({max_per_script}/script)")
+    print(f"  Val (subsampled): {len(val_subset)} "
+          f"(≤{max_per_script}/script, seeded random)")
     for sid, count in sorted(script_counts.items()):
         sname = all_scripts[sid] if sid < len(all_scripts) else f"id={sid}"
         print(f"    {sname:<18s} {count:>6d}")
@@ -370,7 +395,10 @@ def load_and_prepare_data(args, device):
         train_sample_weights = build_script_sample_weights(
             train_dir, args.script_sample_beta)
 
-    val_loader = DataLoader(val_subset, batch_size=128, shuffle=True,
+    # shuffle=False: val_indices are pre-shuffled once (seeded) above, so
+    # eval sees a fixed, mixed-order subset every epoch instead of a fresh
+    # random 6400 of 13000 (±0.5-1% word-acc jitter between epochs).
+    val_loader = DataLoader(val_subset, batch_size=128, shuffle=False,
                             collate_fn=collate_moe,
                             num_workers=4, persistent_workers=True,
                             prefetch_factor=2,
@@ -593,14 +621,30 @@ def resume_from_checkpoint(args, model, optimizer, base_optimizer, scaler, sched
         optimizer.load_state_dict(ckpt["optimizer"])
     if "scaler" in ckpt:
         scaler.load_state_dict(ckpt["scaler"])
-    ema_state = None if direction_changed or taxonomy_changed else ckpt.get("ema")
-    start_epoch = ckpt.get("epoch", 0) + 1
+    # Reset EMA whenever model layers were skipped (e.g. an input-height
+    # change re-inits the grid-dependent rel_pos_bias / row_emb) — the old
+    # shadow has stale shapes for those params, matching the optimizer reset.
+    ema_state = (None if direction_changed or taxonomy_changed or skipped
+                 else ckpt.get("ema"))
+    # Mid-epoch periodic saves carry mid_epoch=True: the epoch was NOT
+    # finished, so redo it (shuffled loader — no harm) instead of silently
+    # skipping its remaining batches, which chained 22.5h segments used to do.
+    start_epoch = ckpt.get("epoch", 0) + (0 if ckpt.get("mid_epoch") else 1)
 
     # Always rebuild scheduler on resume — checkpoint might have a different
     # scheduler type (CosineAnnealingLR vs SequentialLR) or different total epochs.
     print(f"  Rebuilding scheduler from epoch {start_epoch}")
-    for pg in base_optimizer.param_groups:
-        pg["lr"] = args.lr
+    if args.fresh_lr:
+        # Deliberate warm restart: reset to configured peak(s). Group 0 is
+        # shared params, group 1 (if present) experts — mirror
+        # build_optimizer_and_scheduler's construction order.
+        lrs = [args.lr, args.expert_lr or args.lr]
+        for i, pg in enumerate(base_optimizer.param_groups):
+            pg["lr"] = lrs[min(i, len(lrs) - 1)]
+    # else: keep the LRs restored from the checkpoint's optimizer state —
+    # the rebuilt cosine anneals from where the last segment left off, so
+    # auto-chained resumes no longer sawtooth back to peak (and a separate
+    # --expert-lr is no longer clobbered to --lr on every resume).
     remaining_steps = steps_per_epoch * (args.epochs - start_epoch + 1)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         base_optimizer, T_max=max(remaining_steps, 1), eta_min=1e-6)
@@ -641,7 +685,7 @@ def _write_checkpoint(payload, tmp_path, ckpt_path):
 
 
 def save_checkpoint(model, optimizer, scheduler, scaler, epoch, args, save_dir,
-                    ema=None):
+                    ema=None, mid_epoch=False):
     """Snapshot to CPU on the caller, write to disk on a background thread.
 
     The write is the expensive part — ~2.8 GB serialized to a FUSE-backed
@@ -660,6 +704,10 @@ def save_checkpoint(model, optimizer, scheduler, scaler, epoch, args, save_dir,
         "scheduler": scheduler.state_dict(),
         "scaler": scaler.state_dict(),
         "epoch": epoch,
+        # True for periodic 500-batch saves: the epoch is NOT complete, so a
+        # resume must redo it rather than start at epoch+1 (which silently
+        # skipped the rest of the epoch on every chained-segment resume).
+        "mid_epoch": mid_epoch,
         "args": vars(args),
         "ctc_direction_version": CTC_DIRECTION_VERSION,
         "taxonomy_version": TAXONOMY_VERSION,
@@ -771,13 +819,20 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
             # NUM_GROUPS = whitespace (learnable). For model routing,
             # both padding and whitespace should skip expert blocks.
             T_est = imgs_.shape[3] // 4
-            # LID-1 CE target: keep -100 for padding so ignore_index works
-            gl_frames = group_labels_[:, ::4][:, :T_est]
             # Model routing + CTC segment ranges: derived from segments so
             # both see identical frame boundaries.
             gl_for_model, sl_frames, present_groups = \
                 build_frame_labels_from_segments(
                     segments_, T_est, NUM_GROUPS, device)
+            # LID-1 CE target: SAME span-based convention as routing/CTC.
+            # The old pixel-strided target (group_labels[:, ::4]) sampled
+            # each frame's left-edge pixel, so any segment starting at
+            # off % 4 != 0 had its first frame labeled whitespace/previous
+            # group — training LID-1 to blank frames whose slots the CTC
+            # decode range needs routed. Keep -100 from the pixel labels
+            # so ignore_index still masks pad columns.
+            gl_pix = group_labels_[:, ::4][:, :T_est]
+            gl_frames = torch.where(gl_pix == -100, gl_pix, gl_for_model)
             _t = _pmark("route_labels", _t)
 
             out = model(imgs_, group_ids=gl_for_model, script_ids=sl_frames,
@@ -998,7 +1053,7 @@ def train_one_epoch(model, train_loader, optimizer, base_optimizer, scheduler, s
 
         if save_dir and n_batches % 500 == 0:
             save_checkpoint(model, optimizer, scheduler, scaler,
-                            epoch, args, save_dir, ema=ema)
+                            epoch, args, save_dir, ema=ema, mid_epoch=True)
 
         if n_batches % log_interval == 0:
             # Batch all the per-interval counters into one GPU→CPU transfer
@@ -1243,19 +1298,32 @@ def main():
 
         print(f"\n  Eval epoch {epoch}:"
               + (" (EMA weights)" if ema is not None else ""))
+        def _run_evals():
+            # Predicted routing (deployment-realistic), then oracle GT
+            # routing. The word/char delta between the two is the routing
+            # tax — accuracy lost purely to LID misroutes.
+            r_pred = evaluate(
+                model, data["val_loader"], data["group_tokenizers"],
+                data["group_script_names"], data["active_groups"],
+                device, device_type, opt["use_amp"], opt["amp_dtype"],
+                group_script_vocab_sizes=data["group_script_vocab_sizes"])
+            r_gt = evaluate(
+                model, data["val_loader"], data["group_tokenizers"],
+                data["group_script_names"], data["active_groups"],
+                device, device_type, opt["use_amp"], opt["amp_dtype"],
+                group_script_vocab_sizes=data["group_script_vocab_sizes"],
+                oracle_routing=True)
+            print(f"  ROUTING TAX: word {r_gt['word_acc'] - r_pred['word_acc']:+.1f} "
+                  f"char {r_gt['char_acc'] - r_pred['char_acc']:+.1f} "
+                  f"(oracle − predicted)")
+
         if ema is not None:
             # Swap averaged weights into the (shared) parameter tensors;
             # the compiled wrapper sees them too.
             with ema.average_parameters(base_model):
-                evaluate(model, data["val_loader"], data["group_tokenizers"],
-                         data["group_script_names"], data["active_groups"],
-                         device, device_type, opt["use_amp"], opt["amp_dtype"],
-                         group_script_vocab_sizes=data["group_script_vocab_sizes"])
+                _run_evals()
         else:
-            evaluate(model, data["val_loader"], data["group_tokenizers"],
-                     data["group_script_names"], data["active_groups"],
-                     device, device_type, opt["use_amp"], opt["amp_dtype"],
-                     group_script_vocab_sizes=data["group_script_vocab_sizes"])
+            _run_evals()
 
         # Move optimizer state back to GPU
         for state in optimizer.state.values():

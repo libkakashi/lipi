@@ -895,7 +895,7 @@ def parse_args() -> argparse.Namespace:
                              "dataloader; baking it in freezes one "
                              "degradation per sample for all epochs)")
     parser.add_argument("--no-augment", dest="augment", action="store_false")
-    parser.add_argument("--height", type=int, default=32)
+    parser.add_argument("--height", type=int, default=48)
     # 2048 covers full A4 body lines and most table rows at h=32
     # normalization; the line path truncates at the budget (never
     # squashes aspect ratio).

@@ -116,7 +116,7 @@ class LipiMoEEncoder(nn.Module):
         num_groups: int = NUM_GROUPS,
         group_script_vocab_sizes: list[list[int]] | None = None,
         group_script_names: list[list[str]] | None = None,
-        in_height: int = 32,
+        in_height: int = 48,
         **unused_kwargs,  # swallow stale kwargs from old checkpoints
     ):
         super().__init__()

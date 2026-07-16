@@ -114,7 +114,11 @@ def _batched_ctc_val_loss(logits, segments_batch, group_script_names,
 @torch.no_grad()
 def evaluate(model, val_loader, group_tokenizers, group_script_names,
              active_groups, device, device_type, use_amp, amp_dtype,
-             group_script_vocab_sizes=None, max_batches=50):
+             group_script_vocab_sizes=None, max_batches=50,
+             oracle_routing=False):
+    """oracle_routing=True feeds ground-truth frame group/script ids to the
+    model instead of letting LID route. The word/char delta between the two
+    modes IS the routing tax — the accuracy lost to LID misroutes alone."""
     model.eval()
     n_groups = len(group_tokenizers)
     # Emission slots per frame (2 for the v6 encoder; compiled wrappers
@@ -131,6 +135,9 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
     lid1_frame_correct = lid1_frame_total = 0
     lid2_correct = lid2_total = 0
     ctc_correct = ctc_total = total_chars = correct_chars = 0
+    ctc_correct_cs = 0                    # case-sensitive exact matches
+    line_correct = line_total = 0         # single-segment samples (real lines)
+    wordseg_correct = wordseg_total = 0   # multi-segment words (synth)
 
     # Per-group stats
     g_lid_frame_correct = [0] * n_groups
@@ -160,11 +167,27 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
 
         B = imgs.shape[0]
 
+        # GT frame labels (span-based, same convention as training routing
+        # and the CTC decode ranges) — needed up front for oracle routing.
+        T_est = imgs.shape[3] // 4
+        segs = (batch_segments if batch_segments is not None
+                else [[] for _ in range(B)])
+        gl_gt, sl_gt, _ = build_frame_labels_from_segments(
+            segs, T_est, n_groups, device)
+
         with torch.amp.autocast(device_type, enabled=use_amp, dtype=amp_dtype):
-            out = model(imgs, group_ids=None)
+            if oracle_routing:
+                out = model(imgs, group_ids=gl_gt, script_ids=sl_gt)
+            else:
+                out = model(imgs, group_ids=None)
 
         T = out["group_logits"].shape[1]
-        gl_frames = group_labels[:, ::4][:, :T]
+        # LID-1 metric target: span-based (what routing/CTC decode need a
+        # frame routed as), with -100 padding passed through from the
+        # pixel labels so pad columns stay excluded. The old pixel-strided
+        # target under-counted segment-boundary frames.
+        gl_pix = group_labels[:, ::4][:, :T]
+        gl_frames = torch.where(gl_pix == -100, gl_pix, gl_gt[:, :T])
 
         # --- LID-1 val loss ---
         lid1_l = compute_lid1_loss(out["group_logits"], gl_frames, ce_fn)
@@ -193,11 +216,7 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
                 g_lid_frame_correct[g] += (frame_preds[g_frame_mask] == g).sum().item()
 
         # --- LID-2 per-frame accuracy ---
-        T_est = imgs.shape[3] // 4
-        segs = batch_segments if batch_segments is not None else [[] for _ in range(B)]
-        _, sl_frames, _ = build_frame_labels_from_segments(
-            segs, T_est, n_groups, device)
-        sl_frames_gt = sl_frames[:, :T]
+        sl_frames_gt = sl_gt[:, :T]
 
         for g_int, lid2_log in out.get("lid2_logits_per_group", {}).items():
             g_idx = int(g_int)
@@ -240,12 +259,14 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
                              "text": label,
                              "width": T_logits * 4 // emit_pf, "offset": 0}]
 
+            is_line = len(img_segs) == 1
             for seg in img_segs:
                 seg_text = seg["text"]
                 seg_g = seg["group_id"]
                 seg_s = seg.get("script_id", 0)
 
-                ref_s = str(seg_text).strip().lower()
+                ref_raw = str(seg_text).strip()
+                ref_s = ref_raw.lower()
                 if not ref_s:
                     continue
 
@@ -272,7 +293,8 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
                 seq_gpu = ctc_segment_order(
                     seg_logits, script_name, str(seg_text)).argmax(dim=-1)
                 seg_gpu_preds.append(
-                    (seg_g, seg_s, script_name, ref_s, seq_gpu))
+                    (seg_g, seg_s, script_name, ref_s, ref_raw, is_line,
+                     seq_gpu))
 
         # Phase 2: single GPU→CPU transfer for all segments in this batch.
         if seg_gpu_preds:
@@ -284,7 +306,7 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
 
         # Phase 3: decode on CPU.
         offset = 0
-        for (seg_g, seg_s, script_name, ref_s, _), sl in zip(
+        for (seg_g, seg_s, script_name, ref_s, ref_raw, is_line, _), sl in zip(
                 seg_gpu_preds, seg_lens):
             seq = big_cpu[offset:offset + sl]
             offset += sl
@@ -296,16 +318,27 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
                     ids.append(tok)
                 prev = tok
 
-            dec_s = decode_ids(ids, script_name).strip().lower() if ids else ""
+            dec_raw = decode_ids(ids, script_name).strip() if ids else ""
+            dec_s = dec_raw.lower()
 
             key = (seg_g, seg_s)
             ctc_total += 1
             g_word_total[seg_g] += 1
             s_word_total[key] = s_word_total.get(key, 0) + 1
+            if is_line:
+                line_total += 1
+            else:
+                wordseg_total += 1
+            if dec_raw == ref_raw:
+                ctc_correct_cs += 1
             if dec_s == ref_s:
                 ctc_correct += 1
                 g_word_correct[seg_g] += 1
                 s_word_correct[key] = s_word_correct.get(key, 0) + 1
+                if is_line:
+                    line_correct += 1
+                else:
+                    wordseg_correct += 1
             edits = _edit_distance(dec_s, ref_s)
             matched = max(0, len(ref_s) - edits)
             total_chars += len(ref_s)
@@ -324,9 +357,17 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
     avg_ctc_loss = val_ctc_loss / max(val_ctc_chars, 1)
     avg_lid1_loss = val_lid1_loss / max(val_lid1_frames, 1)
 
+    ctc_acc_cs = 100 * ctc_correct_cs / max(ctc_total, 1)
+    line_acc = 100 * line_correct / max(line_total, 1)
+    wordseg_acc = 100 * wordseg_correct / max(wordseg_total, 1)
+    mode = "ORACLE GT routing" if oracle_routing else "predicted routing"
     print(f"\n  ┌──────────────────────────────────────────────┐")
+    print(f"  │  [{mode:<17s}]                        │")
     print(f"  │  LID-1: {lid1_frame_acc:5.1f}%   LID-2: {lid2_acc:5.1f}%              │")
     print(f"  │  Word:  {ctc_acc:5.1f}%   Char:  {char_acc:5.1f}%              │")
+    print(f"  │  Word (case-sens): {ctc_acc_cs:5.1f}%                     │")
+    print(f"  │  Line-exact (1-seg): {line_acc:5.1f}% (n={line_total})       ")
+    print(f"  │  Word-seg (multi):   {wordseg_acc:5.1f}% (n={wordseg_total})       ")
     print(f"  │  Val loss: ctc={avg_ctc_loss:.4f}  lid1={avg_lid1_loss:.4f}     │")
     print(f"  └──────────────────────────────────────────────┘")
 
@@ -359,4 +400,6 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
 
     return {"lid1_acc": lid1_frame_acc, "lid2_acc": lid2_acc,
             "word_acc": ctc_acc, "char_acc": char_acc,
+            "word_acc_cs": ctc_acc_cs, "line_acc": line_acc,
+            "wordseg_acc": wordseg_acc, "oracle_routing": oracle_routing,
             "val_ctc_loss": avg_ctc_loss, "val_lid1_loss": avg_lid1_loss}

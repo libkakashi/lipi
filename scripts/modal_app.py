@@ -310,6 +310,149 @@ def _stage_one(name: str, copy_local: bool) -> Path:
     return dst
 
 
+@app.function(
+    image=image,
+    cpu=32.0,
+    memory=64 * 1024,
+    timeout=24 * 3600,
+    volumes=_VOLUMES,
+    retries=modal.Retries(max_retries=2, initial_delay=10.0),
+)
+def convert_height(inp: str, out: str, to_height: int = 48,
+                   from_height: int = 64, shards: int = 1,
+                   shard_index: int = -1):
+    """Resize an MDS shard set to a new height in place on lipi-data.
+
+    Reads lipi-data:/{inp}, writes lipi-data:/{out} at --to-height (aspect
+    preserving). shards>1 fans conversion across containers by source-chunk
+    index; the coordinator finalizes sidecars+metadata after all finish.
+    Chunk writes are idempotent (a .done marker skips completed chunks), so
+    retries resume.
+    """
+    _prepare_repo()
+    in_dir, out_dir = f"{_DATA}/{inp}", f"{_DATA}/{out}"
+    base = [sys.executable, "scripts/data/convert_height.py",
+            "--in", in_dir, "--out", out_dir,
+            "--from-height", str(from_height), "--to-height", str(to_height)]
+
+    if shards > 1 and shard_index < 0:
+        print(f"Fanning conversion to {shards} containers (this=shard 0)...")
+        handles = [convert_height.spawn(inp=inp, out=out, to_height=to_height,
+                                        from_height=from_height, shards=shards,
+                                        shard_index=i)
+                   for i in range(1, shards)]
+        subprocess.run(base + ["--chunk-shard", f"0:{shards}"],
+                       cwd=_REPO, env=_child_env(), check=True)
+        data_vol.commit()
+        for h in handles:
+            h.get()
+        data_vol.reload()
+        subprocess.run([sys.executable, "scripts/data/convert_height.py",
+                        "--out", out_dir, "--to-height", str(to_height),
+                        "--finalize"], cwd=_REPO, env=_child_env(), check=True)
+        data_vol.commit()
+        return f"converted lipi-data:/{inp} → /{out} @ {to_height}px"
+
+    cmd = base[:]
+    if shard_index >= 0:
+        cmd += ["--chunk-shard", f"{shard_index}:{shards}"]
+    else:
+        cmd += ["--chunk-shard", "0:1"]
+    subprocess.run(cmd, cwd=_REPO, env=_child_env(), check=True)
+    if shard_index <= 0:
+        subprocess.run([sys.executable, "scripts/data/convert_height.py",
+                        "--out", out_dir, "--to-height", str(to_height),
+                        "--finalize"], cwd=_REPO, env=_child_env(), check=True)
+    data_vol.commit()
+    return f"converted lipi-data:/{inp} → /{out} @ {to_height}px"
+
+
+@app.function(
+    image=image,
+    cpu=16.0,
+    memory=64 * 1024,
+    timeout=2 * 3600,
+    volumes=_VOLUMES,
+    retries=modal.Retries(max_retries=1, initial_delay=10.0),
+)
+def audit(data: str, height: int = 48):
+    """Deep data audit of one or more shard roots on lipi-data (read-only).
+
+    Samples the shards directly (no staging) and reports label-noise rate,
+    CTC width-feasibility, image degeneracy, train/val leakage, and per-script
+    synth-vs-real coverage, then a PASS/WARN/FAIL verdict. See
+    scripts/data/audit.py for the checks.
+    """
+    _prepare_repo()
+    cmd = [sys.executable, "scripts/data/audit.py",
+           "--data", data, "--root", _DATA, "--height", str(height)]
+    print("Running:", shlex.join(cmd))
+    subprocess.run(cmd, cwd=_REPO, env=_child_env(), check=True)
+    return f"audit complete for {data}"
+
+
+@app.function(
+    image=image,
+    cpu=8.0,
+    memory=32 * 1024,
+    timeout=1 * 3600,
+    volumes=_VOLUMES,
+)
+def dump_samples(data: str, split: str = "train", per_source: int = 2,
+                 scale: int = 3, script: str = ""):
+    """Dump a source-stratified sample of crops + label manifest to
+    lipi-assets:/audit_samples for visual pairing inspection. Read-only on
+    the data volume; download with `modal volume get lipi-assets audit_samples`.
+    script (optional) restricts to one script by name (for synth shards not
+    stratified by source prefix).
+    """
+    _prepare_repo()
+    out = f"{_ASSETS}/audit_samples"
+    cmd = [sys.executable, "scripts/data/dump_samples.py",
+           "--data", data, "--root", _DATA, "--split", split,
+           "--out", out, "--per-source", str(per_source), "--scale", str(scale)]
+    if script:
+        cmd += ["--script", script]
+    print("Running:", shlex.join(cmd))
+    subprocess.run(cmd, cwd=_REPO, env=_child_env(), check=True)
+    assets_vol.commit()
+    return f"dumped samples to lipi-assets:/audit_samples"
+
+
+@app.function(
+    image=image,
+    cpu=16.0,
+    memory=96 * 1024,
+    timeout=4 * 3600,
+    volumes=_VOLUMES,
+    retries=modal.Retries(max_retries=1, initial_delay=10.0),
+)
+def build_subset(real: str, synth: str, out: str = "subset-v1",
+                 total: int = 700000, goal: str = "printed",
+                 floor: int = 15000, cap: int = 55000,
+                 real_cap: int = 45000, synth_cap: int = 22000,
+                 synth_min: int = 5000,
+                 val_frac: float = 0.05, plan: bool = False):
+    """Curate a small training subset (effective-vocab balance + domain ratio)
+    from the full real+synth shards, writing a drop-in root to lipi-data:/{out}.
+    plan=True prints the quota table without writing. See build_subset.py.
+    """
+    _prepare_repo()
+    cmd = [sys.executable, "scripts/data/build_subset.py",
+           "--real", real, "--synth", synth, "--out", out, "--root", _DATA,
+           "--total", str(total), "--goal", goal, "--floor", str(floor),
+           "--cap", str(cap), "--real-cap", str(real_cap),
+           "--synth-cap", str(synth_cap), "--synth-min", str(synth_min),
+           "--val-frac", str(val_frac)]
+    if plan:
+        cmd.append("--plan")
+    print("Running:", shlex.join(cmd))
+    subprocess.run(cmd, cwd=_REPO, env=_child_env(), check=True)
+    if not plan:
+        data_vol.commit()
+    return f"{'planned' if plan else 'built'} subset {out}"
+
+
 def _commit_loop(stop: threading.Event, interval_s: int = 300):
     """Flush checkpoint writes to the volume while training runs."""
     while not stop.wait(interval_s):
@@ -483,6 +626,12 @@ def train(data: str = "shards-v5", run_name: str = "v5", args: str = "",
         cmd = [c for c in cmd if c != "--compile"]
     elif "--no-compile" not in argv:
         cmd.append("--no-compile")
+    # Use the cores we pay for: this container is cpu=32 but train.py
+    # defaults to 12 dataloader workers, so on-the-fly augmentation (CPU-heavy,
+    # 2 ops/sample) starves the GPU. Match ~28 workers to the 32 cores unless
+    # the caller overrides.
+    if "--num-workers" not in argv:
+        cmd += ["--num-workers", "28"]
     if "--resume" not in argv:
         latest = _latest_checkpoint(save_dir)
         if latest:

@@ -102,8 +102,12 @@ def build_sample(img: Image.Image, text: str, script: str,
     if img.height != height:
         new_w = max(1, round(img.width * height / img.height))
         img = img.resize((new_w, height), Image.BILINEAR)
+    # No width squish: horizontally compressing a long line to fit max_width
+    # distorts glyph aspect and starves the CTC frame budget. Keep the natural
+    # aspect ratio; only drop crops so wide they'd blow up batch memory
+    # (max_width is a hard reject threshold, not a resize target).
     if img.width > max_width:
-        img = img.resize((max_width, height), Image.BILINEAR)
+        return None, "too_wide"
     if not image_has_ink(img):
         return None, "blank_image"
 

@@ -285,8 +285,14 @@ def rotation(img: Image.Image) -> Image.Image:
 def perspective_warp(img: Image.Image) -> Image.Image:
     """Camera angle — phone held at angle to surface.
 
-    More aggressive than before: real phone photos can have 15-20% warp
-    when capturing text from steep angles (menus, signs, whiteboards).
+    Horizontal corner shifts are bounded by HEIGHT, not width: this op is
+    treated as x-preserving downstream (X_TRANSFORM_OPS), so pixel-space
+    labels (segment offsets, per-column group_labels) are never remapped
+    for it. Scaling the x-shift with width moved ink by up to 0.2*W
+    (hundreds of px on long lines), silently corrupting LID/routing/CTC
+    supervision on multi-segment lines. Bounding by height keeps the
+    displacement within ~2 frames while preserving the vertical tilt and
+    shear that read as a real camera angle.
     """
     w, h = img.size
     # 70% mild (3-10%), 30% aggressive (10-20%) for real phone angles
@@ -294,10 +300,11 @@ def perspective_warp(img: Image.Image) -> Image.Image:
         s = random.uniform(0.03, 0.10)
     else:
         s = random.uniform(0.10, 0.20)
-    tl = (random.uniform(0, s * w), random.uniform(0, s * h))
-    tr = (w - random.uniform(0, s * w), random.uniform(0, s * h))
-    br = (w - random.uniform(0, s * w), h - random.uniform(0, s * h))
-    bl = (random.uniform(0, s * w), h - random.uniform(0, s * h))
+    sx = s * h  # x-shift bounded by height, not width (see docstring)
+    tl = (random.uniform(0, sx), random.uniform(0, s * h))
+    tr = (w - random.uniform(0, sx), random.uniform(0, s * h))
+    br = (w - random.uniform(0, sx), h - random.uniform(0, s * h))
+    bl = (random.uniform(0, sx), h - random.uniform(0, s * h))
     coeffs = _find_perspective_coeffs([(0, 0), (w, 0), (w, h), (0, h)], [tl, tr, br, bl])
     bg = _border_color(img)
     result = img.transform((w, h), Image.PERSPECTIVE, coeffs, Image.BILINEAR, fillcolor=bg)

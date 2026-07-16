@@ -672,12 +672,17 @@ def verify(root: Path, height: int, n_samples: int = 300) -> None:
             assert gl.max() <= NUM_GROUPS, f"{split}[{i}]: bad group label"
             segs = _json.loads(s["segments"])
             assert segs and all("offset" in g for g in segs)
-            script = SCRIPTS[s["script_id"]]
-            tids = s["target_ids"][:s["target_len"]].tolist()
-            dec = decode_ids(tids, script)
-            assert dec == s["label"], \
-                (f"{split}[{i}] ({script}): decode mismatch "
-                 f"{dec!r} != {s['label']!r}")
+            # Decode round-trip is only well-defined for single-script lines:
+            # mixed-script (multi-segment) targets are encoded per-segment with
+            # different codecs, so decoding the whole sequence with one codec
+            # is meaningless. Synth keeps mixed lines; real-v1 dropped them.
+            if len(segs) == 1:
+                script = SCRIPTS[s["script_id"]]
+                tids = s["target_ids"][:s["target_len"]].tolist()
+                dec = decode_ids(tids, script)
+                assert dec == s["label"], \
+                    (f"{split}[{i}] ({script}): decode mismatch "
+                     f"{dec!r} != {s['label']!r}")
 
         by_script = {SCRIPTS[k]: int(v) for k, v in
                      zip(*np.unique(sids, return_counts=True))}
@@ -691,8 +696,11 @@ def main():
     p.add_argument("--source", type=str, default=None,
                    help="registry name, or comma-separated list")
     p.add_argument("--out", type=str, default="data/real-v1")
-    p.add_argument("--height", type=int, default=64, choices=(32, 64))
-    p.add_argument("--max-width", type=int, default=768)
+    p.add_argument("--height", type=int, default=48, choices=(32, 48, 64))
+    # Hard reject threshold (not a squish target): keep long lines at natural
+    # aspect; only drop crops wider than this to bound batch memory. ~42:1 at
+    # 48px covers full document lines without distortion.
+    p.add_argument("--max-width", type=int, default=2048)
     p.add_argument("--val-ratio", type=float, default=0.1)
     p.add_argument("--limit", type=int, default=None,
                    help="cap rows per source (smoke tests)")
