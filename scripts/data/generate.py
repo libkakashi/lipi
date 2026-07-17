@@ -31,7 +31,7 @@ from src.taxonomy import (
 )
 from src.data.color import rgb_to_input
 from src.data.augmentation import (
-    RandAugmentOCR, CHAINS_BY_NAME,
+    RandAugmentOCR, CHAINS_BY_NAME, scan_floor,
     jpeg_compress, blur, low_resolution, photocopy, binarize,
     exposure_jitter, uneven_lighting, glare, striped_shadow,
     rotation, perspective_warp, wave_distortion,
@@ -58,7 +58,18 @@ from src.data.word_lists import load_all_word_lists, WordSampler
 # Constants
 # ---------------------------------------------------------------------------
 
-CLEAN_RATIO = 0.3
+# Un-augmented slice of each chunk. Small: the always-on scan_floor gives
+# even "clean" samples realistic capture statistics, so this now only
+# controls how many samples skip the heavier degradation ops. (Was 0.3,
+# which — compounded with aug p=0.5 — left ~half the shard visually
+# pristine vector renders; real data is never that.)
+CLEAN_RATIO = 0.08
+
+# Share of samples rendered as short word-crops (1-2 words) instead of full
+# lines. Real corpora are dominated by word crops (measured aspect ratios
+# 0.6-6.4 vs synth's 14-32); this pulls the synth geometry distribution
+# toward what the model is evaluated on.
+WORD_CROP_RATIO = 0.4
 
 # ---------------------------------------------------------------------------
 # Data styles — font selection + augmentation ops per style
@@ -313,12 +324,17 @@ def _random_latin_segment():
         return _random_url()
 
 
-def _maybe_add_latin_segment(plan, p=0.15):
+def _maybe_add_latin_segment(plan, p=0.04):
     """With probability p, append a latin punctuation/number segment to the plan.
 
     Marked "live" so render_content_plan renders the actual text instead of
     substituting a pool word — otherwise dates/currency/numbers never make
     it into the data.
+
+    p is deliberately LOW and callers invoke this at most once per word:
+    the old p=0.15 × 2 calls/word meant ~3/4 of nominally single-script
+    lines carried Latin serials/URLs, while real documents are
+    overwhelmingly monolingual (measured: synth 96-100%% mixed vs real ~0%%).
     """
     if random.random() > p:
         return
@@ -576,6 +592,11 @@ def render_content_plan(plan, fonts_by_script, h, mw, aug=None,
     # Apply augmentation
     if aug is not None:
         combined = aug(combined)
+    # Always-on capture floor (even for the clean slice): strips the
+    # vector-render fingerprints (pure 0/255 extremes, hard AA edges,
+    # near-black ink, exact R==G==B) that make synth trivially separable
+    # from real captures — see scripts/data/synth_gap.py.
+    combined = scan_floor(combined)
 
     img_tensor = rgb_to_input(combined)
     return img_tensor, full_label, group_labels, segments
@@ -677,6 +698,38 @@ def _render_plan_line(plan, fonts_by_script, h, mw):
                          "text": text, "width": e - o, "offset": o})
     if not segments:
         return None
+
+    # Loose-crop jitter: real crops often have big margins (text at
+    # 55-90% of height, off-center) and small horizontal padding, where
+    # synth always fills the canvas edge-to-edge. Shrink + repad on a
+    # fraction of samples, remapping labels by the same x-affine
+    # (x_new = f*x_old + pad_l) so LID/CTC supervision stays exact.
+    if random.random() < 0.45:
+        f = random.uniform(0.55, 0.9)
+        new_w = max(8, round(final_w * f))
+        new_h = max(8, round(h * f))
+        small = line_img.resize((new_w, new_h), Image.BILINEAR)
+        pad_l = random.randint(0, max(1, int(0.06 * new_w)))
+        pad_r = random.randint(0, max(1, int(0.06 * new_w)))
+        canvas_w = pad_l + new_w + pad_r
+        y0 = random.randint(0, h - new_h)
+        bg = line_img.getpixel((0, 0))
+        canvas = Image.new("RGB", (canvas_w, h), bg)
+        canvas.paste(small, (pad_l, y0))
+        line_img = canvas
+        idx = np.clip(((np.arange(canvas_w) - pad_l) / f).round().astype(
+            np.int64), 0, final_w - 1)
+        new_gl = group_labels[idx].astype(np.int32)
+        new_gl[:pad_l] = BLANK_ID
+        new_gl[pad_l + new_w:] = BLANK_ID
+        group_labels = new_gl
+        for seg in segments:
+            o, wd = seg["offset"], seg["width"]
+            no = pad_l + round(o * f)
+            ne = min(canvas_w, pad_l + max(no - pad_l + 1, round((o + wd) * f)))
+            seg["offset"], seg["width"] = no, max(1, ne - no)
+        final_w = canvas_w
+
     return line_img, full_label, group_labels, segments
 
 
@@ -821,6 +874,7 @@ def save_rendered_samples(samples, primary_script, train_dir, val_dir, chunk_id)
         Path(d).mkdir(parents=True, exist_ok=True)
 
     train_widths, val_widths = [], []
+    train_sids, val_sids = [], []
     val_count = 0
     with MDSWriter(out=t_dir, columns=MDS_COLUMNS, size_limit=1 << 26) as tw, \
          MDSWriter(out=v_dir, columns=MDS_COLUMNS, size_limit=1 << 26) as vw:
@@ -833,12 +887,25 @@ def save_rendered_samples(samples, primary_script, train_dir, val_dir, chunk_id)
                 seg_script = _sid_to_name.get(seg.get("script_id", 0), primary_script)
                 all_ids.extend(encode_text(seg["text"], seg_script))
 
+            # Sample-level script = DOMINANT script by pixel width, not the
+            # chunk's primary: mixed lines whose majority is another script
+            # otherwise pollute the per-script buckets that balancing,
+            # eval slicing, and subset quotas all rely on (measured 12-33%
+            # of some buckets had zero pixels of their nominal script).
+            wsum: dict[int, int] = {}
+            for seg in segs:
+                sid_ = seg.get("script_id", script_id)
+                wsum[sid_] = wsum.get(sid_, 0) + seg.get("width", 0)
+            dom_sid = max(wsum, key=wsum.get) if wsum else script_id
+            dom_name = _sid_to_name.get(dom_sid, primary_script)
+            dom_gid = GROUP_TO_ID[SCRIPT_TO_GROUP[dom_name]]
+
             tids = np.array(all_ids, dtype=np.int64) if all_ids else np.zeros(1, dtype=np.int64)
             sample = {
                 "image": img_np,
                 "label": label,
-                "script_id": script_id,
-                "group_id": group_id,
+                "script_id": dom_sid,
+                "group_id": dom_gid,
                 "target_ids": tids,
                 "target_len": len(all_ids),
                 "width": img_np.shape[2],
@@ -849,10 +916,12 @@ def save_rendered_samples(samples, primary_script, train_dir, val_dir, chunk_id)
             if h_val % 1000 < 100 and val_count < _MAX_VAL_PER_SCRIPT:
                 vw.write(sample)
                 val_widths.append(img_np.shape[2])
+                val_sids.append(dom_sid)
                 val_count += 1
             else:
                 tw.write(sample)
                 train_widths.append(img_np.shape[2])
+                train_sids.append(dom_sid)
 
     # Per-chunk sidecars (widths for batch sizing, script ids for
     # sampling weights). The top-level files are assembled from these in
@@ -864,9 +933,9 @@ def save_rendered_samples(samples, primary_script, train_dir, val_dir, chunk_id)
     np.save(str(Path(v_dir) / "widths.npy"),
             np.array(val_widths, dtype=np.int32))
     np.save(str(Path(t_dir) / "script_ids.npy"),
-            np.full(len(train_widths), script_id, dtype=np.int32))
+            np.array(train_sids, dtype=np.int32))
     np.save(str(Path(v_dir) / "script_ids.npy"),
-            np.full(len(val_widths), script_id, dtype=np.int32))
+            np.array(val_sids, dtype=np.int32))
 
     return len(samples), train_widths, val_widths
 
@@ -909,7 +978,7 @@ def parse_args() -> argparse.Namespace:
                              "keep their default; values are renormalized "
                              "to sum to 1. Tune toward the deployment "
                              "domain (document-heavy → raise printed).")
-    parser.add_argument("--mixed-ratio", type=float, default=0.6,
+    parser.add_argument("--mixed-ratio", type=float, default=0.18,
                         help="Fraction of lines that are mixed-script (default: 0.6)")
     parser.add_argument("--script-boost", type=str, default=None,
                         help="Per-script sample multiplier, e.g. "
@@ -1350,10 +1419,11 @@ def _generate_line_batch(args_tuple):
     while len(samples) < count and attempts < count * 5:
         attempts += 1
 
-        # Decide mixed vs single-script
-        do_mixed = can_mix and random.random() < _worker_mixed_ratio
-
-        if do_mixed:
+        # Decide register: word-crop (short, pure-script — matches the
+        # real corpora's dominant geometry), else mixed vs single line.
+        if random.random() < WORD_CROP_RATIO:
+            plan = _build_word_crop_plan(primary_info)
+        elif can_mix and random.random() < _worker_mixed_ratio:
             plan = _build_mixed_line_plan(group_index, primary_info)
         else:
             plan = _build_single_line_plan(primary_info)
@@ -1389,6 +1459,31 @@ def _generate_line_batch(args_tuple):
     return chunk_id, primary_script, n, tw, vw
 
 
+def _build_word_crop_plan(script_info):
+    """Build a 1-2 word pure-script plan — the word-crop register.
+
+    Real corpora (IIIT words, Mozhi) are dominated by short single-word
+    crops with aspect ratios ~0.6-6; the full-line builders never produce
+    that geometry. No Latin injection: these mimic the monolingual word
+    crops the model is evaluated on.
+    """
+    if script_info is None:
+        return None
+    script, _fonts, words, _gid = script_info
+    n_words = 1 if random.random() < 0.7 else 2
+    casing = sample_line_casing()
+    plan = []
+    for i in range(n_words):
+        if i > 0:
+            plan.append({"text": " ", "script": "whitespace"})
+        word = apply_casing(_sample_word(script, words), script, casing, i)
+        # light native punctuation only (danda, comma) — no serials/URLs
+        word = mix_punctuation(word, p=0.08, script=script)
+        for seg_text, seg_script in split_by_script(word, script):
+            plan.append({"text": seg_text, "script": seg_script})
+    return plan
+
+
 def _build_single_line_plan(script_info):
     """Build a content plan for a single-script line (2-8 words).
 
@@ -1407,12 +1502,12 @@ def _build_single_line_plan(script_info):
     for i in range(n_words):
         if i > 0:
             plan.append({"text": " ", "script": "whitespace"})
-        if script != "latin":
-            _maybe_add_latin_segment(plan)
         word = apply_casing(_sample_word(script, words), script, casing, i)
         word = mix_punctuation(word, p=_worker_punct_prob, script=script)
         for seg_text, seg_script in split_by_script(word, script):
             plan.append({"text": seg_text, "script": seg_script})
+        # At most ONE low-probability injection per word (was 2 calls at
+        # p=0.15 → nearly every line polluted with Latin serials).
         if script != "latin":
             _maybe_add_latin_segment(plan)
     return plan
@@ -1471,13 +1566,13 @@ def _build_mixed_line_plan(group_index, primary_info=None):
     for i, (script, _fonts, words, _gid) in enumerate(chosen):
         if i > 0:
             plan.append({"text": " ", "script": "whitespace"})
-        if script != "latin":
-            _maybe_add_latin_segment(plan)
-            _maybe_add_latin_segment(plan)
         word = apply_casing(_sample_word(script, words), script, casing, i)
         word = mix_punctuation(word, p=_worker_punct_prob, script=script)
         for seg_text, seg_script in split_by_script(word, script):
             plan.append({"text": seg_text, "script": seg_script})
+        # Mixed lines already carry cross-script routing signal from the
+        # chosen-word mix; a single low-p injection is plenty (was 3
+        # calls/word — the main source of serial/URL salad).
         if script != "latin":
             _maybe_add_latin_segment(plan)
     return plan

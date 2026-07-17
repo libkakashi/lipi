@@ -74,6 +74,53 @@ def _border_color(img: Image.Image) -> tuple[int, int, int]:
 # Image quality
 # =========================================================================
 
+def scan_floor(img: Image.Image) -> Image.Image:
+    """Always-on capture floor — applied to EVERY synth render, after any
+    augmentation. Not a degradation op: it removes the pixel-level
+    fingerprints that make vector renders trivially separable from real
+    captures (measured on real-v1-48 vs shards-v11, see synth_gap.py):
+
+      * pure 0/255 extremes (synth 80% of pixels vs real 33%)
+      * hard 1px anti-aliased stroke ramps (soft-edge 0.46 vs real 0.85)
+      * near-black ink (5th-pct luma 18 vs real ~100)
+      * exact R==G==B on every pixel (real: ~half of crops carry tint)
+
+    All ops are size-preserving so pixel-space labels stay valid.
+    """
+    w, h = img.size
+    # 1) de-vectorize stroke edges: fractional resample round trip.
+    if random.random() < 0.8:
+        f = random.uniform(0.62, 0.92)
+        img = img.resize((max(2, int(w * f)), max(2, int(h * f))),
+                         Image.BILINEAR).resize((w, h), Image.BILINEAR)
+    arr = np.asarray(img).astype(np.float32)
+    # 2) level compression on MOST samples: map the luma range onto
+    #    sampled ink/paper targets (linear, same map per channel —
+    #    preserves hue). Real ink runs surprisingly light (5th-pct luma
+    #    IQR ~58-139); keep >=70 luma of contrast for legibility. The
+    #    remap is skipped 20% of the time and paper_t reaches 255, so the
+    #    synth extremes/paper-level DISTRIBUTIONS match real's spread
+    #    (median 0.33 extremes, paper often genuinely 255) instead of
+    #    collapsing to a new, equally-detectable fingerprint at zero.
+    luma = arr.mean(2)
+    lo, hi = np.percentile(luma, 1.0), np.percentile(luma, 99.0)
+    if hi - lo > 20 and random.random() < 0.8:
+        paper_t = random.uniform(218.0, 255.0)
+        ink_t = random.uniform(25.0, min(130.0, paper_t - 70.0))
+        arr = (arr - lo) / (hi - lo)
+        arr = ink_t + arr * (paper_t - ink_t)
+    # 3) tint / channel decorrelation on ~half of samples (matches the
+    #    colored fraction of the real corpus).
+    if random.random() < 0.5:
+        arr = arr + np.random.uniform(-7.0, 7.0, size=3)
+    # 4) faint sensor/paper noise on a minority — real bg noise is LOW
+    #    after the 48px resize (73% of real crops near-zero), don't overdo.
+    if random.random() < 0.4:
+        arr = arr + np.random.normal(
+            0.0, random.uniform(0.3, 1.6), arr.shape)
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+
+
 def jpeg_compress(img: Image.Image) -> Image.Image:
     """JPEG artifacts — scanned/shared documents."""
     quality = random.randint(20, 80)
