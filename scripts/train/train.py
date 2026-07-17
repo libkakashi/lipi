@@ -110,6 +110,11 @@ def parse_args():
                         help="Load --resume checkpoint, run the val eval "
                              "(predicted + oracle routing), and exit. For "
                              "scoring any checkpoint on any --data's val.")
+    parser.add_argument("--route-smooth", action="store_true",
+                        help="Apply inference-time routing diffusion in "
+                             "evals (absorb short blank/foreign LID islands "
+                             "into matching flanks). Eval-time only; "
+                             "training routing is untouched.")
     parser.add_argument("--skip-backbone-load", action="store_true",
                         help="When resuming, skip loading shared/merge/stem/LID "
                              "weights. Loads only experts + CTC heads.")
@@ -1256,7 +1261,8 @@ def main():
                 model, data["val_loader"], data["group_tokenizers"],
                 data["group_script_names"], data["active_groups"],
                 device, device_type, opt["use_amp"], opt["amp_dtype"],
-                group_script_vocab_sizes=data["group_script_vocab_sizes"])
+                group_script_vocab_sizes=data["group_script_vocab_sizes"],
+                route_smooth=args.route_smooth)
             r_gt = evaluate(
                 model, data["val_loader"], data["group_tokenizers"],
                 data["group_script_names"], data["active_groups"],
@@ -1340,7 +1346,8 @@ def main():
                 model, data["val_loader"], data["group_tokenizers"],
                 data["group_script_names"], data["active_groups"],
                 device, device_type, opt["use_amp"], opt["amp_dtype"],
-                group_script_vocab_sizes=data["group_script_vocab_sizes"])
+                group_script_vocab_sizes=data["group_script_vocab_sizes"],
+                route_smooth=args.route_smooth)
             r_gt = evaluate(
                 model, data["val_loader"], data["group_tokenizers"],
                 data["group_script_names"], data["active_groups"],

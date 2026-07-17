@@ -115,10 +115,13 @@ def _batched_ctc_val_loss(logits, segments_batch, group_script_names,
 def evaluate(model, val_loader, group_tokenizers, group_script_names,
              active_groups, device, device_type, use_amp, amp_dtype,
              group_script_vocab_sizes=None, max_batches=50,
-             oracle_routing=False):
+             oracle_routing=False, route_smooth=False):
     """oracle_routing=True feeds ground-truth frame group/script ids to the
     model instead of letting LID route. The word/char delta between the two
-    modes IS the routing tax — the accuracy lost to LID misroutes alone."""
+    modes IS the routing tax — the accuracy lost to LID misroutes alone.
+    route_smooth=True applies inference-time routing diffusion (absorb
+    short blank/foreign islands into matching flanks) to the predicted
+    routing; no effect under oracle_routing."""
     model.eval()
     n_groups = len(group_tokenizers)
     # Emission slots per frame (2 for the v6 encoder; compiled wrappers
@@ -179,7 +182,8 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
             if oracle_routing:
                 out = model(imgs, group_ids=gl_gt, script_ids=sl_gt)
             else:
-                out = model(imgs, group_ids=None)
+                out = model(imgs, group_ids=None,
+                            route_smooth=route_smooth)
 
         T = out["group_logits"].shape[1]
         # LID-1 metric target: span-based (what routing/CTC decode need a
@@ -360,7 +364,8 @@ def evaluate(model, val_loader, group_tokenizers, group_script_names,
     ctc_acc_cs = 100 * ctc_correct_cs / max(ctc_total, 1)
     line_acc = 100 * line_correct / max(line_total, 1)
     wordseg_acc = 100 * wordseg_correct / max(wordseg_total, 1)
-    mode = "ORACLE GT routing" if oracle_routing else "predicted routing"
+    mode = ("ORACLE GT routing" if oracle_routing
+            else "pred+smooth" if route_smooth else "predicted routing")
     print(f"\n  ┌──────────────────────────────────────────────┐")
     print(f"  │  [{mode:<17s}]                        │")
     print(f"  │  LID-1: {lid1_frame_acc:5.1f}%   LID-2: {lid2_acc:5.1f}%              │")

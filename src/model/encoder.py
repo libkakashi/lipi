@@ -539,6 +539,41 @@ class LipiMoEEncoder(nn.Module):
                 0, pos, torch.cat(outs) if len(outs) > 1 else outs[0])
         return fb.reshape(B, T, self.enc_out_dim)
 
+    def _smooth_routing(self, fg: Tensor) -> Tensor:
+        """Inference-time routing diffusion (eval/deploy only, never
+        training): absorb short spurious runs into identical flanks.
+
+        Cost asymmetry motivates this: a text frame misrouted to blank
+        gets all-zero logits → argmax=0 → forced CTC blank → silent
+        character deletion, while a genuine space frame routed to a
+        script is harmless (that script's head can still emit blank).
+        Rules, two passes so shrinking runs collapse fully:
+          - any length-1 island between identical flanks → absorbed
+            (han han BLANK han → han; also fixes wrong-group islands)
+          - length-2 blank runs between identical non-blank flanks →
+            absorbed
+        """
+        for _ in range(2):
+            if fg.shape[1] < 3:
+                break
+            left, mid, right = fg[:, :-2], fg[:, 1:-1], fg[:, 2:]
+            iso = (mid != left) & (left == right)
+            out = fg.clone()
+            out[:, 1:-1] = torch.where(iso, left, mid)
+            fg = out
+            if fg.shape[1] >= 4:
+                a = fg[:, 1:-2]
+                b = fg[:, 2:-1]
+                l2, r2 = fg[:, :-3], fg[:, 3:]
+                pair = ((a == self.blank_group_id)
+                        & (b == self.blank_group_id)
+                        & (l2 == r2) & (l2 != self.blank_group_id))
+                out = fg.clone()
+                out[:, 1:-2] = torch.where(pair, l2, a)
+                out[:, 2:-1] = torch.where(pair, l2, b)
+                fg = out
+        return fg
+
     def _get_flat_script_ids(self, group_ids, script_ids):
         """Convert (group_id, local_script_id) pairs to flat script indices.
         Blank/whitespace frames (group_id == blank_group_id) get flat_id = -1.
@@ -623,6 +658,7 @@ class LipiMoEEncoder(nn.Module):
         detach_for_experts: bool = False,
         compute_ctc: bool = True,
         route_sample_p: float = 0.0,
+        route_smooth: bool = False,
     ) -> dict:
         """Run the encoder forward pass.
 
@@ -681,6 +717,8 @@ class LipiMoEEncoder(nn.Module):
                 frame_groups, torch.full_like(frame_groups, self.blank_group_id))
         else:
             frame_groups = group_logits.argmax(dim=-1)
+            if route_smooth:
+                frame_groups = self._smooth_routing(frame_groups)
 
         # Scheduled sampling: a random subset of frames routes by LID-1's
         # prediction instead of GT (script-stage counterpart below).
