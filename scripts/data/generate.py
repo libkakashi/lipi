@@ -339,7 +339,15 @@ def _maybe_add_latin_segment(plan, p=0.04):
     """
     if random.random() > p:
         return
-    plan.append({"text": _random_latin_segment(), "script": "latin", "live": True})
+    # Real text sets numbers/URLs/dates off with a space — gluing them to
+    # the preceding word (word[NOGAP]www.acme.in) is a pattern real
+    # documents essentially never produce. Keep a small attached share for
+    # forms like "word:80". size_scale compensates Latin's larger optical
+    # size vs most host scripts (measured ~1.5x x-height mid-line).
+    if plan and random.random() < 0.85:
+        plan.append({"text": " ", "script": "whitespace"})
+    plan.append({"text": _random_latin_segment(), "script": "latin",
+                 "live": True, "size_scale": random.uniform(0.72, 0.95)})
 
 
 # ---------------------------------------------------------------------------
@@ -656,7 +664,11 @@ def _render_plan_line(plan, fonts_by_script, h, mw):
             line_fonts.setdefault(script, font)
             line_weights.setdefault(script, weight)
 
-        rendered = render_word_baseline(text, font, font_size, weight)
+        # Injected segments carry size_scale to match the host script's
+        # optical size (Latin at nominal size runs ~1.5x the x-height of
+        # most host scripts — real mixed text is set optically matched).
+        seg_size = max(10, int(font_size * item.get("size_scale", 1.0)))
+        rendered = render_word_baseline(text, font, seg_size, weight)
         if rendered is None or not image_has_ink(rendered[0]):
             return None
         img, baseline = rendered
@@ -854,7 +866,7 @@ def save_rendered_samples(samples, primary_script, train_dir, val_dir, chunk_id)
 
     import hashlib
     from streaming import MDSWriter
-    from src.encoding.decompose import encode_text
+    from src.encoding.decompose import encode_text, decode_ids
 
     script_id = SCRIPT_TO_ID[primary_script]
     group_id = GROUP_TO_ID[SCRIPT_TO_GROUP[primary_script]]
@@ -882,11 +894,22 @@ def save_rendered_samples(samples, primary_script, train_dir, val_dir, chunk_id)
         for idx, (img_tensor, label, gl, segs) in enumerate(samples):
             img_np = img_tensor.numpy()
 
-            # Encode target_ids per-segment for correct mixed-script encoding
+            # Encode target_ids per-segment for correct mixed-script encoding.
+            # Round-trip gate (mirrors the real writer's): a character the
+            # codec can't represent is silently DROPPED by encode, leaving
+            # pixels the targets don't contain — label noise with no error.
+            # (Caught live: ₹/€ render fine but aren't in the latin vocab.)
             all_ids = []
+            rt_ok = True
             for seg in segs:
                 seg_script = _sid_to_name.get(seg.get("script_id", 0), primary_script)
-                all_ids.extend(encode_text(seg["text"], seg_script))
+                ids = encode_text(seg["text"], seg_script)
+                if decode_ids(ids, seg_script) != seg["text"]:
+                    rt_ok = False
+                    break
+                all_ids.extend(ids)
+            if not rt_ok:
+                continue  # skip sample: pixels would exceed targets
 
             # Sample-level script = DOMINANT script by pixel width, not the
             # chunk's primary: mixed lines whose majority is another script
