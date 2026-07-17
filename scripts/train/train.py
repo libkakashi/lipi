@@ -106,6 +106,10 @@ def parse_args():
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--save-dir", type=str, default="checkpoints/moe")
     parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--eval-only", action="store_true",
+                        help="Load --resume checkpoint, run the val eval "
+                             "(predicted + oracle routing), and exit. For "
+                             "scoring any checkpoint on any --data's val.")
     parser.add_argument("--skip-backbone-load", action="store_true",
                         help="When resuming, skip loading shared/merge/stem/LID "
                              "weights. Loads only experts + CTC heads.")
@@ -1239,6 +1243,36 @@ def main():
     ce_loss_fn = nn.CrossEntropyLoss(label_smoothing=0.1)  # ignore_index=-100 skips padding
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.eval_only:
+        # Score the resumed checkpoint on this --data's val and exit —
+        # lets any checkpoint be measured on any val (frozen-benchmark
+        # cross-evals). Mirrors the epoch-end eval incl. EMA weights and
+        # the predicted-vs-oracle routing pair.
+        print(f"\nEVAL-ONLY: checkpoint on {args.data}/val")
+
+        def _eval_pair():
+            r_pred = evaluate(
+                model, data["val_loader"], data["group_tokenizers"],
+                data["group_script_names"], data["active_groups"],
+                device, device_type, opt["use_amp"], opt["amp_dtype"],
+                group_script_vocab_sizes=data["group_script_vocab_sizes"])
+            r_gt = evaluate(
+                model, data["val_loader"], data["group_tokenizers"],
+                data["group_script_names"], data["active_groups"],
+                device, device_type, opt["use_amp"], opt["amp_dtype"],
+                group_script_vocab_sizes=data["group_script_vocab_sizes"],
+                oracle_routing=True)
+            print(f"  ROUTING TAX: word "
+                  f"{r_gt['word_acc'] - r_pred['word_acc']:+.1f} "
+                  f"char {r_gt['char_acc'] - r_pred['char_acc']:+.1f}")
+
+        if ema is not None and ema.updates > 0:
+            with ema.average_parameters(base_model):
+                _eval_pair()
+        else:
+            _eval_pair()
+        return
 
     caps = [capacities[w] for w in bucket_edges]
     print(f"\n{'=' * 60}")
