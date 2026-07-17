@@ -16,6 +16,7 @@ import time
 
 import numpy as np
 from pathlib import Path
+from PIL import Image
 from multiprocessing import Pool
 
 import torch
