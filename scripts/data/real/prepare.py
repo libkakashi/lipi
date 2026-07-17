@@ -373,6 +373,117 @@ def _parse_bmod(extract_dir: Path):
                 yield img, text
 
 
+def _parse_ndl_tsv(extract: Path):
+    """NDL ocr-ndloneline: pre-cropped line JPGs + labeldata_pdm.tsv.
+
+    TSV columns: filename, text, orientation (tate=vertical / yoko=
+    horizontal), IIIF URL. The TSV lives in the GitHub repo, not the image
+    zip — fetch it here. Vertical (tate) lines are skipped: the model
+    reads horizontal lines only.
+    """
+    import csv
+    import requests
+
+    tsv = None
+    for branch in ("main", "master"):
+        url = ("https://raw.githubusercontent.com/ndl-lab/ocr-ndloneline/"
+               f"{branch}/labeldata_pdm.tsv")
+        r = requests.get(url, timeout=60)
+        if r.ok and r.text.strip():
+            tsv = r.text
+            break
+    if tsv is None:
+        raise RuntimeError("could not fetch labeldata_pdm.tsv")
+
+    by_name = {p.name: p for p in extract.rglob("*.jpg")}
+    n_tate = 0
+    for row in csv.reader(tsv.splitlines(), delimiter="\t"):
+        if len(row) < 3:
+            continue
+        fname, text, orient = row[0], row[1], row[2]
+        if orient.strip() == "tate":
+            n_tate += 1
+            continue
+        p = by_name.get(Path(fname).name)
+        if p is not None and text.strip():
+            yield p, text
+    print(f"  [ndl] skipped {n_tate} vertical (tate) lines", flush=True)
+
+
+def ingest_lmdb_gdrive(spec: SourceSpec, out: Path, height: int,
+                       max_width: int, val_ratio: float,
+                       limit: int | None) -> dict:
+    """FudanVI-style lmdb sets shared as a Google Drive folder.
+
+    Downloads the folder with gdown, then reads every lmdb whose path
+    contains one of spec.configs (e.g. 'scene', 'web') and skips
+    'document' (synthetic Text-Renderer data — this loader exists
+    precisely because the HF mirror can't exclude it) and any 'test'
+    split. lmdb layout is the standard STR one: num-samples,
+    image-%09d (encoded bytes), label-%09d (utf-8 text).
+    """
+    import io
+
+    import gdown
+    import lmdb
+    from PIL import Image
+
+    writer = RealChunkWriter(out, spec.name, val_ratio=val_ratio)
+    t0 = time.time()
+    seen = 0
+    work = Path("/tmp/real-lmdb")
+    wanted = tuple(s.lower() for s in spec.configs) or ("scene", "web")
+    try:
+        work.mkdir(parents=True, exist_ok=True)
+        for url, script in spec.urls:
+            print(f"{spec.name}: gdown folder {url}", flush=True)
+            gdown.download_folder(url=url, output=str(work), quiet=False,
+                                  use_cookies=False)
+            mdbs = sorted(work.rglob("data.mdb"))
+            print(f"  found {len(mdbs)} lmdb dirs: "
+                  f"{[str(m.parent.relative_to(work)) for m in mdbs]}",
+                  flush=True)
+            for mdb in mdbs:
+                rel = str(mdb.parent.relative_to(work)).lower()
+                if "test" in rel or "document" in rel:
+                    continue
+                if not any(w in rel for w in wanted):
+                    continue
+                env = lmdb.open(str(mdb.parent), readonly=True, lock=False,
+                                readahead=False, meminit=False)
+                with env.begin() as txn:
+                    n = int(txn.get(b"num-samples") or b"0")
+                    print(f"  [{rel}] {n} samples", flush=True)
+                    for i in range(1, n + 1):
+                        if limit is not None and seen >= limit:
+                            break
+                        seen += 1
+                        img_b = txn.get(f"image-{i:09d}".encode())
+                        lab_b = txn.get(f"label-{i:09d}".encode())
+                        if not img_b or not lab_b:
+                            writer.stats["missing_kv"] += 1
+                            continue
+                        try:
+                            img = Image.open(io.BytesIO(img_b))
+                            img.load()
+                            writer.add(img, lab_b.decode("utf-8"), script,
+                                       height, max_width)
+                        except Exception:
+                            writer.stats["sample_error"] += 1
+                        if seen % 20_000 == 0:
+                            kept = sum(writer.script_counts.values())
+                            print(f"  {seen} rows → {kept} kept", flush=True)
+                env.close()
+    finally:
+        import shutil
+        shutil.rmtree(work, ignore_errors=True)
+
+    report = writer.close()
+    report["rows_seen"] = seen
+    report["seconds"] = round(time.time() - t0, 1)
+    return report
+
+
 def ingest_url_zip(spec: SourceSpec, out: Path, height: int, max_width: int,
                    val_ratio: float, limit: int | None) -> dict:
     """Download annotation zips (IIIT-style) and ingest word/line crops."""
@@ -406,20 +517,28 @@ def ingest_url_zip(spec: SourceSpec, out: Path, height: int, max_width: int,
                 try:
                     print(f"{spec.name}: downloading {url} "
                           f"(attempt {attempt + 1})", flush=True)
-                    # requests follows multi-hop redirects (303→301→stream)
-                    # and streams robustly — urllib silently returned 0 bytes
-                    # on Dataverse's bundle-download redirect chain.
-                    import requests
                     expected = 0
-                    with requests.get(
-                            url, stream=True, timeout=120, allow_redirects=True,
-                            headers={"User-Agent": "Mozilla/5.0 (lipi-prep)"}
-                    ) as r:
-                        r.raise_for_status()
-                        expected = int(r.headers.get("Content-Length") or 0)
-                        with open(zpath, "wb") as f:
-                            for chunk in r.iter_content(1 << 20):
-                                f.write(chunk)
+                    if url.startswith("gdrive:"):
+                        # Google Drive file: requests can't pass the
+                        # large-file confirm interstitial; gdown can.
+                        import gdown
+                        gdown.download(id=url[len("gdrive:"):],
+                                       output=str(zpath), quiet=False)
+                    else:
+                        # requests follows multi-hop redirects (303→301→
+                        # stream) and streams robustly — urllib silently
+                        # returned 0 bytes on Dataverse's redirect chain.
+                        import requests
+                        with requests.get(
+                                url, stream=True, timeout=120,
+                                allow_redirects=True,
+                                headers={"User-Agent": "Mozilla/5.0 (lipi-prep)"}
+                        ) as r:
+                            r.raise_for_status()
+                            expected = int(r.headers.get("Content-Length") or 0)
+                            with open(zpath, "wb") as f:
+                                for chunk in r.iter_content(1 << 20):
+                                    f.write(chunk)
                     got = zpath.stat().st_size
                     if got == 0:
                         raise IOError("downloaded 0 bytes")
@@ -481,6 +600,9 @@ def ingest_url_zip(spec: SourceSpec, out: Path, height: int, max_width: int,
                   f"exts={dict(_ext)}; sample={_sample}", flush=True)
 
             def _split_then_pairs():
+                if spec.loader == "ndl_tsv":
+                    yield from _parse_ndl_tsv(extract)
+                    return
                 if spec.loader == "alto_zip":
                     yield from _parse_alto(extract)
                     return
@@ -742,7 +864,9 @@ def main():
             continue
         loaders = {"hub": ingest, "url_zip": ingest_url_zip,
                    "uc_zip": ingest_url_zip, "alto_zip": ingest_url_zip,
-                   "bmod_zip": ingest_url_zip, "hub_url_image": ingest_hub_url}
+                   "bmod_zip": ingest_url_zip, "ndl_tsv": ingest_url_zip,
+                   "lmdb_gdrive": ingest_lmdb_gdrive,
+                   "hub_url_image": ingest_hub_url}
         loader_fn = loaders.get(spec.loader)
         if loader_fn is None:
             print(f"SKIP {name}: needs custom loader {spec.loader!r} "

@@ -220,6 +220,30 @@ REGISTRY: dict[str, SourceSpec] = {s.name: s for s in [
     SourceSpec("tibetan_derge", "openpecha/OCR-Dergetenjur", "tibetan", 2,
                loader="hub_url_image", notes="~845K Derge Tenjur woodblock "
                                              "lines, S3 URLs"),
+    # ── CJK acquisitions (2026-07 research sweep) ─────────────────────
+    SourceSpec("fudanvi", "github.com/FudanVI", "han", 2,
+               loader="lmdb_gdrive",
+               configs=("scene", "web"),
+               urls=[("https://drive.google.com/drive/folders/"
+                      "1J-3klWJasVJTL32FOKaFXZykKwN6Wni5", "han")],
+               notes="FudanVI real Chinese line crops: scene ~636K + web "
+                     "~140K (lmdb). SKIPS the 'document' lmdb — that split "
+                     "is synthetic Text-Renderer output. Research use."),
+    SourceSpec("korie", "github.com/MahmoudSalah/KORIE", "korean", 2,
+               loader="url_zip",
+               urls=[("gdrive:1I4BzOqKgF7zbNPlNeood4f7g8pi2xh26", "korean"),
+                     ("gdrive:1v_0iGpBjB5WdWOeKI4C903eeqkRBjTsM", "korean")],
+               notes="KORIE Korean retail receipts, ~17.5K word crops "
+                     "(train+val; test skipped). License unspecified — "
+                     "contact author; tier-2."),
+    SourceSpec("ndl_oneline", "github.com/ndl-lab/ocr-ndloneline", "kana", 1,
+               loader="ndl_tsv",
+               urls=[("https://lab.ndl.go.jp/dataset/ocronelinedataset/"
+                      "ocronelinedataset_pdm.zip", "kana")],
+               notes="NDL pre-cropped Japanese lines + TSV labels, Public "
+                     "Domain Mark. Horizontal (yoko) only; kanji+kana mixed "
+                     "lines drop at the single-script gate — pure runs "
+                     "survive as han/kana."),
 ]}
 
 

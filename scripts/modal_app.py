@@ -121,7 +121,11 @@ runs_vol = modal.Volume.from_name("lipi-runs", create_if_missing=True)
 # Real-data ingestion pulls from the HF hub; the training image doesn't
 # need those deps, so keep them in a derived layer.
 prep_image = image.pip_install("datasets>=3.0.0", "hf_transfer>=0.1.6",
-                               "requests>=2.31.0")
+                               "requests>=2.31.0",
+                               # CJK sources: FudanVI lmdbs via a GDrive
+                               # folder (gdown) read with lmdb; KORIE zips
+                               # are GDrive files (large-file confirm).
+                               "gdown>=5.0.0", "lmdb>=1.4.0")
 _VOLUMES = {_ASSETS: assets_vol, _DATA: data_vol, _RUNS: runs_vol}
 
 _CKPT_RE = re.compile(r"moe_epoch(\d+)\.pt$")
