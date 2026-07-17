@@ -65,6 +65,10 @@ SOURCE_DOMAIN = {
     "riks_frihetstiden": "hw", "riks_alvsborg": "hw",
     "tibetan_cursive": "hw",
     # clean / typeset / camera print
+    # (fudanvi is scene/web camera text — tagged printed so it fills Han's
+    # otherwise-empty real quota; korie is thermal receipt print; ndl is
+    # movable-type scans)
+    "fudanvi": "printed", "korie": "printed", "ndl_oneline": "printed",
     "mozhi": "printed", "tibetan_gbooks": "printed",
     "tibetan_norbuketaka": "printed", "tibetan_uchan": "printed",
     "tibetan_khyentse": "printed", "tibetan_drutsa": "printed",
