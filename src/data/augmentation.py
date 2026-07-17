@@ -104,20 +104,29 @@ def scan_floor(img: Image.Image) -> Image.Image:
     #    collapsing to a new, equally-detectable fingerprint at zero.
     luma = arr.mean(2)
     lo, hi = np.percentile(luma, 1.0), np.percentile(luma, 99.0)
-    if hi - lo > 20 and random.random() < 0.8:
-        paper_t = random.uniform(218.0, 255.0)
+    if hi - lo > 20 and random.random() < 0.65:
+        # 35% of remapped samples keep genuinely white paper — measured
+        # real paper level is 255 at the median; only the ink lifts.
+        paper_t = 255.0 if random.random() < 0.35 else random.uniform(218.0, 252.0)
         ink_t = random.uniform(25.0, min(130.0, paper_t - 70.0))
         arr = (arr - lo) / (hi - lo)
         arr = ink_t + arr * (paper_t - ink_t)
-    # 3) tint / channel decorrelation on ~half of samples (matches the
-    #    colored fraction of the real corpus).
-    if random.random() < 0.5:
+    # 3) tint / channel decorrelation on ~1/4 of samples (real corpus is
+    #    ~75% exact-grayscale; 0.5 overshot and made synth too colorful).
+    if random.random() < 0.28:
         arr = arr + np.random.uniform(-7.0, 7.0, size=3)
     # 4) faint sensor/paper noise on a minority — real bg noise is LOW
-    #    after the 48px resize (73% of real crops near-zero), don't overdo.
+    #    after the 48px resize (73% of real crops near-zero). Mostly
+    #    LUMA-correlated noise (same across channels): independent
+    #    per-channel noise silently decorrelates R/G/B, which real
+    #    grayscale scans don't show.
     if random.random() < 0.4:
-        arr = arr + np.random.normal(
-            0.0, random.uniform(0.3, 1.6), arr.shape)
+        sd = random.uniform(0.3, 1.6)
+        if random.random() < 0.75:
+            n = np.random.normal(0.0, sd, arr.shape[:2])[..., None]
+        else:
+            n = np.random.normal(0.0, sd, arr.shape)
+        arr = arr + n
     return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
 
 
