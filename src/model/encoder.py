@@ -553,6 +553,8 @@ class LipiMoEEncoder(nn.Module):
     ROUTE_SWITCH_BLANK = 2.0   # X->blank / blank->X transition cost
     ROUTE_SWITCH_DIRECT = 4.0  # X->Y direct script-group switch cost
     ROUTE_BLANK_BIAS = 1.0     # subtracted from blank emissions
+    ROUTE_ISO_MARGIN = 3.0     # evidence margin that lets a length-1
+    #                            island survive the duration prior
 
     def _smooth_routing(self, group_logits: Tensor) -> Tensor:
         """Viterbi decode of frame routing from LID-1 logits (see costs
@@ -583,39 +585,56 @@ class LipiMoEEncoder(nn.Module):
         for t in range(T - 1, 0, -1):
             path[:, t - 1] = back[:, t].gather(
                 1, path[:, t:t + 1]).squeeze(1)
-        # Physical-realizability pass: a length-1 run (4px) of a
-        # DIFFERENT class between agreeing flanks cannot be a real
-        # character of another script — no script has a 4px glyph — so
-        # absorb it regardless of confidence. Viterbi's cost arithmetic
-        # handles the low-confidence case; this catches confident-but-
-        # impossible islands the emissions outbid. Length-2 runs (8px)
-        # are left to the costs: thin genuine Latin glyphs live there.
+        # Soft duration prior: a length-1 run (4px) between agreeing
+        # flanks is UNLIKELY to be a real foreign character — but not
+        # impossible ('.', '1', 'l' run 2-6px), so this is a prior with
+        # a confidence override, not a veto: absorb only when the
+        # island's evidence margin over the flank class on that frame is
+        # below ROUTE_ISO_MARGIN. A confidently-seen thin glyph survives;
+        # absorbing a genuine one would be a deletion — the same error
+        # magnitude we're preventing.
         if T >= 3:
             left, mid, right = path[:, :-2], path[:, 1:-1], path[:, 2:]
             iso = (mid != left) & (left == right)
+            lp_mid = logp[:, 1:-1]
+            adv = (lp_mid.gather(2, mid.unsqueeze(2))
+                   - lp_mid.gather(2, left.unsqueeze(2))).squeeze(2)
+            weak = adv < self.ROUTE_ISO_MARGIN
             out = path.clone()
-            out[:, 1:-1] = torch.where(iso, left, mid)
+            out[:, 1:-1] = torch.where(iso & weak, left, mid)
             path = out
         return path
 
     def _vote_lid2_runs(self, frame_groups: Tensor, g: int,
                         lid2_log: Tensor, g_mask: Tensor) -> Tensor:
-        """Segment-constant LID-2: each contiguous run of group g votes
-        once (posterior-summed argmax over the run) instead of per-frame
-        argmax. Within one word the script cannot change; per-frame
-        flicker (e.g. telugu<->kannada mid-word) is noise that fragments
-        expert routing and decoding."""
+        """LID-2 smoothing via within-group Viterbi (not winner-take-all:
+        real text DOES change script mid-run — code-mixing, glued
+        same-group segments — so consensus must suppress per-frame
+        flicker without forbidding sustained changes). Sibling-script
+        switch cost = ROUTE_SWITCH_DIRECT: a mid-word telugu<->kannada
+        flicker frame loses to its flanks, but a run of frames with real
+        evidence for the other script pays the switch once and keeps it.
+        """
         B, T, S = lid2_log.shape
-        change = torch.ones_like(frame_groups, dtype=torch.bool)
-        change[:, 1:] = frame_groups[:, 1:] != frame_groups[:, :-1]
-        run_id = change.cumsum(dim=1) - 1                    # (B, T)
-        flat_run = (torch.arange(B, device=run_id.device)
-                    .unsqueeze(1) * T + run_id)              # unique ids
-        post = lid2_log.softmax(-1)
-        sums = post.new_zeros(B * T, S)
-        sums.index_add_(0, flat_run[g_mask], post[g_mask])
-        winner = sums.argmax(-1)                             # per flat run
-        return winner[flat_run]
+        if S == 1 or T == 1:
+            return lid2_log.argmax(dim=-1)
+        logp = lid2_log.log_softmax(-1).float()
+        C = lid2_log.new_full((S, S), self.ROUTE_SWITCH_DIRECT).float()
+        C.fill_diagonal_(0.0)
+        delta = logp[:, 0]
+        back = torch.empty(B, T, S, dtype=torch.long,
+                           device=lid2_log.device)
+        for t in range(1, T):
+            scores = delta.unsqueeze(2) - C.unsqueeze(0)
+            best, arg = scores.max(dim=1)
+            delta = best + logp[:, t]
+            back[:, t] = arg
+        path = torch.empty(B, T, dtype=torch.long, device=lid2_log.device)
+        path[:, T - 1] = delta.argmax(-1)
+        for t in range(T - 1, 0, -1):
+            path[:, t - 1] = back[:, t].gather(
+                1, path[:, t:t + 1]).squeeze(1)
+        return path
 
     def _get_flat_script_ids(self, group_ids, script_ids):
         """Convert (group_id, local_script_id) pairs to flat script indices.
