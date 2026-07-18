@@ -583,6 +583,19 @@ class LipiMoEEncoder(nn.Module):
         for t in range(T - 1, 0, -1):
             path[:, t - 1] = back[:, t].gather(
                 1, path[:, t:t + 1]).squeeze(1)
+        # Physical-realizability pass: a length-1 run (4px) of a
+        # DIFFERENT class between agreeing flanks cannot be a real
+        # character of another script — no script has a 4px glyph — so
+        # absorb it regardless of confidence. Viterbi's cost arithmetic
+        # handles the low-confidence case; this catches confident-but-
+        # impossible islands the emissions outbid. Length-2 runs (8px)
+        # are left to the costs: thin genuine Latin glyphs live there.
+        if T >= 3:
+            left, mid, right = path[:, :-2], path[:, 1:-1], path[:, 2:]
+            iso = (mid != left) & (left == right)
+            out = path.clone()
+            out[:, 1:-1] = torch.where(iso, left, mid)
+            path = out
         return path
 
     def _vote_lid2_runs(self, frame_groups: Tensor, g: int,
