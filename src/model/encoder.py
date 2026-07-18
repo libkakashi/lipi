@@ -539,40 +539,70 @@ class LipiMoEEncoder(nn.Module):
                 0, pos, torch.cat(outs) if len(outs) > 1 else outs[0])
         return fb.reshape(B, T, self.enc_out_dim)
 
-    def _smooth_routing(self, fg: Tensor) -> Tensor:
-        """Inference-time routing diffusion (eval/deploy only, never
-        training): absorb short spurious runs into identical flanks.
+    # Routing-decode costs (log-units), eval/deploy only. The true routing
+    # signal is piecewise-constant runs (words >= 2 frames separated by
+    # 1-6 frame gaps), so decode the max-probability PATH through the
+    # LID-1 posteriors instead of per-frame argmax. Asymmetries encoded:
+    #   - blank transitions cheap (script->gap->script is how lines work),
+    #     direct scriptA->scriptB expensive (glued script changes are rare)
+    #     -> at an A-gap-B boundary Viterbi places ONE clean crossover
+    #     where posterior mass flips, instead of argmax's ragged zigzag.
+    #   - blank carries a prior penalty: routing a text frame to blank
+    #     forces a CTC deletion (zero logits), while routing a gap frame
+    #     to a script is harmless (the head can still emit blank).
+    ROUTE_SWITCH_BLANK = 2.0   # X->blank / blank->X transition cost
+    ROUTE_SWITCH_DIRECT = 4.0  # X->Y direct script-group switch cost
+    ROUTE_BLANK_BIAS = 1.0     # subtracted from blank emissions
 
-        Cost asymmetry motivates this: a text frame misrouted to blank
-        gets all-zero logits → argmax=0 → forced CTC blank → silent
-        character deletion, while a genuine space frame routed to a
-        script is harmless (that script's head can still emit blank).
-        Rules, two passes so shrinking runs collapse fully:
-          - any length-1 island between identical flanks → absorbed
-            (han han BLANK han → han; also fixes wrong-group islands)
-          - length-2 blank runs between identical non-blank flanks →
-            absorbed
-        """
-        for _ in range(2):
-            if fg.shape[1] < 3:
-                break
-            left, mid, right = fg[:, :-2], fg[:, 1:-1], fg[:, 2:]
-            iso = (mid != left) & (left == right)
-            out = fg.clone()
-            out[:, 1:-1] = torch.where(iso, left, mid)
-            fg = out
-            if fg.shape[1] >= 4:
-                a = fg[:, 1:-2]
-                b = fg[:, 2:-1]
-                l2, r2 = fg[:, :-3], fg[:, 3:]
-                pair = ((a == self.blank_group_id)
-                        & (b == self.blank_group_id)
-                        & (l2 == r2) & (l2 != self.blank_group_id))
-                out = fg.clone()
-                out[:, 1:-2] = torch.where(pair, l2, a)
-                out[:, 2:-1] = torch.where(pair, l2, b)
-                fg = out
-        return fg
+    def _smooth_routing(self, group_logits: Tensor) -> Tensor:
+        """Viterbi decode of frame routing from LID-1 logits (see costs
+        above). O(K^2 T) with K=15 states — negligible next to the trunk.
+        Low-confidence clustered misroutes get overridden by confident
+        flanks (two switches cost more than weak frames' preference),
+        which the old isolated-island absorption could not reach."""
+        B, T, K = group_logits.shape
+        logp = group_logits.log_softmax(-1).float()
+        logp[..., self.blank_group_id] -= self.ROUTE_BLANK_BIAS
+        # Transition cost matrix (from, to)
+        C = group_logits.new_full((K, K), self.ROUTE_SWITCH_DIRECT).float()
+        C[self.blank_group_id, :] = self.ROUTE_SWITCH_BLANK
+        C[:, self.blank_group_id] = self.ROUTE_SWITCH_BLANK
+        C.fill_diagonal_(0.0)
+        delta = logp[:, 0]                       # (B, K)
+        back = torch.empty(B, T, K, dtype=torch.long,
+                           device=group_logits.device)
+        for t in range(1, T):
+            # (B, K_from, K_to)
+            scores = delta.unsqueeze(2) - C.unsqueeze(0)
+            best, arg = scores.max(dim=1)
+            delta = best + logp[:, t]
+            back[:, t] = arg
+        path = torch.empty(B, T, dtype=torch.long,
+                           device=group_logits.device)
+        path[:, T - 1] = delta.argmax(-1)
+        for t in range(T - 1, 0, -1):
+            path[:, t - 1] = back[:, t].gather(
+                1, path[:, t:t + 1]).squeeze(1)
+        return path
+
+    def _vote_lid2_runs(self, frame_groups: Tensor, g: int,
+                        lid2_log: Tensor, g_mask: Tensor) -> Tensor:
+        """Segment-constant LID-2: each contiguous run of group g votes
+        once (posterior-summed argmax over the run) instead of per-frame
+        argmax. Within one word the script cannot change; per-frame
+        flicker (e.g. telugu<->kannada mid-word) is noise that fragments
+        expert routing and decoding."""
+        B, T, S = lid2_log.shape
+        change = torch.ones_like(frame_groups, dtype=torch.bool)
+        change[:, 1:] = frame_groups[:, 1:] != frame_groups[:, :-1]
+        run_id = change.cumsum(dim=1) - 1                    # (B, T)
+        flat_run = (torch.arange(B, device=run_id.device)
+                    .unsqueeze(1) * T + run_id)              # unique ids
+        post = lid2_log.softmax(-1)
+        sums = post.new_zeros(B * T, S)
+        sums.index_add_(0, flat_run[g_mask], post[g_mask])
+        winner = sums.argmax(-1)                             # per flat run
+        return winner[flat_run]
 
     def _get_flat_script_ids(self, group_ids, script_ids):
         """Convert (group_id, local_script_id) pairs to flat script indices.
@@ -716,9 +746,10 @@ class LipiMoEEncoder(nn.Module):
                 (frame_groups >= 0) & (frame_groups <= self.blank_group_id),
                 frame_groups, torch.full_like(frame_groups, self.blank_group_id))
         else:
-            frame_groups = group_logits.argmax(dim=-1)
             if route_smooth:
-                frame_groups = self._smooth_routing(frame_groups)
+                frame_groups = self._smooth_routing(group_logits)
+            else:
+                frame_groups = group_logits.argmax(dim=-1)
 
         # Scheduled sampling: a random subset of frames routes by LID-1's
         # prediction instead of GT (script-stage counterpart below).
@@ -798,7 +829,12 @@ class LipiMoEEncoder(nn.Module):
                 if not any(group_lens_cpu[b][g] > 0 for b in range(B)):
                     continue
                 g_mask = (frame_groups == g)
-                pred = lid2_log.argmax(dim=-1)  # (B, T)
+                if route_smooth:
+                    # Segment-constant script per contiguous group run.
+                    pred = self._vote_lid2_runs(frame_groups, g,
+                                                lid2_log, g_mask)
+                else:
+                    pred = lid2_log.argmax(dim=-1)  # (B, T)
                 frame_scripts[g_mask] = pred[g_mask]
 
         if sample_mask is not None:
